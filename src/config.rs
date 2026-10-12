@@ -77,14 +77,6 @@ pub struct Config {
     /// no tokenization. The gRPC surface is unchanged.
     #[serde(default)]
     pub mock_mode: bool,
-    /// How many workers `/api/snapshot` carries telemetry for. Defaults to
-    /// [`DEFAULT_TELEMETRY_MAX_WORKERS`].
-    ///
-    /// Only affects `/api/snapshot`: a worker without a slot is still routed to
-    /// and still exported to Prometheus (see
-    /// `kinference_telemetry_slots_denied_total`). Each slot preallocates ~480 KB.
-    #[serde(default)]
-    pub telemetry_max_workers: Option<usize>,
     #[serde(default)]
     pub tokenize: TokenizeConfig,
     #[serde(default)]
@@ -821,9 +813,6 @@ pub enum DiscoveryMode {
     Kubernetes,
 }
 
-/// Default for [`Config::telemetry_max_workers`].
-pub const DEFAULT_TELEMETRY_MAX_WORKERS: usize = 16;
-
 /// A worker's inference engine, detected from the `owned_by` field of
 /// `/v1/models`. Only used for display.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
@@ -1084,8 +1073,8 @@ impl Config {
                         if !seen_num.insert(w.worker_id_num) {
                             anyhow::bail!(
                                 "workerset {}: worker_id_num {} is not unique across \
-                                 worker sets (IDs key the fleet-wide telemetry + metrics \
-                                 registries)",
+                                 worker sets (IDs key the fleet-wide metrics \
+                                 registry)",
                                 spec.name,
                                 w.worker_id_num
                             );

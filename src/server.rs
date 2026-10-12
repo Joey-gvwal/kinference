@@ -12,7 +12,7 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
-use crate::config::{Config, DEFAULT_TELEMETRY_MAX_WORKERS, DiscoveryMode};
+use crate::config::{Config, DiscoveryMode};
 use crate::discovery::{
     Discovery, WorkerChange, kubernetes::KubeDiscovery, static_config::StaticDiscovery,
 };
@@ -22,11 +22,10 @@ use crate::monitor::KinferenceService;
 use crate::policy::PoolId;
 use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
-use crate::telemetry::{Telemetry, WorkerMeta};
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
     admin, body_store, config, eviction, ingest, leader, local_tokenize, observation_sink,
-    observations, policy, pool, pool_manager, prom, telemetry, version,
+    observations, policy, pool, pool_manager, prom, rollup, version,
 };
 
 #[derive(Parser, Debug)]
@@ -75,10 +74,6 @@ pub async fn run() -> Result<()> {
     );
 
     let cancel = CancellationToken::new();
-    let telemetry_max_workers = cfg
-        .telemetry_max_workers
-        .unwrap_or(DEFAULT_TELEMETRY_MAX_WORKERS);
-
     // Pre-bind so we can log READY only after the socket is genuinely
     // listening — i.e., a successful nc/grpcurl/score connection would now
     // be accepted. `TcpIncoming::new` binds synchronously and returns an
@@ -186,10 +181,6 @@ pub async fn run() -> Result<()> {
                 "Worker set configured"
             );
         }
-
-        // Telemetry aggregates its index gauge across every pool's tree; it
-        // reads the registry each rollup tick rather than holding the indexers.
-        let telemetry = Telemetry::new(telemetry_max_workers, metrics.clone());
 
         // Reactive model→pool routing + worker→pool reverse index.
         let model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>> =
@@ -379,7 +370,6 @@ pub async fn run() -> Result<()> {
             cancel: cancel.clone(),
             coord_tx: coord_tx.clone(),
             kube_client: kube_client.clone(),
-            telemetry: telemetry.clone(),
             metrics: metrics.clone(),
             task_tokens: task_tokens.clone(),
             worker_pool: worker_pool.clone(),
@@ -480,7 +470,6 @@ pub async fn run() -> Result<()> {
         // channel and `worker_pool` carry `Arc<Pool>` directly, so there is
         // nothing left to look up — which also means there is no frozen vec
         // here to go stale, and no id that could index past its end.
-        let coord_telemetry = telemetry.clone();
         let coord_metrics = metrics.clone();
         let coord_cancel = cancel.clone();
         let coord_task_tokens = task_tokens.clone();
@@ -513,7 +502,6 @@ pub async fn run() -> Result<()> {
                                 req.worker_id_num,
                                 Some(req.reason),
                                 &pool,
-                                &coord_telemetry,
                                 &coord_metrics,
                                 &coord_task_tokens,
                                 &coord_worker_pool,
@@ -543,10 +531,9 @@ pub async fn run() -> Result<()> {
                                     poll_ms,
                                     models_refresh_secs,
                                     replay_timeout_ms,
-                                    telemetry_max_workers,
                                     warmup_enabled,
-                                    &coord_telemetry,
                                     &coord_metrics,
+                                    &coord_prom,
                                     &coord_task_tokens,
                                     &coord_cancel,
                                     coord_local_tokenizer.clone(),
@@ -560,7 +547,6 @@ pub async fn run() -> Result<()> {
                                     num,
                                     None,
                                     pool,
-                                    &coord_telemetry,
                                     &coord_metrics,
                                     &coord_task_tokens,
                                     &coord_worker_pool,
@@ -573,7 +559,7 @@ pub async fn run() -> Result<()> {
             }
         });
 
-        // Admin listener + telemetry rollup — only when configured.
+        // Admin listener + the metrics rollup — only when configured.
         // One `PolicyStore` for the whole process, made before anything that
         // reads it. `None` when policy is off, which `/readyz` treats as "nothing
         // to wait for".
@@ -583,13 +569,15 @@ pub async fn run() -> Result<()> {
             let dash_addr: std::net::SocketAddr = addr_str
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid admin_listen `{addr_str}`: {e}"))?;
-            telemetry
-                .clone()
-                .spawn_rollup(pool_registry.clone(), prom.clone(), cancel.clone());
+            rollup::spawn(
+                pool_registry.clone(),
+                metrics.clone(),
+                prom.clone(),
+                cancel.clone(),
+            );
             // Created here rather than with the watcher below, because `/readyz`
             // gates on it: the store starts un-listed, and that is precisely the
             // window where serving a Pick would silently bypass policy.
-            let tel = telemetry.clone();
             let dash_pools = pool_registry.clone();
             let dash_policy = policy_store_cell.clone();
             let dash_metrics = metrics.clone();
@@ -598,7 +586,6 @@ pub async fn run() -> Result<()> {
             tokio::spawn(async move {
                 if let Err(err) = admin::serve(
                     dash_addr,
-                    tel,
                     dash_pools,
                     dash_policy,
                     dash_prom,
@@ -762,7 +749,6 @@ pub async fn run() -> Result<()> {
             pool_registry.clone(),
             model_router.clone(),
             metrics.clone(),
-            telemetry.clone(),
             tokenize_client.clone(),
             local_tokenizer,
             pending_observations.clone(),
@@ -897,10 +883,9 @@ fn handle_added(
     poll_ms: u64,
     models_refresh_secs: u64,
     replay_timeout_ms: u64,
-    telemetry_max_workers: usize,
     warmup_enabled: bool,
-    telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
+    prom: &Arc<prom::PromMetrics>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     parent_cancel: &CancellationToken,
     // The fleet-wide local tokenizer registry (keyed by model). Passed
@@ -935,48 +920,20 @@ fn handle_added(
         "Added worker"
     );
 
-    // 1. Telemetry slot. The two refusals are NOT equivalent and are handled
-    //    differently on purpose.
-    if let Err(err) = telemetry.register_worker(WorkerMeta::from_config(&w, block_size, &pool.name))
+    // 1. Two worker sets selecting one pod. This MUST bail: `worker_id_num`
+    //    keys the fleet-wide `MetricsRegistry` and the eviction channel, so
+    //    continuing would corrupt state the first registration owns. The fix
+    //    is a Service selector, not a kinference setting.
+    if let Some(owner) = worker_pool.get(&w.worker_id_num)
+        && owner.value().id != pool.id
     {
-        match err {
-            // Capacity only. Telemetry is pure observability — nothing on the
-            // routing path reads it — so a worker without a slot routes
-            // perfectly well, it is just absent from `/api/snapshot` and
-            // `kinference_workers`. Refusing to add it would trade an
-            // unobservable worker for an idle one, and idle is more expensive:
-            // the GPU is paid for either way. Every telemetry write looks its
-            // worker up first, so the missing slot is inert rather than unsafe.
-            telemetry::RegisterError::SlotExhausted { .. } => {
-                // DEBUG, not ERROR: with a small `telemetry_max_workers` this
-                // is the normal state of any fleet larger than the slot pool,
-                // and one line per worker at ERROR would be alarming and wrong.
-                // `kinference_telemetry_slots_denied_total` carries the signal.
-                tracing::debug!(
-                    pool = pool.name,
-                    worker_id = w.worker_id_str,
-                    capacity = telemetry_max_workers,
-                    "telemetry slot pool full; this worker routes normally and is \
-                     counted by kinference_workers, but /api/snapshot will not \
-                     carry it. Raise telemetry_max_workers to include more"
-                );
-                // Fall through: register everywhere else.
-            }
-            // Two worker sets selecting one pod. This one MUST still bail:
-            // `worker_id_num` keys the fleet-wide telemetry slots, the
-            // `MetricsRegistry` and the eviction channel alike, so continuing
-            // would corrupt state the first registration owns. The fix is a
-            // Service selector, not a kinference setting.
-            telemetry::RegisterError::AlreadyRegistered { .. } => {
-                tracing::warn!(
-                    pool = pool.name,
-                    worker_id = w.worker_id_str,
-                    error = %err,
-                    "worker already belongs to another worker set; skipping this Add"
-                );
-                return;
-            }
-        }
+        tracing::warn!(
+            pool = pool.name,
+            worker_id = w.worker_id_str,
+            owner = owner.value().name,
+            "worker already belongs to another worker set; skipping this Add"
+        );
+        return;
     }
 
     // Reverse index for eviction + observation lifecycle. Provisionally
@@ -1003,10 +960,8 @@ fn handle_added(
     if !registry.register(w.worker_id_num, entry) {
         tracing::warn!(
             worker_id = w.worker_id_str,
-            "worker id collides with one already in the registry; \
-             rolling back the telemetry slot"
+            "worker id collides with one already in the registry; skipping this Add"
         );
-        telemetry.unregister_worker(w.worker_id_num);
         worker_pool.remove(&w.worker_id_num);
         return;
     }
@@ -1084,7 +1039,7 @@ fn handle_added(
         replay_timeout_ms,
         endpoint_key,
         indexer.clone(),
-        telemetry.clone(),
+        prom.clone(),
         inflight_prefixes.clone(),
         registry.clone(),
         eviction_tx.clone(),
@@ -1143,7 +1098,6 @@ struct MainHooks {
     cancel: CancellationToken,
     coord_tx: tokio::sync::mpsc::Sender<(Arc<Pool>, WorkerChange)>,
     kube_client: Option<kube::Client>,
-    telemetry: Arc<Telemetry>,
     metrics: Arc<MetricsRegistry>,
     task_tokens: Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: Arc<DashMap<u64, Arc<Pool>>>,
@@ -1237,7 +1191,6 @@ impl pool_manager::PoolHooks for MainHooks {
                 num,
                 None,
                 pool,
-                &self.telemetry,
                 &self.metrics,
                 &self.task_tokens,
                 &self.worker_pool,
@@ -1266,7 +1219,6 @@ async fn evict_worker(
     worker_id_num: u64,
     reason: Option<eviction::EvictionReason>,
     pool: &Arc<pool::Pool>,
-    telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
@@ -1275,7 +1227,6 @@ async fn evict_worker(
         worker_id_num,
         reason,
         pool,
-        telemetry,
         metrics,
         task_tokens,
         worker_pool,
@@ -1300,7 +1251,6 @@ fn drop_worker_state(
     worker_id_num: u64,
     reason: Option<eviction::EvictionReason>,
     pool: &Arc<pool::Pool>,
-    telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
@@ -1343,7 +1293,6 @@ fn drop_worker_state(
         .get(&worker_id_num)
         .is_none_or(|e| e.value().id == pool.id);
     if still_ours {
-        telemetry.unregister_worker(worker_id_num);
         metrics.forget(worker_id_num);
         worker_pool.remove(&worker_id_num);
     } else {

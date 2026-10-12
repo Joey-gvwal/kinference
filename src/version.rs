@@ -1,5 +1,5 @@
-//! Build-time version string surfaced by `--version`, the dashboard, and
-//! `/api/snapshot`'s `version` field.
+//! Build-time version string surfaced by `--version` and the
+//! `kinference_build_info` metric.
 //!
 //! Falls back to `CARGO_PKG_VERSION` (i.e. whatever's in `Cargo.toml`)
 //! when the env var isn't set — which is the case for local

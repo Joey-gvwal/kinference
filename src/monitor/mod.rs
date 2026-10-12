@@ -29,7 +29,6 @@ use crate::observations::{PendingObservations, RequestLabels, RequestMeta, forma
 use crate::picker::WorkerScore;
 use crate::policy::{AUTO_MODEL, PoolId};
 use crate::pool::Pool;
-use crate::telemetry::{CallSample, Telemetry, TopWorker};
 use crate::tokenize::TokenizeInput;
 use crate::workers::WorkerEntry;
 
@@ -403,7 +402,6 @@ pub struct KinferenceService {
     /// ranks across them.
     pub(crate) model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
     pub(crate) metrics: Arc<MetricsRegistry>,
-    pub(crate) telemetry: Arc<Telemetry>,
     /// Shared HTTP client for all `/tokenize` calls. Built in `main.rs`
     /// with a 3s per-request timeout so connections pool and hangs are
     /// bounded. Fleet-wide — one client serves every pool. (The
@@ -470,7 +468,6 @@ impl KinferenceService {
         pools: Arc<crate::pool::PoolRegistry>,
         model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
         metrics: Arc<MetricsRegistry>,
-        telemetry: Arc<Telemetry>,
         tokenize_client: Arc<reqwest::Client>,
         local_tokenizer: Option<Arc<crate::local_tokenize::LocalTokenizerRegistry>>,
         pending_observations: Arc<PendingObservations>,
@@ -486,7 +483,6 @@ impl KinferenceService {
             pools,
             model_router,
             metrics,
-            telemetry,
             tokenize_client,
             local_tokenizer,
             local_tokenize_warn_latch: dashmap::DashMap::new(),
@@ -676,13 +672,6 @@ impl KinferenceService {
                 Some(candidates[idx].clone())
             }
         }
-    }
-
-    /// Accessor for the shared `Telemetry`. Exposed for the in-process
-    /// pick path (it records picks under `picks.*` counters
-    /// that share the same Arc as the Score path's `score.*` counters).
-    pub(crate) fn telemetry(&self) -> &Arc<Telemetry> {
-        &self.telemetry
     }
 }
 

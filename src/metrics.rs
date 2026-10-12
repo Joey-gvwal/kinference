@@ -20,17 +20,6 @@ use crate::policy::PoolId;
 // body before parsing and look up the rewritten names here. SGLang v0.5.4+
 // already emits the underscore form natively, in which case the rewrite is a
 // harmless no-op.
-const NUM_GPU_BLOCKS_LABEL: &str = "num_gpu_blocks";
-/// vLLM's `cache_config_info` info-gauge encodes the KV-cache
-/// page size in this label. Read for the dashboard's diagnostic
-/// view of "what does the engine report?" — **not** used to drive
-/// routing. The value reported here is the KV cache page size,
-/// which for interleaved-attention models like Gemma 3/4 does
-/// NOT match the hash block_size emitted in BlockStored events.
-/// Authoritative resolution of the hash block_size lives entirely
-/// in the listener's auto-adopt path
-/// (`ingest::check_block_size_mismatch`).
-const BLOCK_SIZE_LABEL: &str = "block_size";
 
 /// Per-engine table of which Prometheus metric names to read for each of the
 /// fields on `MetricsSample`. Built lazily as `&'static`, dispatched on
@@ -46,16 +35,6 @@ struct MetricNames {
     swapped: &'static [&'static str],
     /// Candidate names for KV-cache utilization (0.0..1.0).
     kv_cache_usage: &'static [&'static str],
-    /// Info-style gauge whose `num_gpu_blocks` LABEL carries the total
-    /// block count. vLLM emits `vllm:cache_config_info{num_gpu_blocks="…"}`;
-    /// `None` for engines that don't follow this label-based pattern.
-    cache_config_info: Option<&'static str>,
-    /// Plain-gauge equivalent: a metric whose VALUE is the total block
-    /// count. SGLang exposes `sglang:num_pages` this way (a Prometheus
-    /// `gauge`, not an info gauge). Tried after `cache_config_info` —
-    /// first hit wins, so the field is populated by whichever engine the
-    /// worker happens to be.
-    num_blocks_gauge: &'static [&'static str],
     /// If `Some(name)`, only accept samples whose label `name` equals the
     /// worker's configured `model_name`. If `None`, take the first matching
     /// sample regardless of labels.
@@ -96,15 +75,6 @@ const ALL_NAMES: MetricNames = MetricNames {
         "vllm_gpu_cache_usage_perc",
         "sglang_token_usage",
     ],
-    // Only vLLM emits a cache_config_info gauge. The SGLang scrape path
-    // doesn't find this name and `num_gpu_blocks` stays at the default 0
-    // (documented as "unknown" for that engine).
-    cache_config_info: Some("vllm_cache_config_info"),
-    // SGLang's `sglang:num_pages` gauge carries the total block count as
-    // the sample value (one "page" == one KV-cache block). vLLM workers
-    // populate `num_gpu_blocks` via `cache_config_info` above, so this
-    // candidate list is only consulted when the label-pattern misses.
-    num_blocks_gauge: &["sglang_num_pages"],
     // Both engines label samples with `model_name`.
     model_label: Some("model_name"),
     completions: &[
@@ -156,19 +126,6 @@ pub struct MetricsSample {
     /// `kv_cache_usage`, averaged over the same window. What `kvCacheUsage`
     /// reads. Still a 0.0..1.0 ratio.
     pub kv_cache_usage_mean: f32,
-    /// Total GPU KV-cache blocks allocated on this worker (read from vLLM's
-    /// `vllm:cache_config_info` labels). Static after vLLM startup, but
-    /// re-read on every scrape for simplicity. `0` means "unknown" (metric
-    /// absent, e.g. vLLM not exposing cache_config_info yet, or a gateway
-    /// stripping it).
-    pub num_gpu_blocks: u32,
-    /// Engine's KV-cache block_size (same `cache_config_info` info-gauge
-    /// label). The poller pushes this into `WorkerRegistry::set_block_size`
-    /// so the picker computes matching block hashes from the very first
-    /// successful scrape, instead of having to wait for the first
-    /// `BlockStored` event to arrive. `0` means "unknown" (SGLang, gateways
-    /// stripping the label, etc.).
-    pub block_size: u32,
     /// Cumulative successful-completion counter at the time of this scrape
     /// (sum across all label combinations matching `model_label`). The
     /// per-sec rate is derived from the delta against the previous sample.
@@ -912,21 +869,6 @@ pub fn spawn_metrics_poller(
                             );
                         }
                     }
-                    // Note: `sample.block_size` (parsed from vLLM's
-                    // `cache_config_info.block_size` label) is the
-                    // engine's **KV cache page size**, NOT the block
-                    // size used for prefix-cache hashing. For models
-                    // with uniform attention those values coincide,
-                    // but for interleaved-attention models like
-                    // Gemma 3/4 they diverge (KV cache=16, hash=64).
-                    // The only authoritative source for the hash
-                    // block size is the listener's auto-adopt from
-                    // the first `BlockStored` event. We keep
-                    // `sample.block_size` in the dashboard snapshot
-                    // (operator-visible diagnostic) but do NOT push
-                    // it into `WorkerRegistry::set_block_size_fleet_wide` —
-                    // doing so produced silently-wrong hashes on
-                    // interleaved-attention models.
                     registry.by_worker.insert(cfg.worker_id_num, sample);
                 }
                 Err(err) => {
@@ -1081,62 +1023,6 @@ async fn scrape_once(
     let prefix_cache_queries_total =
         pick_sum(names.prefix_cache_queries).unwrap_or(0.0).max(0.0) as u64;
 
-    // cache_config_info is an info-style gauge with no model_name label; the
-    // useful data lives in the labels. Take the first matching sample. Skipped
-    // entirely for engines (SGLang) that don't emit this.
-    // Two-pattern lookup. First try vLLM's info-gauge with the value in a
-    // label; then fall back to a plain gauge whose sample value is the
-    // count. We prefer the label pattern because that's the canonical
-    // vLLM shape; if both engines somehow emitted both, the label wins.
-    let num_gpu_blocks = match names.cache_config_info {
-        Some(cfg_metric) => scrape
-            .samples
-            .iter()
-            .find(|s| s.metric == cfg_metric)
-            .and_then(|s| s.labels.get(NUM_GPU_BLOCKS_LABEL))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0),
-        None => 0,
-    };
-    // Parse `block_size` from the same info-gauge labels. Surfaced
-    // in the dashboard snapshot as a diagnostic only; we do NOT
-    // push this into `workers.set_block_size_fleet_wide` because
-    // for interleaved-attention models (Gemma 3/4, etc.) the
-    // `cache_config_info` block_size label is the KV-cache block
-    // size, not the hash block size — those values diverge.
-    let block_size = match names.cache_config_info {
-        Some(cfg_metric) => scrape
-            .samples
-            .iter()
-            .find(|s| s.metric == cfg_metric)
-            .and_then(|s| s.labels.get(BLOCK_SIZE_LABEL))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0),
-        None => 0,
-    };
-    let num_gpu_blocks = if num_gpu_blocks > 0 {
-        num_gpu_blocks
-    } else {
-        names
-            .num_blocks_gauge
-            .iter()
-            .find_map(|name| {
-                scrape.samples.iter().find_map(|s| {
-                    if &s.metric == name {
-                        match s.value {
-                            prometheus_parse::Value::Gauge(v)
-                            | prometheus_parse::Value::Counter(v)
-                            | prometheus_parse::Value::Untyped(v) => Some(v.max(0.0) as u32),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or(0)
-    };
-
     // Only warn about a model_name label mismatch when:
     //  - the engine expects a model_name label at all (vLLM/SGLang do; some
     //    label-less engines wouldn't),
@@ -1161,9 +1047,9 @@ async fn scrape_once(
         *warned_about_label = true;
     }
 
-    // SGLang gauge fallback for the hit rate. Same pattern as
-    // `num_blocks_gauge` (Gauge | Counter | Untyped match arm) so any
-    // future engine that publishes the rate directly Just Works.
+    // SGLang gauge fallback for the hit rate: a Gauge | Counter | Untyped
+    // match arm, so any future engine that publishes the rate directly Just
+    // Works.
     // Read here so we can stamp it onto the sample; the poller may
     // overwrite this with the windowed-counter rate if the vLLM
     // counter pair was present (it takes precedence — counters are
@@ -1192,8 +1078,6 @@ async fn scrape_once(
         running: running.unwrap_or(0.0).max(0.0) as u32,
         swapped: swapped.unwrap_or(0.0).max(0.0) as u32,
         kv_cache_usage: kv_cache.unwrap_or(0.0).max(0.0) as f32,
-        num_gpu_blocks,
-        block_size,
         completions_total,
         // Rate is computed by the poller from the delta against the previous
         // sample; we leave it zero here.

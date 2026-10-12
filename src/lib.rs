@@ -32,7 +32,7 @@ mod pool;
 mod pool_manager;
 mod prom;
 mod proto;
-mod telemetry;
+mod rollup;
 mod tokenize;
 mod tokenize_client;
 mod version;

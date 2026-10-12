@@ -1,57 +1,5 @@
 use super::*;
 
-fn parse_cfg(body: &str) -> (u32, u32) {
-    // Mirror the body massage scrape_once does before parsing.
-    let body = body.replace("vllm:", "vllm_");
-    let scrape = prometheus_parse::Scrape::parse(body.lines().map(|l| Ok(l.to_owned())))
-        .expect("synthetic body parses");
-    let num_gpu_blocks = scrape
-        .samples
-        .iter()
-        .find(|s| s.metric == "vllm_cache_config_info")
-        .and_then(|s| s.labels.get(NUM_GPU_BLOCKS_LABEL))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0);
-    let block_size = scrape
-        .samples
-        .iter()
-        .find(|s| s.metric == "vllm_cache_config_info")
-        .and_then(|s| s.labels.get(BLOCK_SIZE_LABEL))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0);
-    (num_gpu_blocks, block_size)
-}
-
-/// Canonical vLLM cache_config_info shape: one info-gauge sample
-/// with all cache-config fields encoded as labels. The
-/// `vllm:`/`vllm_` rewrite in scrape_once is exercised too.
-#[test]
-fn parse_canonical_vllm_cache_config_info_succeeds() {
-    let body = "# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig\n\
-                # TYPE vllm:cache_config_info gauge\n\
-                vllm:cache_config_info{block_size=\"64\",cache_dtype=\"auto\",\
-                cpu_offload_gb=\"0\",enable_prefix_caching=\"True\",engine=\"0\",\
-                gpu_memory_utilization=\"0.9\",is_attention_free=\"False\",\
-                num_cpu_blocks=\"0\",num_gpu_blocks=\"1234\"} 1.0\n";
-    let (gpu, bs) = parse_cfg(body);
-    assert_eq!(gpu, 1234, "num_gpu_blocks parses");
-    assert_eq!(bs, 64, "block_size parses");
-}
-
-/// vLLM build that omits `block_size` from the cache_config_info
-/// labels (e.g. an older release or a gateway stripping the
-/// label). num_gpu_blocks still works; block_size returns 0 —
-/// matches what the production code observes when the
-/// `mark_block_size_resolved` fallback fires inappropriately.
-#[test]
-fn parse_cache_config_info_without_block_size_label() {
-    let body = "# TYPE vllm_cache_config_info gauge\n\
-                vllm_cache_config_info{engine=\"0\",num_gpu_blocks=\"1234\"} 1.0\n";
-    let (gpu, bs) = parse_cfg(body);
-    assert_eq!(gpu, 1234);
-    assert_eq!(bs, 0, "missing label → 0 (caller treats as unknown)");
-}
-
 /// The mean damps a spike; the raw gauge does not.
 ///
 /// This is the whole reason the window exists. On a real fleet the onset of

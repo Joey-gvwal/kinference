@@ -28,7 +28,7 @@
 //! Nothing in `policy::` derives `Serialize` for its engine types — not
 //! `Trace`, `Candidate`, `CompiledRoute` or any of it. Adding derives would
 //! widen those types' public contract for a dashboard feature.
-//! `telemetry::snapshot_json` set the precedent for projecting by hand, and it
+//! Projecting by hand is the precedent, and it
 //! is also where API naming belongs rather than leaking Rust field names.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,7 +78,6 @@ const SIM_CONCURRENCY: usize = 4;
 /// The endpoints that exist, for the 404 body — an agent that guessed a path
 /// learns the real ones from the error instead of from documentation.
 const ENDPOINTS: &[(&str, &str)] = &[
-    ("GET", "/api/snapshot"),
     ("GET", "/api/policy/context"),
     ("POST", "/api/policy/simulate"),
 ];
@@ -217,7 +216,7 @@ pub(super) fn method_not_allowed(allow: &'static str) -> ApiError {
 /// What both handlers need. One extractor because axum allows a handler a
 /// single `State` — the same reason `ReadyzState` exists.
 ///
-/// **Snapshot readers only.** No `PromMetrics`, no `Telemetry`, no body store,
+/// **Snapshot readers only.** No `PromMetrics`, no body store,
 /// no inflight registry, no HTTP or kube client. That absence is what makes
 /// "read-only" a property of the types rather than a promise, and the metrics
 /// test in `dashboard/tests.rs` is what notices if someone adds one. The

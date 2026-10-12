@@ -4,7 +4,7 @@
 //! owns its sockets, parses vLLM's wire-format events through
 //! `dynamo_kv_router::zmq_wire`, and feeds them into the shared
 //! [`KvIndexer`] (radix tree) plus our local bookkeeping
-//! ([`InflightPrefixes`], [`Telemetry`], [`WorkerRegistry`]) inside a
+//! ([`InflightPrefixes`], [`PromMetrics`], [`WorkerRegistry`]) inside a
 //! single [`apply_frame`] call.
 //!
 //! ## Design — drain-inline gap handling
@@ -49,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::WorkerConfig;
 use crate::eviction::{EvictionReason, EvictionRequest, EvictionTx};
 use crate::inflight_prefixes::InflightPrefixes;
-use crate::telemetry::{IngestEvent, Telemetry};
+use crate::prom::{IngestEvent, PromMetrics};
 use crate::workers::WorkerRegistry;
 
 /// Per-recv DEALER timeout. Keeps the inner loop responsive to
@@ -70,7 +70,7 @@ pub fn spawn_worker_listener(
     replay_timeout_ms: u64,
     endpoint_key: String,
     indexer: Arc<KvIndexer>,
-    telemetry: Arc<Telemetry>,
+    prom: Arc<PromMetrics>,
     inflight_prefixes: Arc<InflightPrefixes>,
     workers: Arc<WorkerRegistry>,
     eviction_tx: EvictionTx,
@@ -91,11 +91,11 @@ pub fn spawn_worker_listener(
              and cache-affinity routing will be no-op for this run."
         );
         workers.set_initial_sync_complete(cfg.worker_id_num);
-        // Drop the indexer / telemetry / inflight_prefixes Arc clones
+        // Drop the indexer / prom / inflight_prefixes Arc clones
         // explicitly so it's clear this branch holds no references.
         let _ = (
             indexer,
-            telemetry,
+            prom,
             inflight_prefixes,
             endpoint_key,
             block_size,
@@ -124,7 +124,7 @@ pub fn spawn_worker_listener(
         workers.set_initial_sync_complete(cfg.worker_id_num);
         let _ = (
             indexer,
-            telemetry,
+            prom,
             inflight_prefixes,
             endpoint_key,
             block_size,
@@ -145,7 +145,7 @@ pub fn spawn_worker_listener(
                 replay_wall_budget,
                 &endpoint_key,
                 indexer.clone(),
-                telemetry.clone(),
+                prom.clone(),
                 inflight_prefixes.clone(),
                 workers.clone(),
                 eviction_tx.clone(),
@@ -297,7 +297,7 @@ async fn run_listener(
     replay_wall_budget: Duration,
     endpoint_key: &str,
     indexer: Arc<KvIndexer>,
-    telemetry: Arc<Telemetry>,
+    prom: Arc<PromMetrics>,
     inflight_prefixes: Arc<InflightPrefixes>,
     workers: Arc<WorkerRegistry>,
     eviction_tx: EvictionTx,
@@ -465,7 +465,7 @@ async fn run_listener(
                     replay.as_mut(),
                     replay_wall_budget,
                     &indexer,
-                    &telemetry,
+                    &prom,
                     &inflight_prefixes,
                     endpoint_key,
                     worker_id_num,
@@ -496,7 +496,7 @@ async fn handle_observation(
     replay: Option<&mut ZmqSocket>,
     replay_wall_budget: Duration,
     indexer: &KvIndexer,
-    telemetry: &Telemetry,
+    prom: &PromMetrics,
     inflight_prefixes: &InflightPrefixes,
     endpoint_key: &str,
     worker_id_num: u64,
@@ -523,7 +523,7 @@ async fn handle_observation(
                     replay_wall_budget,
                     state,
                     indexer,
-                    telemetry,
+                    prom,
                     inflight_prefixes,
                     endpoint_key,
                     worker_id_num,
@@ -549,7 +549,7 @@ async fn handle_observation(
                     replay_wall_budget,
                     state,
                     indexer,
-                    telemetry,
+                    prom,
                     inflight_prefixes,
                     endpoint_key,
                     worker_id_num,
@@ -580,7 +580,7 @@ async fn handle_observation(
     let evicted = apply_frame(
         &mut state.normalizer,
         indexer,
-        telemetry,
+        prom,
         inflight_prefixes,
         endpoint_key,
         worker_id_num,
@@ -620,7 +620,7 @@ async fn replay_gap(
     replay_wall_budget: Duration,
     state: &mut ListenerState,
     indexer: &KvIndexer,
-    telemetry: &Telemetry,
+    prom: &PromMetrics,
     inflight_prefixes: &InflightPrefixes,
     endpoint_key: &str,
     worker_id_num: u64,
@@ -717,7 +717,7 @@ async fn replay_gap(
         let evicted = apply_frame(
             &mut state.normalizer,
             indexer,
-            telemetry,
+            prom,
             inflight_prefixes,
             endpoint_key,
             worker_id_num,
@@ -810,7 +810,7 @@ fn parse_seq_payload(msg: &[Vec<u8>]) -> Option<(u64, &[u8])> {
 /// Decode one ZMQ payload into events and apply each to the radix
 /// tree + our local bookkeeping. Side effects:
 /// [`InflightPrefixes::on_stored`] (drives layered-overlap math +
-/// tokenize-divergence sniff), [`Telemetry::record_event`] (ingest
+/// tokenize-divergence sniff), [`PromMetrics::record_event`] (ingest
 /// counters), and `indexer.apply_event` (radix-tree state).
 ///
 /// Returns `true` when this listener should stop because a
@@ -819,7 +819,7 @@ fn parse_seq_payload(msg: &[Vec<u8>]) -> Option<(u64, &[u8])> {
 async fn apply_frame(
     normalizer: &mut ZmqEventNormalizer,
     indexer: &KvIndexer,
-    telemetry: &Telemetry,
+    prom: &PromMetrics,
     inflight_prefixes: &InflightPrefixes,
     endpoint_key: &str,
     worker_id_num: u64,
@@ -888,7 +888,7 @@ async fn apply_frame(
             KvCacheEventData::Removed(d) => (IngestEvent::Removed, d.block_hashes.len() as u64),
             KvCacheEventData::Cleared => (IngestEvent::Cleared, 0),
         };
-        telemetry.record_event(ev_kind, n_blocks);
+        prom.record_index_event(ev_kind, n_blocks);
         indexer.apply_event(router_event).await;
     }
     false

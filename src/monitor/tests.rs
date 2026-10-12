@@ -631,7 +631,6 @@ fn policy_fleet_with(
         registry,
         Arc::new(router()),
         metrics.clone(),
-        crate::telemetry::Telemetry::new(4, metrics),
         Arc::new(reqwest::Client::new()),
         None,
         Arc::new(PendingObservations::new(ttl)),

@@ -102,10 +102,6 @@ extension:
 config:
   metrics_poll_ms: 1000
   models_refresh_secs: 30
-  # Telemetry budget for /api/snapshot only — NOT a routing cap. Each slot
-  # preallocates ~480 KB of history. Prometheus' kinference_workers covers the
-  # whole fleet regardless of this number.
-  telemetry_max_workers: 16
   # In-flight bookkeeping TTL; raise above the worst-case full
   # (non-streaming) response time.
   # observation_ttl_secs: 600

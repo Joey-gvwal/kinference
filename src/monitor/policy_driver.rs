@@ -219,11 +219,6 @@ impl KinferenceService {
                                         HashMap::new(),
                                         extras,
                                         raw,
-                                        // Telemetry is recorded once, for the
-                                        // primary group; extra groups are the
-                                        // policy's fan-out, not new traffic.
-                                        /*record_call_telemetry=*/
-                                        false,
                                         Some(req_label),
                                     )
                                     .await;

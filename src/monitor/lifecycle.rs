@@ -288,7 +288,6 @@ impl KinferenceService {
                     HashMap::new(),
                     chat_extras,
                     Some(outbound),
-                    /*record_call_telemetry=*/ true,
                     Some(&req_label),
                 )
                 .await;
@@ -346,11 +345,6 @@ impl KinferenceService {
                         HashMap::new(),
                         extras,
                         raw,
-                        // Call telemetry is recorded once, for the first pool;
-                        // the rest are this one request's fan-out, not new
-                        // traffic.
-                        /*record_call_telemetry=*/
-                        false,
                         Some(&req_label),
                     )
                     .await;
