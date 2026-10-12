@@ -488,3 +488,65 @@ body_max_total_bytes = 268435456
         "and list the accepted ones, got: {msg}"
     );
 }
+
+/// A `.json` config loads through the same structs as TOML, so the chart's
+/// `toJson` rendering and a hand-written TOML file mean the same thing.
+#[test]
+fn json_config_loads_like_toml() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("config.json");
+    std::fs::write(
+        &toml_path,
+        r#"
+listen = "127.0.0.1:50051"
+metrics_poll_ms = 1000
+
+[metrics]
+tenant_labels = ["acme"]
+
+[[profile]]
+name = "t"
+[profile.predictor]
+base_ms = 400.0
+
+[kubernetes]
+enabled = true
+"#,
+    )
+    .expect("write toml");
+    // Helm's `toJson` writes integral numbers without a fraction (`400`, not
+    // `400.0`), for float fields as well as integer ones.
+    std::fs::write(
+        &json_path,
+        r#"{
+  "listen": "127.0.0.1:50051",
+  "metrics_poll_ms": 1000,
+  "metrics": {"tenant_labels": ["acme"]},
+  "profile": [{"name": "t", "predictor": {"base_ms": 400}}],
+  "kubernetes": {"enabled": true}
+}"#,
+    )
+    .expect("write json");
+    let from_toml = Config::load(&toml_path).expect("toml loads");
+    let from_json = Config::load(&json_path).expect("json loads");
+    assert_eq!(format!("{from_toml:?}"), format!("{from_json:?}"));
+}
+
+/// `deny_unknown_fields` holds for JSON too: a mistyped top-level key is a
+/// startup error, not a silent default.
+#[test]
+fn json_config_rejects_unknown_top_level_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{"listen": "127.0.0.1:50051", "dashboard_listen": "0.0.0.0:9001"}"#,
+    )
+    .expect("write json");
+    let err = Config::load(&path).expect_err("unknown key must not load");
+    assert!(
+        format!("{err:#}").contains("dashboard_listen"),
+        "the error must name the offending key, got: {err:#}"
+    );
+}

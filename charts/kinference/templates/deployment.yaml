@@ -13,7 +13,7 @@
 #    replicates for free; only the cheap one degrades.
 #
 # To scale past 1 (replicaCount) you must:
-#  1. Set `[leader_election] enabled = true` in the config. Exactly one
+#  1. Set `config.leader_election.enabled=true`. Exactly one
 #     replica may write CRD status — see the note on POD_NAME below.
 #  2. Set strategyType=RollingUpdate. `Recreate` (the default) exists precisely
 #     to prevent two replicas overlapping, which is the thing you are now
@@ -44,7 +44,7 @@ spec:
       annotations:
         # Restart the pod when the config changes; the binary reads it once
         # at startup.
-        checksum/config: {{ .Values.config | sha256sum }}
+        checksum/config: {{ include "kinference.configContents" . | sha256sum }}
     spec:
       serviceAccountName: {{ include "kinference.fullname" . }}
       {{- with .Values.nodeSelector }}
@@ -55,7 +55,7 @@ spec:
         - name: kinference
           image: {{ include "kinference.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["--config", "/etc/kinference/config.toml"]
+          args: ["--config", "/etc/kinference/{{ include "kinference.configFileName" . }}"]
           env:
             # kinference at debug. dynamo_kv_router at warn, EXCEPT indexer::radix_tree
             # which is pinned to error: `block_hash mismatch` (radix_tree:389)
@@ -114,10 +114,10 @@ spec:
             {{- end }}
           ports:
             - name: admin
-              containerPort: 9001
+              containerPort: {{ .Values.service.adminPort }}
               protocol: TCP
             - name: grpc
-              containerPort: 50051
+              containerPort: {{ .Values.service.grpcPort }}
               protocol: TCP
           volumeMounts:
             - name: config

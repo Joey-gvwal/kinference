@@ -20,7 +20,7 @@ rules:
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
-  # InferenceWorkerSets are DISCOVERY, not policy: with [kubernetes] enabled
+  # InferenceWorkerSets are DISCOVERY, not policy: with config.kubernetes.enabled
   # they define which pools exist at all. They belong in the base role for that
   # reason — gating them behind the policy role means a router with policy off
   # gets a Forbidden retry loop and serves nothing, with no obvious cause.
@@ -28,7 +28,7 @@ rules:
   - apiGroups: ["kinference.buoyant.io"]
     resources: ["inferenceworkersets"]
     verbs: ["get", "list", "watch"]
-  # Leader election (`[leader_election] enabled = true`), required before
+  # Leader election (`config.leader_election.enabled`), required before
   # scaling past one replica so that exactly one pod writes CRD status.
   #
   # `update` (not `patch`) because the elector writes with `replace`, carrying
@@ -58,14 +58,12 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "kinference.fullname" . }}
     namespace: {{ .Release.Namespace }}
-{{- if .Values.rbac.policy }}
+{{- if include "kinference.policyEnabled" . }}
 ---
-# RBAC for CRD-driven routing policy (`[policy] enabled = true`).
-#
 # A SECOND ClusterRole rather than extra rules on the one above: that one is
 # named for what it does (`endpointslice-watcher`) and is already bound, so
-# widening it would leave the name lying. rbac.policy=false skips this pair
-# entirely if you never enable `[policy]`.
+# widening it would leave the name lying. Rendered only when policy is on (or
+# always with `configFile`, whose TOML the chart cannot see into).
 #
 # kinference is the router-controller for these kinds, so it both reads them and
 # writes their status:
@@ -101,7 +99,7 @@ rules:
     resources: ["httproutes"]
     verbs: ["get", "list", "watch"]
   # BackendBindings are the one place kinference writes an OBJECT rather than a
-  # status subresource (`[policy] backend_bindings = true`, the default).
+  # status subresource (`config.policy.backend_bindings`, on by default).
   - apiGroups: ["gateway.linkerd.io"]
     resources: ["backendbindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
