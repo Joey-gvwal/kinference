@@ -809,7 +809,7 @@ fn a_pool_in_another_namespace_does_not_claim_this_worker_set() {
 /// over a typo in a config file.
 #[test]
 fn an_unresolved_destination_reports_the_resolvers_reason() {
-    use crate::policy::worker_sets::{RejectReason, Rejection};
+    use crate::policy::rejection::{RejectReason, Rejection};
     let sets = [
         worker_set("workers-h100", "vllm-h100", &[]),
         worker_set("workers-a100", "vllm-a100", &[]),

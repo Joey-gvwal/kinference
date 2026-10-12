@@ -63,6 +63,8 @@
 //!   reads a Service; it is there for the things that must name one to a THIRD
 //!   party, where the front-door port number is needed and only the Service
 //!   carries it. See that module's header.
+//! - `rejection` — why a worker set produced no pool, the verdict
+//!   `worker_sets` reaches and `store` reports.
 //! - `worker_sets` — `InferenceWorkerSet` → `PoolSpec`, plus the watch that
 //!   reconciles them and the store of the ones that were rejected. Lives here
 //!   rather than at the crate root because its input is a CRD type and its
@@ -85,6 +87,7 @@ pub mod explain;
 pub mod lint;
 pub mod predicate;
 pub mod provider_health;
+pub mod rejection;
 pub mod services;
 pub mod status;
 pub mod store;

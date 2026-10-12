@@ -427,7 +427,7 @@ pub fn desired_pool_status(
 /// `Accepted=False` is worse than saying nothing — it reads as "still serving,
 /// just unhappy" when in fact no traffic can reach it.
 pub fn rejected_worker_set_status(
-    reason: &super::worker_sets::RejectReason,
+    reason: &super::rejection::RejectReason,
     referenced_by: &[String],
     previous: Option<&InferenceWorkerSetStatus>,
 ) -> InferenceWorkerSetStatus {

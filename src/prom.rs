@@ -119,7 +119,7 @@ const POLICY_DECISION_OUTCOMES: [&str; 9] = [
 const EVICTION_REASONS: [&str; 2] = ["block_size_mismatch", "model_mismatch"];
 
 /// `kinference_workerset_rejected_total{reason}`.
-/// Source: `crate::policy::worker_sets::RejectReason::as_condition_reason`.
+/// Source: `crate::policy::rejection::RejectReason::as_condition_reason`.
 /// CamelCase, unlike every other reason label — these double as Kubernetes
 /// condition reasons, which is the convention that wins.
 const WORKERSET_REJECT_REASONS: [&str; 7] = [

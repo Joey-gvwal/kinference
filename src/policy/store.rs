@@ -666,8 +666,8 @@ pub fn pool_index(pools: &crate::pool::PoolMap) -> PoolIndex {
 pub type RejectionIndex = BTreeMap<super::PoolKey, UnresolvedReason>;
 
 /// Project the resolver's rejections into the reasons status reports.
-pub fn rejection_index(rejections: &[super::worker_sets::Rejection]) -> RejectionIndex {
-    use super::worker_sets::RejectReason;
+pub fn rejection_index(rejections: &[super::rejection::Rejection]) -> RejectionIndex {
+    use super::rejection::RejectReason;
     rejections
         .iter()
         .map(|r| {
