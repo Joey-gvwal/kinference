@@ -422,8 +422,8 @@ fn tenant_labels_accepts_its_three_forms() {
 /// A MISTYPED value must fail the parse, not fall back to the default.
 ///
 /// This is the whole reason `TenantLabels` has a hand-written `Deserialize`.
-/// `Config` sets no `deny_unknown_fields`, and this knob defaults to OFF, so a
-/// typo that silently degraded to `none` would leave an operator believing
+/// This knob defaults to OFF, so a typo that silently degraded to `none`
+/// would leave an operator believing
 /// per-tenant metrics were on while every series said `default`. The error also
 /// has to NAME the accepted forms, or the failure is unactionable.
 #[test]
@@ -451,10 +451,10 @@ tenant_labels = "sure"
 /// The body caps are configured in KB and parse as written.
 ///
 /// Renamed from `_bytes` to `_kb`, so the risk is an old config's byte value
-/// being read as KB — 268435456 would become 256 GiB rather than 256 MiB. The
-/// parser cannot catch that (unknown keys are ignored, and a valid integer is a
-/// valid integer), so the guard is that the DEFAULT is the KB figure and the
-/// old key no longer binds.
+/// being read as KB — 268435456 would become 256 GiB rather than 256 MiB. A
+/// valid integer is a valid integer, so the guards are that the DEFAULT is the
+/// KB figure and that the old top-level key is rejected by
+/// `deny_unknown_fields` rather than ignored.
 #[test]
 fn body_caps_are_configured_in_kb() {
     let toml_str = r#"

@@ -394,9 +394,8 @@ impl PromMetrics {
         Self::with_tenants(TenantPolicy::None)
     }
 
-    /// Built from `[metrics]`. Warns once if tenant labelling is unbounded,
-    /// for the same reason `NoopRateLimiter::warn_on_startup` does: a config
-    /// that quietly does something expensive should say so.
+    /// Built from `[metrics]`. Warns once if tenant labelling is unbounded: a
+    /// config that quietly does something expensive should say so.
     pub fn with_config(cfg: &MetricsConfig) -> Self {
         if matches!(cfg.tenant_labels, TenantLabels::All) {
             tracing::warn!(

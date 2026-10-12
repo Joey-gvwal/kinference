@@ -147,9 +147,10 @@ fn a_zero_cap_is_clamped_rather_than_breaking_inserts() {
 
 /// The `[token_review]` section still binds to this subsystem's config type.
 ///
-/// `crate::config::Config` does not set `deny_unknown_fields`, so a section
-/// that stops binding — a renamed field, a type moved without its serde name,
-/// a typo — deserializes to defaults SILENTLY and the router comes up with the
+/// `Config` rejects unknown TOP-LEVEL keys, but nested sections do not set
+/// `deny_unknown_fields`, so a field inside `[token_review]` that stops binding
+/// — a renamed field, a type moved without its serde name, a typo —
+/// deserializes to its default SILENTLY and the router comes up with the
 /// service quietly off. There is no compiler error and no startup error to
 /// catch it, so the only guard is asserting the bound values here, from inside
 /// the module that can see the private fields.

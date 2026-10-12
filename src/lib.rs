@@ -33,7 +33,6 @@ mod pool;
 mod pool_manager;
 mod prom;
 mod proto;
-mod rate_limit;
 mod telemetry;
 mod token_review;
 mod tokenize;

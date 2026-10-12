@@ -89,8 +89,6 @@ pub struct Config {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub token_review: crate::token_review::TokenReviewConfig,
-    #[serde(default)]
-    pub rate_limit: crate::rate_limit::RateLimitConfig,
     /// Labelling of the metrics kinference *publishes* (`crate::prom`). Not to
     /// be confused with `metrics_poll_ms` and friends, which concern scraping
     /// the engines.

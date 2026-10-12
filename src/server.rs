@@ -25,7 +25,7 @@ use crate::telemetry::{Telemetry, WorkerMeta};
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
     body_store, config, dashboard, eviction, ingest, leader, local_tokenize, observation_sink,
-    observations, policy, pool, pool_manager, prom, rate_limit, telemetry, token_review, version,
+    observations, policy, pool, pool_manager, prom, telemetry, token_review, version,
 };
 
 #[derive(Parser, Debug)]
@@ -844,15 +844,13 @@ pub async fn run() -> Result<()> {
             });
         }
 
-        // Two more services on the SAME listener. Each owns its own toggle and
+        // One more service on the SAME listener. It owns its own toggle and
         // its own metrics, so there is nothing to decide here. Token review
         // acquires a kube client and a failure is fatal — see its `start`.
         let token_review =
             token_review::start(&cfg.token_review, prom.registry(), listen_addr).await?;
-        let rate_limit = rate_limit::start(&cfg.rate_limit, prom.registry(), listen_addr);
 
         Server::builder()
-            .add_optional_service(rate_limit)
             .add_optional_service(token_review)
             .add_service(
                 PickerServer::from_arc(service)

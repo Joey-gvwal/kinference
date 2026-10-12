@@ -4785,7 +4785,7 @@
       "id": 66,
       "type": "row",
       "title": "Admission control & body store",
-      "description": "Rate limiting and token review (both off by default), plus the request-body buffer.",
+      "description": "Token review (off by default), plus the request-body buffer.",
       "collapsed": true,
       "gridPos": {
         "h": 1,
@@ -4795,10 +4795,10 @@
       },
       "panels": [
         {
-          "id": 58,
+          "id": 59,
           "type": "timeseries",
-          "title": "Rate limiting",
-          "description": "CONDITIONALLY REGISTERED: this family does not exist at all unless `[rate_limit] enabled = true`, which defaults false. An empty panel therefore means the FEATURE IS OFF, not that nothing is being limited — which is why there is no `or vector(0)` here. `commit_not_found` is the interesting outcome: a reservation that was never committed, i.e. leaked capacity.",
+          "title": "Token review",
+          "description": "CONDITIONALLY REGISTERED: this family does not exist at all unless `[token_review] enabled = true`, which defaults false, so an empty panel means the FEATURE IS OFF. `transport` and `timeout` are INFRASTRUCTURE failures — the apiserver was unreachable — not auth denials. Any alert that groups them with `denied` conflates 'we could not check' with 'we checked and said no'. Note there is no `allowed` value here despite what the reference docs say; the real values are the seven below.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -4807,135 +4807,6 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 158
-          },
-          "fieldConfig": {
-            "defaults": {
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 10,
-                "spanNulls": true,
-                "showPoints": "never",
-                "stacking": {
-                  "mode": "normal"
-                },
-                "axisPlacement": "auto"
-              },
-              "unit": "suffix:rpm",
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "allowed"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "green"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "commit_ok"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "green"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "commit_not_found"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "#FF9800"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "invalid"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "#D32F2F"
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "options": {
-            "legend": {
-              "showLegend": false,
-              "displayMode": "list",
-              "placement": "bottom",
-              "calcs": []
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "editorMode": "code",
-              "expr": "60 * sum by (outcome) (rate(kinference_rate_limit_total{namespace=\"$namespace\"}[$__rate_interval]))",
-              "refId": "A",
-              "range": true,
-              "legendFormat": "{{outcome}}"
-            }
-          ]
-        },
-        {
-          "id": 59,
-          "type": "timeseries",
-          "title": "Token review",
-          "description": "Also CONDITIONALLY REGISTERED (`[token_review] enabled = true`, defaults false). `transport` and `timeout` are INFRASTRUCTURE failures — the apiserver was unreachable — not auth denials. Any alert that groups them with `denied` conflates 'we could not check' with 'we checked and said no'. Note there is no `allowed` value here despite what the reference docs say; the real values are the seven below.",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 8,
             "y": 158
           },
           "fieldConfig": {
@@ -5049,7 +4920,7 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
+            "x": 8,
             "y": 158
           },
           "fieldConfig": {

@@ -252,57 +252,6 @@ message ReviewTokenResponse {
 }
 
 /*
-Token-based rate limiting: reserve then reconcile.
-
-Conformance
-
-A `limit` of 0 means no window is enforced, so `remaining` carries no
-information. Omit rate-limit headers entirely in that case rather than
-reporting a budget of zero, which reads as throttled when it means the
-opposite.
-*/
-service RateLimiter {
-  rpc Reserve(ReserveRequest) returns (ReserveResponse);
-  rpc Commit(CommitRequest) returns (CommitResponse);
-}
-
-message ReserveRequest {
-  string tenant_id = 1;
-  int64 max_tokens = 2;
-}
-
-message ReserveResponse {
-  bool allowed = 1;
-  int64 request_id = 2;
-  int64 retry_after_ms = 3;
-  int64 limit = 4;
-  int64 remaining = 5;
-  int64 window_ms = 6;
-  DenialReason reason = 7;
-}
-
-enum DenialReason {
-  DENIAL_REASON_UNSPECIFIED = 0;
-  DENIAL_REASON_OVER_BUDGET = 1;
-  DENIAL_REASON_EXCEEDS_LIMIT = 2;
-}
-
-message CommitRequest {
-  int64 request_id = 1;
-  int64 actual_tokens = 2;
-}
-
-message CommitResponse {
-  CommitStatus status = 1;
-}
-
-enum CommitStatus {
-  COMMIT_STATUS_UNSPECIFIED = 0;
-  COMMIT_STATUS_OK = 1;
-  COMMIT_STATUS_NOT_FOUND = 2;
-}
-
-/*
 Body push/pull conformance check
 
 Clients MUST:
