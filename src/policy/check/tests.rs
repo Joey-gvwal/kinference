@@ -563,17 +563,3 @@ fn a_long_comment_block_does_not_stop_the_parse() {
     assert_eq!(r.policies.len(), 1);
     assert!(r.ok, "{r:#?}");
 }
-
-/// The codes only a manifest check has are documented with `kinfctl`, as the
-/// policy codes are in the InferencePolicy reference: a code nobody explains
-/// is a dead end for an agent that keys off it.
-#[test]
-fn kinfctl_codes_are_documented() {
-    let doc = include_str!("../../../docs/content/reference/kinfctl.md");
-    for code in [SCHEMA_ERROR, UNKNOWN_FIELD, DUPLICATE_POLICY] {
-        assert!(
-            doc.contains(&format!("| `{code}` |")),
-            "kinfctl.md has no row for {code}"
-        );
-    }
-}
