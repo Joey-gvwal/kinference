@@ -5,3 +5,5 @@
 !build.rs
 !proto
 !src
+!crates
+!dashboard/dist

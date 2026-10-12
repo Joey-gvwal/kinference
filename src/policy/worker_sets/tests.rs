@@ -254,6 +254,62 @@ fn a_kv_events_block_with_no_port_is_rejected() {
     );
 }
 
+/// End to end for the portless-`kvEvents` case: `desired_pools` refuses it,
+/// `rejection_index` projects the reason, and `bind` hands back `Incomplete`
+/// — the same shape as a provider missing its `backendRef`, because in both
+/// the object simply does not say enough to route to.
+#[test]
+fn a_portless_kv_events_block_binds_as_incomplete() {
+    use crate::policy::crd::{Destination, InferencePool, InferencePoolSpec};
+    use crate::policy::resolve::{PoolIndex, UnresolvedReason, rejection_index, resolve};
+
+    let mut spec = full_spec();
+    spec.kv_events = Some(KvEvents {
+        port: None,
+        replay_port: None,
+    });
+    let ws = iws("infra", "workers-h100", spec);
+    let (pools_built, rejections) = desired_pools(
+        std::slice::from_ref(&ws),
+        &[profile("h100")],
+        &DiscoveryDefaults::default(),
+    );
+    assert!(pools_built.is_empty(), "refused, so it produced no pool");
+
+    let mut pool = InferencePool::new(
+        "chat",
+        InferencePoolSpec {
+            destinations: vec![Destination {
+                kind: Some("InferenceWorkerSet".into()),
+                name: Some("workers-h100".into()),
+                ..Default::default()
+            }],
+            policy_ref: None,
+        },
+    );
+    pool.metadata.namespace = Some("infra".into());
+    let idx = resolve(
+        &[std::sync::Arc::new(pool)],
+        &[],
+        &[std::sync::Arc::new(ws)],
+        &[],
+        &[],
+        &[],
+        // The pool map is what `desired_pools` actually built: empty.
+        &PoolIndex::new(),
+        &rejection_index(&rejections),
+    );
+
+    // On the pool: reported, not silently dropped.
+    let p = idx.lookup("infra", "chat").unwrap();
+    assert_eq!(p.unresolved.len(), 1);
+    assert_eq!(p.unresolved[0].reason, UnresolvedReason::Incomplete);
+
+    // And on the set's own entry, which is where an operator looks.
+    let e = idx.worker_sets().next().unwrap();
+    assert_eq!(e.bound.as_ref().err(), Some(&UnresolvedReason::Incomplete));
+}
+
 /// Omitting the block entirely stays legal — that is the supported way to say
 /// these engines publish nothing, and it must not be confused with the case
 /// above.

@@ -20,7 +20,6 @@
 // These types are declared ahead of their consumers — the predicate compiler,
 // engine, store and status writer land in later steps — so many are not
 // constructed yet. Same convention as the config structs.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 

@@ -3,7 +3,7 @@
 //!
 //! ## Deliberately NOT in the publish gate
 //!
-//! [`super::store::PolicyWatcher`] blocks its first publish until every CRD
+//! The router's `store::PolicyWatcher` blocks its first publish until every CRD
 //! kind has completed its initial list, because resolving mid-list would
 //! publish a snapshot claiming every pool had vanished. Services are
 //! deliberately outside that gate: no pool, policy, destination or status field
@@ -17,8 +17,6 @@
 //! reporting a Service absent that has merely not been read yet. A consumer
 //! that must not guess — a controller about to write a `BackendBinding`, say —
 //! waits for that flag; everything else keeps working exactly as before.
-
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

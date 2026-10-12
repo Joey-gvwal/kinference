@@ -6,7 +6,7 @@ use super::*;
 /// silently admitted local candidates.
 #[test]
 fn a_consider_group_type_shorthand_reaches_the_compiled_filter() {
-    let spec: crate::policy::crd::InferencePolicySpec = serde_json::from_value(serde_json::json!({
+    let spec: crate::crd::InferencePolicySpec = serde_json::from_value(serde_json::json!({
         "rules": [{
             "name": "r",
             "route": {
@@ -30,11 +30,10 @@ fn a_consider_group_type_shorthand_reaches_the_compiled_filter() {
 #[test]
 fn the_two_consider_spellings_compile_the_same() {
     let mk = |route: serde_json::Value| {
-        let spec: crate::policy::crd::InferencePolicySpec =
-            serde_json::from_value(serde_json::json!({
-                "rules": [{"name": "r", "route": route}]
-            }))
-            .unwrap();
+        let spec: crate::crd::InferencePolicySpec = serde_json::from_value(serde_json::json!({
+            "rules": [{"name": "r", "route": route}]
+        }))
+        .unwrap();
         CompiledPolicy::compile("p", &spec).rules[0].route.consider[0]
             .backends
             .backend_type
@@ -50,7 +49,7 @@ fn the_two_consider_spellings_compile_the_same() {
     assert_eq!(short, Some(BackendType::Local));
     assert_eq!(short, long);
 }
-use crate::policy::predicate::RequestAttrs;
+use crate::predicate::RequestAttrs;
 use serde_json::json;
 
 fn policy(v: serde_json::Value) -> CompiledPolicy {
@@ -444,7 +443,7 @@ fn a_bad_drop_term_removes_nothing_instead_of_everything() {
             "select": [{"minimize": "PredictedTTFT"}]}}]
     }));
     let drop = &p.rules[0].route.exclude[0].drop;
-    let local = crate::policy::predicate::CandidateAttrs {
+    let local = crate::predicate::CandidateAttrs {
         backend_type: Some("Local".into()),
         queued_prompts: Some(100.0),
         ..Default::default()
@@ -550,7 +549,7 @@ fn a_guard_on_an_unemittable_tag_warns_about_failing_open() {
 // that fires on a correct policy teaches people to stop reading warnings, which
 // costs more than the bug it was written to catch.
 
-use crate::policy::warning::WarningCode;
+use crate::warning::WarningCode;
 
 /// The codes present, for compact assertions.
 fn codes(p: &CompiledPolicy) -> Vec<WarningCode> {

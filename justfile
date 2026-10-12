@@ -3,8 +3,9 @@ set shell := ["bash", "-eo", "pipefail", "-c"]
 IMAGE_REPO := "kinference"
 IMAGE_TAG := "latest"
 IMAGE := IMAGE_REPO + ":" + IMAGE_TAG
-# Baked into the binary via `option_env!` in src/version.rs; defaults to the
-# image tag so `kinference --version` identifies the build it came from.
+# Baked into both binaries via `option_env!` (src/version.rs and
+# crates/kinfctl/src/version.rs); defaults to the image tag so
+# `kinference --version` identifies the build it came from.
 KINFERENCE_VERSION := IMAGE_TAG
 
 default: list
@@ -40,7 +41,7 @@ image:
 # install `kinfctl`, the InferencePolicy checker, into ~/.cargo/bin
 [group('build')]
 install-cli:
-    cargo install --path . --bin kinfctl --locked
+    cargo install --path crates/kinfctl --locked
 
 # `cli-bin` builds `kinfctl` for one rust target and lays it out the way
 # the release workflow attaches it to the GitHub release:
@@ -58,7 +59,7 @@ cli-bin target="":
     target='{{target}}'
     target=${target:-$(rustc -vV | sed -n 's/^host: //p')}
     KINFERENCE_VERSION='{{KINFERENCE_VERSION}}' \
-        cargo build --release --locked --bin kinfctl --target "$target"
+        cargo build --release --locked -p kinfctl --target "$target"
     case $target in
       aarch64-apple-darwin)      os_arch=darwin-arm64 ;;
       x86_64-apple-darwin)       os_arch=darwin-amd64 ;;

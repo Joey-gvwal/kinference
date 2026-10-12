@@ -25,8 +25,6 @@
 //! else is `NoMatchingPool`, normally the brief window between the object
 //! appearing and the reconcile running.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -410,7 +408,7 @@ pub struct ResolvedPolicy {
     /// inverse. Rendering it back would show something the operator never
     /// wrote and could not diff against their manifest. Shared, not cloned —
     /// this is the same allocation the watcher already holds.
-    pub spec: Arc<crate::policy::crd::InferencePolicySpec>,
+    pub spec: Arc<crate::crd::InferencePolicySpec>,
     /// Pools whose `policyRef` names this policy. EMPTY means nothing routes
     /// through it — reported rather than left to be inferred from a blank column.
     ///
@@ -421,13 +419,13 @@ pub struct ResolvedPolicy {
     /// Names in the policy that match nothing in the pools referencing it —
     /// see [`super::lint`]. Empty when nothing references the policy: there is
     /// nothing to check its names against.
-    pub reference_warnings: Vec<crate::policy::warning::PolicyWarning>,
+    pub reference_warnings: Vec<crate::warning::PolicyWarning>,
 }
 
 impl ResolvedPolicy {
     /// Compile and name warnings together, in that order — what
     /// `status.warnings` and the policy API report.
-    pub fn all_warnings(&self) -> impl Iterator<Item = &crate::policy::warning::PolicyWarning> {
+    pub fn all_warnings(&self) -> impl Iterator<Item = &crate::warning::PolicyWarning> {
         self.policy.warnings.iter().chain(&self.reference_warnings)
     }
 }
@@ -970,8 +968,7 @@ pub fn resolve(
                 .filter_map(|pool| index.pools.get(&(namespace.clone(), pool.clone())))
                 .map(Arc::as_ref)
                 .collect();
-            let reference_warnings =
-                crate::policy::lint::reference_warnings(&p.spec, &attached).warnings;
+            let reference_warnings = crate::lint::reference_warnings(&p.spec, &attached).warnings;
             Some(Arc::new(ResolvedPolicy {
                 namespace,
                 name,
@@ -1190,10 +1187,10 @@ fn resolve_provider(
     })
 }
 
-pub(crate) const POLICY_GROUP: &str = "kinference.buoyant.io";
-pub(crate) const POLICY_KIND: &str = "InferencePolicy";
-pub(crate) const GATEWAY_BACKEND_GROUP: &str = "gateway.linkerd.io";
-pub(crate) const GATEWAY_BACKEND_KIND: &str = "GatewayBackend";
+pub const POLICY_GROUP: &str = "kinference.buoyant.io";
+pub const POLICY_KIND: &str = "InferencePolicy";
+pub const GATEWAY_BACKEND_GROUP: &str = "gateway.linkerd.io";
+pub const GATEWAY_BACKEND_KIND: &str = "GatewayBackend";
 
 /// Whether a `ReferenceGrant` in `target_ns` permits `from_kind` objects in
 /// `from_ns` to reference `(group, kind, name)` there.

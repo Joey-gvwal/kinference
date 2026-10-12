@@ -670,7 +670,7 @@ fn an_empty_tenant_does_not_match_a_named_tenant() {
 /// day it is added rather than the day someone remembers to extend a fixture.
 #[test]
 fn every_candidate_attr_name_round_trips_through_serde() {
-    use crate::policy::crd::CandidatePredicate;
+    use crate::crd::CandidatePredicate;
     use serde_json::json;
 
     // Driven entirely off `CandidateAttr`'s own list and its own names: a

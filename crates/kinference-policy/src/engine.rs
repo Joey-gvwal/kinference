@@ -23,8 +23,6 @@
 //! is built in and runs before the author's exclusions**, then exclusions, then
 //! the ordered `select` tiers, then `tieBreak`.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -124,7 +122,7 @@ impl Candidate {
     /// substituted with `0.0` is the *best* possible score, so the candidate that
     /// knows least about itself would win every comparison. `rank` drops these
     /// instead.
-    pub(crate) fn objective_ms(&self, rank: &Rank) -> Option<f32> {
+    pub fn objective_ms(&self, rank: &Rank) -> Option<f32> {
         match (rank, &self.target) {
             (
                 Rank::MinimizePredictedTtft | Rank::MinimizeEstimatedTtft,

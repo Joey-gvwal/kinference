@@ -17,7 +17,7 @@
 //! **`qos` is the one exception: array-only.** Its CRD schema enumerates the
 //! closed domain rather than preserving unknown fields, and a schema with an
 //! enum needs a single YAML type — so `qos: [batch]` is the only accepted form
-//! and `qos: batch` is rejected by the API server. See [`compile_qos`].
+//! and `qos: batch` is rejected by the API server. See `compile_qos`.
 //!
 //! Two things here are deliberate:
 //!
@@ -42,8 +42,6 @@
 //! into "absent" would make `{not: pii-detected}` fail to match a request nobody
 //! screened. So classifiers emit an explicit `-unknown` tag instead of nothing;
 //! see [`super::classify`].
-
-#![allow(dead_code)]
 
 use std::time::Duration;
 
@@ -654,7 +652,7 @@ impl CompiledRequestPredicate {
     ///
     /// A term that fails to compile is reported in `issues` and replaced by
     /// one that never matches, so the whole predicate can never be satisfied —
-    /// see [`compile_term`] for why it must not simply be left out.
+    /// see `compile_term` for why it must not simply be left out.
     pub fn compile(raw: &RequestPredicate, issues: &mut Vec<TermIssue>) -> Self {
         let mut terms = Vec::new();
         let mut push = |attr: RequestAttr, v: &Option<serde_json::Value>| {
