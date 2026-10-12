@@ -6,7 +6,7 @@ use crate::policy::predicate::CandidateAttrs;
 use crate::pool::PoolId;
 
 /// Fixtures are JSON, not YAML, following the convention `crd/tests.rs`
-/// established. These mirror `tests/fixtures/demo/policy-*.yaml`.
+/// established. These mirror the demo policies in `src/policy/check/tests.rs`.
 fn policy(json: serde_json::Value) -> CompiledPolicy {
     let spec: InferencePolicySpec =
         serde_json::from_value(json).expect("fixture is a valid InferencePolicySpec");

@@ -15,12 +15,326 @@ fn opts() -> Options {
     }
 }
 
-fn read(path: &str) -> Input {
-    let full = format!("{}/{path}", env!("CARGO_MANIFEST_DIR"));
+// The demo fleet: one pool over three local worker sets and one provider, and
+// the policies written against it. These are the manifests several tests
+// share; one only a single test needs is written inline in that test.
+
+const POOL_ALL: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePool
+metadata:
+  name: inference-all
+  namespace: default
+spec:
+  destinations:
+    - {kind: InferenceWorkerSet, name: gemma-4-12b}
+    - {kind: InferenceWorkerSet, name: qwen-2-5-32b}
+    - {kind: InferenceWorkerSet, name: qwen-3-6-35b-a3b}
+    - {kind: InferenceProvider,  name: databricks}
+"#;
+
+const WORKERSET_GEMMA_4: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferenceWorkerSet
+metadata:
+  name: gemma-4-12b
+  namespace: default
+spec:
+  profile: default
+  kvBlockSize: 64
+  serviceRef:
+    name: gemma-4-12b-vllm
+    port: http
+  kvEvents:
+    port: kv-pub
+  models:
+    - {name: google/gemma-4-12B-it, aliases: [gemma-4]}
+"#;
+
+const WORKERSET_QWEN_2_5: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferenceWorkerSet
+metadata:
+  name: qwen-2-5-32b
+  namespace: default
+spec:
+  profile: default
+  kvBlockSize: 16
+  serviceRef:
+    name: qwen-vllm
+    port: http
+  kvEvents:
+    port: kv-pub
+  models:
+    - name: Qwen/Qwen2.5-32B-Instruct-AWQ
+      aliases: [qwen-2.5, qwen-simple]
+"#;
+
+const WORKERSET_QWEN_3_6_35B_A3B: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferenceWorkerSet
+metadata:
+  name: qwen-3-6-35b-a3b
+  namespace: default
+spec:
+  profile: default
+  kvBlockSize: 16
+  serviceRef:
+    name: qwen-3-6-35b-a3b-vllm
+    port: http
+  kvEvents:
+    port: kv-pub
+  models:
+    - {name: Qwen/Qwen3.6-35B-A3B, aliases: [qwen3.6]}
+"#;
+
+const PROVIDER_DATABRICKS: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferenceProvider
+metadata:
+  name: databricks
+  namespace: default
+spec:
+  backendRef:
+    name: databricks
+  api: OpenAI
+  path: /serving-endpoints/vllm-endpoint/invocations
+  models:
+    - name: Qwen/Qwen2.5-32B-Instruct-Turbo
+      aliases: [qwen-2.5, qwen-simple, HuggingFaceTB/SmolLM2-135M-Instruct]
+      contextWindow: 32768
+"#;
+
+const POLICY_1: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: policy-1, namespace: default}
+spec:
+  rules:
+  - name: simple-goes-to-gemma
+    matches:
+    - model: qwen-2.5
+      tag: complexity-low
+    route:
+      consider:
+      - models: {names: [gemma-4]}
+      select: [{type: Local, minimize: PredictedTTFT}]
+"#;
+
+const POLICY_3: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: policy-3, namespace: default}
+spec:
+  rules:
+  - name: burst-to-cloud
+    matches:
+      - tenant: ""
+    route:
+      exclude:
+      - name: drop-by-queue-size
+        drop:
+          backend:       {type: Local}
+          queuedPrompts: {greaterThan: 4}
+      - name: drop-by-kvcache-usage
+        drop:
+          backend:       {type: Local}
+          kvCacheUsage:  {greaterThan: 0.5}
+      select:
+      - {type: Local,    minimize: PredictedTTFT}
+      - {type: Provider, order: [databricks]}
+"#;
+
+const POLICY_4: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: policy-4, namespace: default}
+spec:
+  rules:
+  - name: local-first-with-provider-no-pii
+    matches:
+      - tenant: ""
+    route:
+      exclude:
+      - name: drop-backed-up-endpoints
+        drop:
+          backend:       {type: Local}
+          queuedPrompts: {greaterThan: 4}
+      - name: drop-endpoints-with-no-kv-headroom
+        drop:
+          backend:       {type: Local}
+          kvCacheUsage:  {greaterThan: 0.1}
+      - name: pii-never-leaves-cluster
+        if:   { tag: [pii-confirmed, pii-unknown] }
+        drop: { backend: {type: Provider} }
+      select:
+      - {type: Local,    minimize: PredictedTTFT}
+      - {type: Provider, order: [databricks]}
+"#;
+
+/// Deliberately wrong in every way `kinfctl check` should catch without a
+/// cluster. Each mistake is one an author, or an assistant guessing names,
+/// makes easily, and none of them fails at `kubectl apply`.
+const BROKEN_POLICY: &str = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: broken, namespace: default}
+spec:
+  rules:
+  - name: burst-to-cloud
+    matches:
+    - tennant: acme                    # misspelled: the API server would drop it
+    route:
+      exclude:
+      - name: shed-saturated
+        drop:
+          backend:      {type: Local}
+          kvCacheUsage: {greaterThan: 80}  # a percentage against a 0-1 fraction
+      select:
+      - {type: Local, order: [qwen-2-5-32b, gemma-4-12b]}  # no Random tie-break
+      - {type: Provider, order: [databriks]}                # misspelled provider
+"#;
+
+fn pool_all() -> Input {
+    input("pool-all.yaml", POOL_ALL)
+}
+
+fn gemma() -> Input {
+    input("workerset-gemma-4.yaml", WORKERSET_GEMMA_4)
+}
+
+fn qwen_2_5() -> Input {
+    input("workerset-qwen-2-5.yaml", WORKERSET_QWEN_2_5)
+}
+
+fn qwen_3_6() -> Input {
     input(
-        path,
-        &std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{full}: {e}")),
+        "workerset-qwen-3-6-35b-a3b.yaml",
+        WORKERSET_QWEN_3_6_35B_A3B,
     )
+}
+
+fn provider() -> Input {
+    input("databricks/provider.yaml", PROVIDER_DATABRICKS)
+}
+
+fn policy_1() -> Input {
+    input("policy-1.yaml", POLICY_1)
+}
+
+fn policy_3() -> Input {
+    input("policy-3.yaml", POLICY_3)
+}
+
+fn policy_4() -> Input {
+    input("policy-4.yaml", POLICY_4)
+}
+
+fn broken() -> Input {
+    input("broken-policy.yaml", BROKEN_POLICY)
+}
+
+/// The whole demo fleet, including the manifests only the whole-fleet tests
+/// need: a second pool, a fourth worker set, two more policies, and the
+/// gateway's half of the provider, which is not a kinference kind and must be
+/// passed over.
+fn fleet() -> Vec<Input> {
+    vec![
+        pool_all(),
+        input(
+            "pool-local.yaml",
+            r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePool
+metadata:
+  name: inference-local
+  namespace: default
+spec:
+  destinations:
+    - {kind: InferenceWorkerSet, name: gemma-4-12b}
+    - {kind: InferenceWorkerSet, name: qwen-2-5-32b}
+    - {kind: InferenceWorkerSet, name: qwen-3-6-35b-a3b}
+    - {kind: InferenceWorkerSet, name: dummy}
+"#,
+        ),
+        gemma(),
+        qwen_2_5(),
+        qwen_3_6(),
+        input(
+            "workerset-dummy.yaml",
+            r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferenceWorkerSet
+metadata:
+  name: dummy
+  namespace: default
+spec:
+  profile: default
+  kvBlockSize: 128
+  serviceRef:
+    name: dummy-vllm
+    port: http
+  kvEvents:
+    port: kv-pub
+  models:
+    - {name: HuggingFaceTB/SmolLM2-135M-Instruct, aliases: [dummy]}
+"#,
+        ),
+        provider(),
+        input(
+            "databricks/gateway-backend.yaml",
+            r#"apiVersion: gateway.linkerd.io/v1alpha1
+kind: GatewayBackend
+metadata:
+  name: databricks
+  namespace: default
+spec:
+  baseURL: https://dbc-8f15bc20-a291.cloud.databricks.com
+  auth:
+    type: OAuth2
+    oauth2:
+      tokenURL: https://${DATABRICKS_SUBDOMAIN}.cloud.databricks.com/oidc/v1/token
+      clientID: ${DATABRICKS_CLIENT_ID}
+      clientSecretRef:
+        name: databricks-oauth
+        key: client-secret
+      scopes: [all-apis]
+      clientAuthMethod: ClientSecretBasic
+"#,
+        ),
+        policy_1(),
+        input(
+            "policy-2.yaml",
+            r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: policy-2, namespace: default}
+spec:
+  rules:
+  - name: simple-can-go-to-gemma-if-faster
+    matches:
+    - model: qwen-2.5
+      tag: complexity-low
+    route:
+      consider:
+      - models: {names: [gemma-4, qwen-2.5]}
+      select: [{type: Local, minimize: PredictedTTFT}]
+"#,
+        ),
+        policy_3(),
+        policy_4(),
+        input(
+            "policy-5.yaml",
+            r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: policy-5, namespace: default}
+spec:
+  rules:
+  - name: batch-only-where-nothing-is-queued
+    matches:
+    - qos: [batch]
+    route:
+      consider:
+      - {type: Local}
+      exclude:
+      - name: require-an-empty-queue
+        drop:
+          backend:       {type: Local}
+          queuedPrompts: {greaterThan: 0}
+      select:
+      - {minimize: PredictedTTFT}
+      onEmpty: Reject
+"#,
+        ),
+    ]
 }
 
 /// The known-keys table is what decides a field is "unknown", so it must be
@@ -153,12 +467,12 @@ fn a_deserialization_error_is_located_and_stops_further_checks() {
 fn spec_findings_are_errors_and_name_findings_warnings() {
     let r = check(
         &[
-            read("tests/fixtures/kinfctl/broken-policy.yaml"),
-            read("tests/fixtures/demo/pool-all.yaml"),
-            read("tests/fixtures/demo/databricks/provider.yaml"),
-            read("tests/fixtures/demo/workerset-gemma-4.yaml"),
-            read("tests/fixtures/demo/workerset-qwen-2-5.yaml"),
-            read("tests/fixtures/demo/workerset-qwen-3-6-35b-a3b.yaml"),
+            broken(),
+            pool_all(),
+            provider(),
+            gemma(),
+            qwen_2_5(),
+            qwen_3_6(),
         ],
         &Options {
             namespace: "default".into(),
@@ -239,7 +553,7 @@ spec:
 
 #[test]
 fn without_a_pool_name_checks_are_skipped_and_say_how_to_run_them() {
-    let r = check(&[read("tests/fixtures/demo/policy-3.yaml")], &opts()).unwrap();
+    let r = check(&[policy_3()], &opts()).unwrap();
     let p = &r.policies[0];
     assert!(!p.name_checks.ran);
     assert_eq!(p.name_checks.skipped, Some(NameCheckSkip::NoPool));
@@ -247,14 +561,10 @@ fn without_a_pool_name_checks_are_skipped_and_say_how_to_run_them() {
 }
 
 /// `policy` checked against the demo pool `default/inference-all`, with
-/// `files` from the demo configs beside it.
-fn against_pool_all(policy: Input, files: &[&str]) -> Report {
+/// `files` from the demo fleet beside it.
+fn against_pool_all(policy: Input, files: Vec<Input>) -> Report {
     let mut inputs = vec![policy];
-    inputs.extend(
-        files
-            .iter()
-            .map(|f| read(&format!("tests/fixtures/demo/{f}"))),
-    );
+    inputs.extend(files);
     let opts = Options {
         namespace: "default".into(),
         pool: Some("default/inference-all".into()),
@@ -262,13 +572,10 @@ fn against_pool_all(policy: Input, files: &[&str]) -> Report {
     check(&inputs, &opts).unwrap()
 }
 
-const ALL_DESTINATIONS: &[&str] = &[
-    "pool-all.yaml",
-    "workerset-gemma-4.yaml",
-    "workerset-qwen-2-5.yaml",
-    "workerset-qwen-3-6-35b-a3b.yaml",
-    "databricks/provider.yaml",
-];
+/// The pool with every destination's own manifest beside it.
+fn all_destinations() -> Vec<Input> {
+    vec![pool_all(), gemma(), qwen_2_5(), qwen_3_6(), provider()]
+}
 
 /// A pool that names its destinations says what each is called and which
 /// class it is, so backend names and classes can be checked from it alone. A
@@ -277,10 +584,7 @@ const ALL_DESTINATIONS: &[&str] = &[
 fn a_pool_alone_is_enough_for_backend_names_and_classes() {
     // policy-4 is right for its pool: a local tier, a provider tier, and
     // `databricks` by name. Given only the pool, none of that may look wrong.
-    let r = against_pool_all(
-        read("tests/fixtures/demo/policy-4.yaml"),
-        &["pool-all.yaml"],
-    );
+    let r = against_pool_all(policy_4(), vec![pool_all()]);
     let p = &r.policies[0];
     assert!(p.is_clean(), "{p:#?}");
     assert!(p.name_checks.ran);
@@ -290,10 +594,7 @@ fn a_pool_alone_is_enough_for_backend_names_and_classes() {
     );
 
     // And a misspelled name still does.
-    let r = against_pool_all(
-        read("tests/fixtures/kinfctl/broken-policy.yaml"),
-        &["pool-all.yaml"],
-    );
+    let r = against_pool_all(broken(), vec![pool_all()]);
     let w: Vec<&str> = r.policies[0]
         .warnings
         .iter()
@@ -324,12 +625,12 @@ fn models_and_labels_need_the_destinations_manifests() {
         r.policies[0].warnings.iter().map(|w| w.code).collect()
     };
     assert_eq!(
-        codes(&against_pool_all(draft(), ALL_DESTINATIONS)),
+        codes(&against_pool_all(draft(), all_destinations())),
         ["UnknownModel", "SelectorMatchesNothing"],
         "`gemma-4-12b` names the worker set, not its model, and no destination is labelled gpu"
     );
     assert!(
-        codes(&against_pool_all(draft(), &["pool-all.yaml"])).is_empty(),
+        codes(&against_pool_all(draft(), vec![pool_all()])).is_empty(),
         "without the manifests there is nothing to check them against"
     );
 }
@@ -349,7 +650,7 @@ fn a_pool_that_does_not_name_its_destinations_needs_their_manifests() {
         namespace: "default".into(),
         pool: Some("default/everything".into()),
     };
-    let policy = || read("tests/fixtures/demo/policy-1.yaml");
+    let policy = policy_1;
     let r = check(&[policy(), pool()], &o).unwrap();
     assert!(!r.policies[0].name_checks.ran);
     assert_eq!(
@@ -358,8 +659,7 @@ fn a_pool_that_does_not_name_its_destinations_needs_their_manifests() {
     );
     assert!(r.ok, "skipping is not a finding");
 
-    let gemma = read("tests/fixtures/demo/workerset-gemma-4.yaml");
-    let r = check(&[policy(), pool(), gemma], &o).unwrap();
+    let r = check(&[policy(), pool(), gemma()], &o).unwrap();
     assert!(r.policies[0].name_checks.ran);
     assert_eq!(r.policies[0].name_checks.skipped, None);
 }
@@ -378,15 +678,7 @@ fn a_listed_destination_without_its_manifest_counts_by_name_only() {
          matches: [{model: Qwen/Qwen3.6-35B-A3B}]\n    route:\n      \
          select: [{order: [qwen-3-6-35b-a3b]}]\n      tieBreak: [Random]\n",
     );
-    let r = against_pool_all(
-        draft,
-        &[
-            "pool-all.yaml",
-            "workerset-gemma-4.yaml",
-            "workerset-qwen-2-5.yaml",
-            "databricks/provider.yaml",
-        ],
-    );
+    let r = against_pool_all(draft, vec![pool_all(), gemma(), qwen_2_5(), provider()]);
     let p = &r.policies[0];
     let codes: Vec<&str> = p.warnings.iter().map(|w| w.code).collect();
     assert_eq!(codes, ["UnknownModel"], "{p:#?}");
@@ -413,7 +705,7 @@ fn input_that_cannot_be_checked_is_an_error_not_a_finding() {
         }
     );
     assert_eq!(
-        check(&[read("tests/fixtures/demo/pool-all.yaml")], &opts()).unwrap_err(),
+        check(&[pool_all()], &opts()).unwrap_err(),
         InputError::NoPolicies
     );
     let o = Options {
@@ -421,7 +713,7 @@ fn input_that_cannot_be_checked_is_an_error_not_a_finding() {
         pool: Some("default/nope".into()),
     };
     assert_eq!(
-        check(&[read("tests/fixtures/demo/policy-1.yaml")], &o).unwrap_err(),
+        check(&[policy_1()], &o).unwrap_err(),
         InputError::PoolNotFound("default/nope".into())
     );
 }
@@ -456,7 +748,7 @@ fn manifests_joined_without_a_separator_get_a_hint() {
 
 #[test]
 fn the_same_policy_twice_is_an_error_on_the_second() {
-    let p = read("tests/fixtures/demo/policy-1.yaml");
+    let p = policy_1();
     let again = input("copy.yaml", &p.text);
     let r = check(&[p, again], &opts()).unwrap();
     assert!(r.policies[0].errors.is_empty());
@@ -468,39 +760,24 @@ fn the_same_policy_twice_is_an_error_on_the_second() {
     );
 }
 
-/// Every manifest that ships must check clean — spec, unknown fields AND names
-/// — so a warning a user sees is about their change, never inherited from an
-/// example. Lists the files itself: `kinfctl` reads no directories.
+/// Every demo policy must check clean — spec, unknown fields AND names —
+/// against the demo pool, so a warning a user sees is about their change,
+/// never inherited from an example.
 ///
 /// Supersedes the old line-scanning check for unemittable tags: a dead tag is
 /// now an `UnemittableTag` warning, and this parses the YAML instead of
 /// guessing at it.
 #[test]
-fn every_shipped_policy_checks_clean_against_its_demo_pool() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/demo");
-    let mut files: Vec<String> = Vec::new();
-    for sub in ["", "/databricks"] {
-        for e in std::fs::read_dir(format!("{dir}{sub}")).unwrap() {
-            let path = e.unwrap().path();
-            if path.extension().is_some_and(|x| x == "yaml") {
-                files.push(path.display().to_string());
-            }
-        }
-    }
-    files.sort();
-    let inputs: Vec<Input> = files
-        .iter()
-        .map(|f| input(f, &std::fs::read_to_string(f).unwrap()))
-        .collect();
+fn every_demo_policy_checks_clean_against_its_pool() {
     let r = check(
-        &inputs,
+        &fleet(),
         &Options {
             namespace: "default".into(),
             pool: Some("default/inference-all".into()),
         },
     )
     .unwrap();
-    assert_eq!(r.policies.len(), 5, "the demo policies moved? {files:?}");
+    assert_eq!(r.policies.len(), 5, "the demo policies changed?");
     for p in &r.policies {
         assert!(p.name_checks.ran, "{}: {:?}", p.policy, p.name_checks);
         assert!(p.is_clean(), "{p:#?}");
@@ -508,42 +785,24 @@ fn every_shipped_policy_checks_clean_against_its_demo_pool() {
     assert!(r.ok, "{:#?}", r.other_errors);
 }
 
-/// And every InferencePolicy anywhere under `tests/fixtures/demo/`, on its own: the spec
-/// checks need no pool, so nothing escapes them by living outside the demo.
+/// And each demo policy on its own: the spec checks need no pool, so nothing
+/// escapes them by only ever being checked beside one.
 #[test]
-fn every_policy_in_the_fixtures_passes_the_spec_checks() {
-    let mut stack = vec![std::path::PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/demo"
-    ))];
+fn every_demo_policy_passes_the_spec_checks_alone() {
     let mut checked = 0;
-    while let Some(dir) = stack.pop() {
-        for e in std::fs::read_dir(&dir).unwrap() {
-            let path = e.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().is_none_or(|x| x != "yaml") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            // The parse decides what is a policy, not a text match: the CRD
-            // itself mentions `kind: InferencePolicy` without being one.
-            let r = match check(&[input(&path.display().to_string(), &text)], &opts()) {
-                Err(InputError::NoPolicies) => continue,
-                other => other.unwrap_or_else(|e| panic!("{}: {e}", path.display())),
-            };
-            for p in &r.policies {
-                checked += 1;
-                assert!(p.is_clean(), "{p:#?}");
-            }
+    for manifest in fleet() {
+        // The parse decides what is a policy, not the file name.
+        let source = manifest.source.clone();
+        let r = match check(&[manifest], &opts()) {
+            Err(InputError::NoPolicies) => continue,
+            other => other.unwrap_or_else(|e| panic!("{source}: {e}")),
+        };
+        for p in &r.policies {
+            checked += 1;
+            assert!(p.is_clean(), "{p:#?}");
         }
     }
-    assert!(
-        checked >= 5,
-        "found only {checked} policies under tests/fixtures/demo/ — did they move?"
-    );
+    assert_eq!(checked, 5, "the demo policies changed?");
 }
 
 /// A long comment block before a list entry is ordinary in a well-documented

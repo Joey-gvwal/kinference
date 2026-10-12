@@ -160,7 +160,16 @@ jobs:
             exit 1
           fi
           (cd target/cli && shasum -a 256 -c -- *.sha256)
-          rc=0; "$bin" check -o json tests/fixtures/demo/policy-2.yaml > /dev/null || rc=$?
+          rc=0; "$bin" check -o json - > /dev/null <<'POLICY' || rc=$?
+          apiVersion: kinference.buoyant.io/v1alpha1
+          kind: InferencePolicy
+          metadata: {name: smoke, namespace: default}
+          spec:
+            rules:
+            - name: r
+              route:
+                select: [{minimize: PredictedTTFT}]
+          POLICY
           if [[ $rc != 0 && $rc != 1 ]]; then
             echo "::error::'$bin check' exited $rc"
             exit 1

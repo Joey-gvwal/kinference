@@ -246,7 +246,7 @@ fn index_with_policy(name: &str, spec: serde_json::Value) -> Arc<PolicyIndex> {
 }
 
 fn policy_5() -> serde_json::Value {
-    // `tests/fixtures/demo/policy-5.yaml`.
+    // policy-5 of the demo fleet in `src/policy/check/tests.rs`.
     serde_json::json!({
         "rules": [{
             "name": "batch-only-where-nothing-is-queued",
@@ -453,7 +453,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
         spec: serde_json::from_value::<InferenceWorkerSetSpec>(serde_json::json!({
             "serviceRef": { "name": "gemma-4-12b-vllm", "port": "http" },
             "profile": "default",
-            // `tests/fixtures/demo/workerset-gemma-4.yaml`.
+            // the gemma-4 worker set of the demo fleet in `src/policy/check/tests.rs`.
             "models": [{ "name": "google/gemma-4-12B-it", "aliases": ["gemma-4"] }],
         }))
         .expect("valid worker set spec"),
@@ -558,7 +558,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
         spec: serde_json::from_value::<InferenceWorkerSetSpec>(serde_json::json!({
             "serviceRef": { "name": "qwen-vllm", "port": "http" },
             "profile": "default",
-            // `tests/fixtures/demo/workerset-qwen-2-5.yaml`.
+            // the qwen-2.5 worker set of the demo fleet in `src/policy/check/tests.rs`.
             "models": [{
                 "name": "Qwen/Qwen2.5-32B-Instruct-AWQ",
                 "aliases": ["qwen-2.5", "qwen-simple"],
