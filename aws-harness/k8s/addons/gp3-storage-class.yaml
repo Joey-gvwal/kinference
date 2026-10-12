@@ -1,0 +1,35 @@
+# gp3 StorageClass for the harness's ephemeral PVCs (init-weights Job's
+# scratch volume).
+#
+# Why we ship this ourselves:
+#   - The EKS managed EBS-CSI addon installs the driver but does NOT
+#     create a StorageClass.
+#   - Some EKS releases ship a `gp2` SC by default with `Immediate`
+#     binding mode, which doesn't reconcile with zone-aware pod
+#     scheduling for AZ-scoped EBS volumes — pods end up Pending.
+#   - Shipping `gp3` explicitly with `WaitForFirstConsumer` guarantees
+#     "schedule the pod first, then provision the volume in the chosen
+#     AZ" regardless of what the cluster came with.
+#
+# Marked default (`storageclass.kubernetes.io/is-default-class: "true"`)
+# so any PVC without an explicit `storageClassName` picks it up — but
+# the init-weights Job template references it by name to be safe even
+# if a cluster operator demotes the default later.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  labels:
+    mm/managed-by: model-harness
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  fsType: ext4
+  # gp3 baseline is 3000 IOPS / 125 MB/s — plenty for safetensors I/O.
+  # Bump these explicitly if a workload ever needs more.
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true

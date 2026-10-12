@@ -1,0 +1,21 @@
+# InferenceModel — maps the OpenAI "model" field in API requests to the InferencePool.
+#
+# The EPP (Endpoint Picker) looks up the InferenceModel matching the incoming
+# request's model name and routes to the associated InferencePool.
+# Without this object, every request returns "backend does not exist".
+#
+# spec.modelName must match:
+#   1. The "model" field clients send in API requests
+#   2. The model name vLLM is serving (set by modelArtifacts.name in modelservice-values.yaml)
+#
+# Applied by: make addons (scripts/install-addons.sh)
+apiVersion: inference.networking.k8s.io/v1alpha2
+kind: InferenceModel
+metadata:
+  name: gemma-4-26b
+  namespace: default
+spec:
+  modelName: "cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
+  criticality: Standard
+  poolRef:
+    name: gemma-4-26b-pool

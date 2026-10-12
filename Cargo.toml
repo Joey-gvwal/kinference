@@ -1,0 +1,124 @@
+[package]
+name = "kinference"
+version = "0.1.0"
+edition = "2024"
+# Edition 2024 needs 1.85; kube 4.2 raises the real floor to 1.89.
+rust-version = "1.89"
+license = "Apache-2.0"
+
+[dependencies]
+dynamo-kv-router = { git = "https://github.com/ai-dynamo/dynamo", rev = "12207ba2cb397e40e260d39bce3f65c6fc799a49", default-features = false }
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
+# `ReceiverStream` for wrapping our mpsc::Receiver into the
+# `tonic::codegen::tokio_stream::Stream` shape the server-streaming
+# `PullBody` method requires. Already a transitive dep via tonic, but
+# pulled in directly for clarity.
+tokio-stream = "0.1"
+# SHA-256 for the TokenReview cache key. Must be CRYPTOGRAPHIC: a fast hash
+# would let a caller who can present tokens construct a collision against
+# someone else's cached positive and be handed their identity.
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+zmq = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+# YAML for `kinfctl check`. The same version kube-client already compiles in
+# for kubeconfig parsing, so this adds no crate to the build.
+serde-saphyr = "0.0.29"
+# Locates a deserialization error inside a policy spec. Already in the tree
+# through axum's JSON extractor.
+serde_path_to_error = "0.1"
+dashmap = "6"
+# `prometheus-parse` PARSES worker /metrics (scrape side). `prometheus` is the
+# EXPOSITION side — the typed registry + counters behind our own /metrics
+# endpoint. default-features = false drops the procfs process-collector we
+# don't use; Registry / IntCounterVec / TextEncoder are core.
+prometheus-parse = "0.2"
+prometheus = { version = "0.13", default-features = false }
+axum = "0.7"
+rust-embed = "8"
+mime_guess = "2"
+async-trait = "0.1"
+# K8s discovery (`discovery.mode = "kubernetes"`) and the kinference.buoyant.io CRD
+# watch/status writer. Two client-construction policies live in the tree
+# deliberately: `Config::incluster_env()` in `discovery::kubernetes` (kubeconfig
+# is refused there because pod IPs are unroutable from outside the cluster) and
+# `Config::infer()` in `policy::{store,status}` so the controller side stays
+# testable against a local cluster.
+#
+# `derive` supplies `#[derive(CustomResource)]` for the CRD types in
+# `src/policy/crd.rs` (see also `schemars`, which it requires).
+kube = { version = "4", default-features = false, features = ["client", "runtime", "rustls-tls", "derive"] }
+# `latest` is a VERSION selector, not a scope selector — k8s-openapi has no way
+# to compile a subset of the API surface, so this builds all of it for the few
+# types we use (EndpointSlice, Lease, ObjectMeta). Cost is inherent to the crate.
+k8s-openapi = { version = "0.28", features = ["latest"] }
+# Required by `kube`'s `CustomResource` derive, which generates a `JsonSchema`
+# impl. We never emit a schema (the CRDs in `k8s/crds/` are hand-written and are the
+# source of truth) — this is purely to satisfy the derive, so nothing downstream
+# consumes its output.
+schemars = "1"
+futures = "0.3"
+# Scout-mode in-process tokenization. `http` feature enables
+# `Tokenizer::from_pretrained` Hub fetch; `onig` provides the regex
+# pre-tokenizer most modern models need. Skip default features to
+# avoid pulling python-binding scaffolding.
+tokenizers = { version = "0.23", default-features = false, features = ["http", "onig"] }
+# Jinja2-compatible template renderer for chat templates loaded from
+# tokenizer_config.json. Small, single-dep, serde-context-friendly.
+# `loop_controls` enables `{% break %}` / `{% continue %}` (used by
+# Mistral / some Hermes templates); `json` enables the `tojson`
+# filter (used by Llama 3.2 vision and others to render tool
+# definitions).
+minijinja = { version = "2.20", features = ["loop_controls", "json"] }
+# `pycompat` lives in `minijinja-contrib` (not the core crate). It
+# ships an unknown-method callback that maps Python-style dict methods
+# like `.get(key, default)` / `.items()` / `.keys()` to minijinja
+# equivalents — Gemma 3/4 chat templates call
+# `message.get('reasoning')` and friends, so without this the template
+# fails at render with "map has no method named get". The env in
+# `local_tokenize::render_chat_template` wires the callback per env.
+minijinja-contrib = { version = "2.20", features = ["pycompat"] }
+# Used by `local_tokenize::render_chat_template` to register the
+# `strftime_now` Jinja global (Llama 3.1+ chat templates call it for
+# the system message's date line). Already transitively pulled in by
+# `k8s-openapi` so this adds nothing to compile time. Default features
+# (clock, std) give us `chrono::Utc::now()` + `.format(strftime_str)`.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Random pick within the top-K pool of EPP candidates (anti-dogpiling).
+# Tiny, no_std-compatible, OS-entropy-only. Ports the same dep used by
+# the gw-pc reference plugin so semantics match.
+getrandom = "0.2"
+
+[lints.clippy]
+# Service-facing functions return `tonic::Status` (and `(Status, RejectReason)`)
+# by contract, and `Status` is a large type. Boxing gRPC errors on a cold path
+# is unidiomatic churn at every call site, so the lint is off crate-wide rather
+# than allowed at each of the handful of signatures it flags.
+result_large_err = "allow"
+
+[dev-dependencies]
+# `ServiceExt::oneshot`, to drive the admin router in tests exactly as a
+# client would. Already in the tree through axum; this only names the feature.
+tower = { version = "0.5", features = ["util"] }
+# Scoped temp directories for tests that need to lay out a mounted
+# tokenizer directory on disk (Gemma 3/4 sibling-file chat template
+# fallback).
+tempfile = "3"
+
+[build-dependencies]
+tonic-build = "0.12"
+# Bundled `protoc` binary + the google/protobuf/*.proto well-known
+# Avoids depending on whatever protoc happens to be in the Docker base
+# image, or on one being installed at all. `kinference.proto` imports no
+# well-known types, so this is now about availability and version skew
+# rather than about bundled includes.
+protoc-bin-vendored = "3"

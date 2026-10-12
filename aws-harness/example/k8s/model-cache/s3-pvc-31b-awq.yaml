@@ -1,0 +1,15 @@
+# PersistentVolumeClaim — Gemma 4 31B AWQ-4bit weights
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gemma-4-31b-awq-weights
+  namespace: default
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 20Gi
+  volumeName: gemma-4-31b-awq-weights
+  storageClassName: ""

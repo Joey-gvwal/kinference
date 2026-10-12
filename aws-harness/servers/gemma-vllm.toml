@@ -1,0 +1,34 @@
+# Server instance: Gemma 4 31B AWQ on a single L40S.
+#
+# Matches the model_name from config.aws.example.toml in the parent project,
+# so a fresh `make monitor-config` emits a config that lines up with the
+# example file.
+
+name = "gemma-vllm"
+engine = "vllm"
+
+# The gemma4 architecture needs transformers >= 5.5.0. vLLM's :gemma4 tag
+# bundles it; the default :latest may not.
+image = "vllm/vllm-openai:gemma4"
+
+model_name = "google/gemma-4-31B-it"
+
+# AWQ INT4 weights — ~16 GB on disk, fits one L40S comfortably.
+weights_s3_prefix = "weights/gemma-4-31b-awq/"
+
+instance_type = "g6e.xlarge"
+gpu_count = 1
+block_size = 16
+
+replicas = 10
+
+extra_args = [
+  # On a single L40S (48 GiB VRAM) at gpu-memory-utilization=0.95, the KV
+  # cache budget after weights + CUDA overhead is ~21 GiB — enough for
+  # ~25K tokens of Gemma context. Going higher than ~24576 makes vLLM
+  # refuse to boot. Bump to 32K+ only if you switch to a multi-GPU pod
+  # (g6e.12xlarge + tensor_parallel_size=4) or accept a smaller context.
+  "--max-model-len=16384",
+  "--gpu-memory-utilization=0.95",
+  "--enable-prefix-caching",
+]

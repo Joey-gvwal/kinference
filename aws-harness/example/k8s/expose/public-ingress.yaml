@@ -1,0 +1,38 @@
+# public-ingress.yaml — ALB Ingress for public access.
+#
+# Routes all traffic to llm-d-inference-gateway, which dispatches via
+# HTTPRoutes:
+#   /linky  → linky (URLRewrite strips /linky)
+#   /model  → InferencePool        (URLRewrite strips /model)
+#
+# Applied by `make public`, removed by `make private`.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: inference-public
+  namespace: llmd
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    # Tag the ALB so it shows up alongside the rest of the project's AWS
+    # resources in Resource Groups / tag-based cost reports.  Matches the
+    # Project/Owner keys used by default_tags in terraform/, terraform-dns/,
+    # and terraform-cdn/.
+    alb.ingress.kubernetes.io/tags: Project=inference,Owner=william@buoyant.io
+    # HTTPS + cert ARN patched in by expose.sh when ACM cert is available.
+    # Restrict by CIDR if ALLOWED_CIDR is set (patched in by expose.sh).
+    # alb.ingress.kubernetes.io/inbound-cidrs: "0.0.0.0/0"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-d-inference-gateway
+                port:
+                  number: 80

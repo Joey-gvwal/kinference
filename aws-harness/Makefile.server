@@ -1,0 +1,78 @@
+# Makefile.server — per-server-instance lifecycle.
+#
+# A "server" here is one independently-configured inference engine (vLLM
+# or SGLang today; TrtLLM / KServe later) running as its own Helm release
+# inside the cluster provisioned by Makefile. Multiple servers can run
+# side by side; each exposes its own KV-events ZMQ sockets + HTTP /metrics.
+#
+# All targets assume the cluster is already up (`make up`), addons are
+# installed (`make addons`), and there is enough GPU capacity for the
+# requested gpu_count (`make scale-gpu N=...`).
+#
+# Usage:
+#   make -f Makefile.server server-up CFG=servers/qwen-vllm.toml
+#   make -f Makefile.server server-up CFG=servers/qwen-vllm.toml REPLICAS=3
+#                                              # deploy-time replicas override
+#                                              # (transient — TOML stays source of truth)
+#   make -f Makefile.server port-forward NAME=qwen-vllm
+#   make -f Makefile.server monitor-config > config.toml
+#   make -f Makefile.server server-down CFG=servers/qwen-vllm.toml
+
+CLUSTER_NAME ?= model-harness
+KUBECONFIG   ?= $(HOME)/.kube/$(CLUSTER_NAME)
+NAMESPACE    ?= default
+
+# Optional deploy-time override for the TOML's `replicas` field. Passing
+# `REPLICAS=N` on the make command line overrides whatever's in the TOML
+# for this one invocation; the TOML file is not modified. Leave unset to
+# use the TOML's value (or 1 if absent).
+REPLICAS ?=
+
+export KUBECONFIG NAMESPACE REPLICAS
+
+.PHONY: server-up server-down port-forward port-forward-stop monitor-config list-servers help
+
+## Deploy one server. Requires CFG=servers/<name>.toml.
+## Optional: REPLICAS=N overrides the TOML's `replicas` field for this run.
+server-up:
+	@if [ -z "$(CFG)" ]; then echo "ERROR: pass CFG=servers/<name>.toml"; exit 1; fi
+	ACTION=up bash scripts/render-server.sh $(CFG)
+
+## Remove one server. Requires CFG=servers/<name>.toml.
+server-down:
+	@if [ -z "$(CFG)" ]; then echo "ERROR: pass CFG=servers/<name>.toml"; exit 1; fi
+	ACTION=down bash scripts/render-server.sh $(CFG)
+
+## Forward HTTP + KV ports for every managed server (or one if NAME is set).
+## Idempotent: re-running reconciles desired-state and prints the port map.
+## Per-server offsets keep multi-server runs collision-free.
+##   make -f Makefile.server port-forward                # all servers
+##   make -f Makefile.server port-forward NAME=qwen-vllm # one server
+## Background processes survive shell exit; stop them with port-forward-stop.
+port-forward:
+	bash scripts/port-forward.sh $(NAME)
+
+## Kill harness-spawned kubectl port-forward processes.
+##   make -f Makefile.server port-forward-stop           # all
+##   make -f Makefile.server port-forward-stop NAME=qwen-vllm  # one
+port-forward-stop:
+	ACTION=stop bash scripts/port-forward.sh $(NAME)
+
+## Emit a kinference config.toml on stdout reflecting every server in
+## the cluster. Pipe into a file:
+##   make -f Makefile.server monitor-config > ../config.aws.toml
+monitor-config:
+	bash scripts/gen-monitor-config.sh
+
+## List server pods managed by this harness. One row per pod; a StatefulSet
+## with replicas=3 produces three rows. MODEL reads from annotations, not
+## labels, because model names like "Qwen/Qwen2.5-32B-Instruct-AWQ" contain
+## "/" which K8s rejects as a label value.
+list-servers:
+	@kubectl get pods -l mm/managed-by=model-harness \
+	  --all-namespaces \
+	  -o custom-columns='POD:.metadata.name,NS:.metadata.namespace,SERVER:.metadata.labels.mm/server-name,ENGINE:.metadata.labels.mm/engine,MODEL:.metadata.annotations.mm/model,READY:.status.containerStatuses[0].ready,STATUS:.status.phase' 2>/dev/null \
+	  || echo "(none)"
+
+help:
+	@grep -E '^##' Makefile.server | sed 's/^## //'

@@ -1,0 +1,39 @@
+Roughly this is what you want to do, circa Apr 2026:
+
+Use the 31b-awq makefile. This is the model, quantization, and parameterization
+that fits into a single g6e.xlarge instance with enough room for some modest
+concurrency at a 64k context window. Plenty of other options to try to vary the
+cost/quality/context size/concurrency tradeoff, but this is where I've landed
+for now.
+
+# set these variables first
+export CLUSTER_NAME=<short cluster name e.g. wm-inf-31b-v2>
+export TF_WORKSPACE=$CLUSTER_NAME
+export TFVARS=$CLUSTER_NAME.tfvars
+export KUBECONFIG=$HOME/.kube/$CLUSTER_NAME
+
+# to boot up
+make -f Makefile.31b-awq infra         # provisions AWS stuff. ~15 mins
+make -f Makefile.31b-awq addons        # deploy non-model k8s components. ~5 mins
+make -f Makefile.31b-awq init-weights  # get the model weights into S3. you don't need this unless you are trying a new model, but it's a noop will take 30-45 mins
+make -f Makefile.31b-awq inference     # deploy model and load into GPU. ~15 mins, 5 mins of container pulling them 10-15 mins of loading. many ways for things to go wrong here. tail the logs on the decoder pod in default namespace
+make -f Makefile.31b-awq linky-server  # deploy linky server, finally
+make -f Makefile.31b-awq public        # do ALB stuff to expose this to the public
+make -f Makefile.31b-awq endpoint      # setup dns stuff to point drlinky.buoyant.cloud  here
+
+# to tear everything down
+make -f Makefile.31b-awq down
+
+There are many other makefile targets to step forward and backwards through the
+above. Check 'em out.
+
+# to publish drlinky binaries so that they are accessible to the installer script (hosted in s3)
+# (you will make this in the other repo with `make dist TAG=v0.11`
+
+TAG=<version e.g. 0.11>
+for i in checksums.txt drlinky-darwin-arm64.tar.gz drlinky-linux-arm64.tar.gz drlinky-darwin-amd64.tar.gz drlinky-linux-amd64.tar.gz
+do
+  make -f Makefile.shared release FILE=~/devel/linky/dist/$i KEY=$TAG/$i
+  make -f Makefile.shared release FILE=~/devel/linky/dist/$i KEY=latest/$i
+done
+

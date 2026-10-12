@@ -1,0 +1,138 @@
+# Weight-download Job for Gemma 4 26B-A4B AWQ.
+#
+# Downloads model weights from HuggingFace directly to S3.
+# S3 is the permanent store; no EBS PVC is involved.
+#
+# Two-stage process:
+#   Stage 1 (initContainer "hf-download"):
+#     huggingface_hub.snapshot_download → /shared (emptyDir, 20 Gi staging space)
+#   Stage 2 (main container "s3-upload"):
+#     aws s3 sync /shared → s3://471112539178-us-west-2/weights/gemma-4-26b-awq/
+#
+# Idempotency:
+#   init-weights.sh checks S3 file count BEFORE creating this Job.
+#   If > 5 files exist in the S3 prefix the Job is never submitted.
+#   This Job itself is always created fresh (no sentinel logic here).
+#
+# Authentication:
+#   GPU node IAM role (instance profile) provides s3:PutObject + s3:ListBucket.
+#   No IRSA or explicit credentials needed.
+#
+# Scheduling:
+#   Runs on GPU nodes (nodeSelector: role=gpu) because only GPU nodes carry the
+#   S3 IAM policy. GPU taint is tolerated; no GPU resource is requested.
+#
+# Called by: scripts/init-weights.sh (make init-weights)
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gemma-4-26b-download
+  namespace: default
+  labels:
+    app: model-downloader
+    model: gemma-4-26b
+spec:
+  # Retry up to 2 times on transient failures (network blip, pod eviction, etc.)
+  backoffLimit: 2
+  # Hard ceiling: 3 hours covers the worst-case HF download (~13 GB at slow speeds).
+  activeDeadlineSeconds: 10800
+  template:
+    metadata:
+      labels:
+        app: model-downloader
+        model: gemma-4-26b
+    spec:
+      restartPolicy: OnFailure
+
+      # GPU nodes carry the s3:PutObject IAM permission needed to upload weights.
+      nodeSelector:
+        role: gpu
+
+      # Tolerate the GPU taint — we don't request the GPU device itself,
+      # so this Job won't displace vLLM inference workloads.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      # ── Stage 1: HuggingFace download ────────────────────────────────────────
+      initContainers:
+        - name: hf-download
+          # python:3.11-slim (~130 MB) is sufficient — we only need huggingface_hub.
+          # huggingface_hub is pure-Python and installs in a few seconds.
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip install -q --no-cache-dir huggingface_hub
+              python3 -c "
+              from huggingface_hub import snapshot_download
+              model_repo = 'cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit'
+              dest       = '/shared'
+              print(f'Downloading {model_repo} -> {dest} (~13 GB) ...')
+              snapshot_download(
+                  repo_id=model_repo,
+                  local_dir=dest,
+                  ignore_patterns=['*.pt', 'original/*'],
+              )
+              print('HuggingFace download complete.')
+              "
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          env:
+            # Keep huggingface_hub caches off the read-only parts of the image.
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/hf-home
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+      # ── Stage 2: Upload to S3 ─────────────────────────────────────────────────
+      containers:
+        - name: s3-upload
+          image: amazon/aws-cli:2.22.0
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              S3_URI="s3://471112539178-us-west-2/weights/gemma-4-26b-awq/"
+              MODEL_ID="cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
+              echo "Uploading /shared → ${S3_URI} ..."
+              aws s3 sync /shared "${S3_URI}" \
+                --no-progress \
+                --only-show-errors
+              # Write model identity metadata so init-weights.sh can verify
+              # the correct weights are present on future runs.
+              echo "${MODEL_ID}" | aws s3 cp - "${S3_URI}.model-id"
+              echo ""
+              FILE_COUNT=$(aws s3 ls "${S3_URI}" --recursive | wc -l | tr -d ' ')
+              echo "Upload complete. ${FILE_COUNT} files now in S3 (model: ${MODEL_ID})."
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          resources:
+            requests:
+              cpu: "2"
+              memory: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "2Gi"
+
+      volumes:
+        # Staging area shared between the two stages.
+        # sizeLimit is advisory (eviction threshold); actual limit is node disk space.
+        # GPU nodes have a 200 Gi root volume (var.gpu_disk_size_gb) — 13 Gi fits easily.
+        - name: shared
+          emptyDir:
+            sizeLimit: 20Gi

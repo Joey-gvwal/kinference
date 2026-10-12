@@ -1,0 +1,16 @@
+# DEPRECATED — no longer needed with llm-d-modelservice + GAIE architecture.
+#
+# Previously this file split traffic 50/50 between two KServe InferenceService
+# predictors. With the GAIE InferencePool, the EPP automatically distributes
+# requests across all healthy decode pods (from any helm release) that match
+# the InferencePool's label selector:
+#
+#   llm-d.ai/inference-serving: "true"
+#   llm-d.ai/model: mistral-7b
+#
+# For 2-node scaled serving, run `make inference-scaled` which installs two
+# llm-d-modelservice releases (mistral-7b-0 and mistral-7b-1). Both release's
+# pods get picked up by the same InferencePool. The HTTPRoute in
+# httproute.yaml is used in all cases (single or scaled).
+#
+# This file is kept for historical reference and can be safely deleted.

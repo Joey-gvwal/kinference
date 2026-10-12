@@ -1,0 +1,33 @@
+# ClusterIP service. Two ports:
+#   - dashboard  (9001)  — live /api/snapshot + the embedded React SPA
+#   - grpc       (50051) — what consumers call for Pick()
+#
+# ClusterIP keeps all ports internal. To reach them from your laptop:
+#
+#   kubectl -n default port-forward svc/kinference 50051:50051 9001:9001
+#
+# Then point `score --server localhost:50051` and a browser at
+# http://localhost:9001.
+#
+# If you'd rather expose externally, change `type` to LoadBalancer (AWS
+# will provision an NLB) and consider TLS — the gRPC server is plaintext.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kinference
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kinference
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kinference
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    - name: dashboard
+      port: 9001
+      targetPort: dashboard
+      protocol: TCP

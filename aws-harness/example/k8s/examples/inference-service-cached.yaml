@@ -1,0 +1,64 @@
+# InferenceService — Mistral 7B Instruct served from the EBS model-cache volume.
+#
+# Prerequisites:
+#   • `make init-weights` must have completed (weights on mistral-7b-weights PVC)
+#   • vllm-runtime ServingRuntime applied (k8s/runtimes/vllm-serving-runtime.yaml)
+#   • KServe installed and running
+#   • GPU nodes ready (check: kubectl get nodes -l role=gpu)
+#
+# Differences from inference-service.yaml (HF download fallback):
+#   • MODEL_NAME points to /model-cache (local volume, not HuggingFace)
+#   • Mounts the mistral-7b-weights PVC at /model-cache
+#   • maxReplicas: 1  — EBS ReadWriteOnce volumes can only be mounted by one
+#                       node at a time.  For multi-replica scaling, use the HF
+#                       download variant (inference-service.yaml) which lets each
+#                       node independently cache weights to its 100 GB local disk.
+#   • Cold-start is ~2-3 minutes instead of ~10 minutes (no network download).
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: mistral-7b
+  namespace: default
+  annotations:
+    llmd.io/enabled: "true"
+    llmd.io/routing-strategy: "kv-cache-aware"
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1   # EBS ReadWriteOnce — see note above
+
+    # Pod-level volumes (must be at spec.predictor, not spec.predictor.model).
+    volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: mistral-7b-weights
+          readOnly: true
+
+    model:
+      modelFormat:
+        name: vllm
+      runtime: vllm-runtime
+
+      # Point vLLM at the local PVC path rather than a HuggingFace repo ID.
+      # The ServingRuntime passes $(MODEL_NAME) directly to vLLM's --model flag.
+      env:
+        - name: MODEL_NAME
+          value: "/model-cache"
+
+      # Container-level mount.
+      volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+          readOnly: true
+
+      # ── Resources ─────────────────────────────────────────────────────────
+      resources:
+        requests:
+          cpu: "2"
+          memory: "8Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "4"
+          memory: "14Gi"
+          nvidia.com/gpu: "1"

@@ -1,0 +1,25 @@
+apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: policy-4, namespace: default}
+spec:
+  rules:
+  - name: local-first-with-provider-no-pii
+    matches:
+      - tenant: ""
+    route:
+      exclude:
+      - name: drop-backed-up-endpoints
+        drop:
+          backend:       {type: Local}
+          queuedPrompts: {greaterThan: 4}
+      - name: drop-endpoints-with-no-kv-headroom
+        drop:
+          backend:       {type: Local}
+          kvCacheUsage:  {greaterThan: 0.1}
+      - name: pii-never-leaves-cluster
+        if:   { tag: [pii-confirmed, pii-unknown] }
+        drop: { backend: {type: Provider} }
+
+      select:
+      - {type: Local,    minimize: PredictedTTFT}
+      - {type: Provider, order: [databricks]}

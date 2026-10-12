@@ -1,0 +1,13 @@
+# Keep the build context small and reproducible.
+target/
+.git/
+.gitignore
+.claude/
+.dockerignore
+Dockerfile
+README.md
+GETTING-STARTED.md
+aws-harness/
+tests/
+config.aws.toml
+**/*.swp

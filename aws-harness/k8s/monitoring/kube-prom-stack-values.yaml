@@ -1,0 +1,127 @@
+# kube-prometheus-stack values for the harness's benchmark observability.
+#
+# Stack components retained:
+#   • Prometheus + Prometheus Operator
+#   • Grafana (sidecar auto-discovers ConfigMaps labeled grafana_dashboard=1)
+#   • kube-state-metrics + node-exporter (for free K8s-level panels)
+#
+# Disabled:
+#   • Alertmanager — nothing to alert on for benchmark/eval workloads.
+#
+# Storage: Prometheus uses emptyDir (chart default) with 24h retention.
+# Pod restart loses history; that's acceptable for benchmark cluster usage
+# where you re-run anyway. If you ever need durability, set:
+#   prometheus.prometheusSpec.storageSpec.volumeClaimTemplate:
+#     spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 50Gi } } }
+
+alertmanager:
+  enabled: false
+
+prometheusOperator:
+  # Run the operator on system nodes (CPU-only) like the rest of the
+  # non-engine infra in this harness.
+  nodeSelector:
+    role: system
+
+prometheus:
+  prometheusSpec:
+    # Discover any PodMonitor in any namespace, not just ones with the
+    # chart's release label. Without this override the operator
+    # ignores our standalone vllm-podmonitor.yaml because it doesn't
+    # carry the `release=kube-prom-stack` selector.
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    # Benchmark cluster — 24h scrape history is plenty.
+    retention: 24h
+    # Cap on disk so emptyDir doesn't fill the node.
+    retentionSize: "10GB"
+    nodeSelector:
+      role: system
+    # Memory budget tuned for a benchmark cluster on t3.medium system
+    # nodes (~3.3 GiB allocatable each, ~1.7 GiB free after kube-system
+    # workloads). 1 GiB request is enough for ~24h retention against
+    # 5-10 vLLM pods at default scrape interval — typical series count
+    # is a few thousand, well under the per-GB-per-day TSDB rule of
+    # thumb. If Prometheus starts OOMing under higher cardinality
+    # (more pods, more dashboards, or longer retention), either bump
+    # this to 1.5-2Gi and add a third system node, or move the system
+    # NG to t3.large in terraform.
+    resources:
+      requests:
+        cpu: "300m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+
+grafana:
+  # Random password generated at install time and written to
+  # Secret/kube-prom-stack-grafana under key `admin-password`.
+  # `make grafana-endpoint` extracts and prints it alongside the URL.
+  adminPassword: ""
+
+  # Sidecar dashboards: the chart ships with this enabled and watching
+  # for ConfigMaps labeled grafana_dashboard=1. Make the contract
+  # explicit so future edits don't accidentally disable it.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+
+  service:
+    # We front Grafana with our own NLB Service (k8s/monitoring/
+    # grafana-public.yaml.tmpl) via scripts/expose-grafana.sh, so the
+    # chart's own Service stays ClusterIP. Keeps the helm release
+    # reversible without churning the LB.
+    type: ClusterIP
+
+  nodeSelector:
+    role: system
+
+  # Raised from 256Mi/512Mi after the 512Mi limit turned out to be the reason
+  # the UI loaded but every panel sat on a spinner: working set pinned at
+  # ~506Mi, readiness probe timing out, liveness returning 503 intermittently
+  # for 16h. Prometheus was fine throughout (range queries ~0.26s) — the
+  # bottleneck was Grafana in permanent GC pressure at its ceiling. A dashboard
+  # with dozens of panels pushes it over; the ~250Mi baseline left no headroom.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "512Mi"
+    limits:
+      # NO CPU LIMIT, deliberately. CFS throttling is enforced per 100ms
+      # period, so a 500m cap does not slow a burst down — it stalls it, and
+      # opening a dashboard is exactly a burst (one range query per panel, all
+      # at once). Throttling an interactive UI trades a fast page for a hung
+      # one. The request still reserves a share and the memory limit still
+      # bounds the blast radius.
+      memory: "1Gi"
+
+  # The chart default is a 1s timeout on /api/health, which a Grafana under any
+  # real load cannot answer in time — that is why the pod reads NotReady rather
+  # than merely slow, and why the NLB periodically pulls it out of service.
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    timeoutSeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+
+# kube-state-metrics + node-exporter: kept on. Free K8s and node-level
+# dashboards (which kube-prom-stack ships pre-loaded) come from these.
+kube-state-metrics:
+  nodeSelector:
+    role: system
+
+prometheus-node-exporter:
+  # node-exporter MUST run on every node (DaemonSet) including GPU
+  # nodes — that's its job. No nodeSelector override.
+  tolerations:
+    # Tolerate the GPU taint so the DaemonSet schedules on GPU nodes too.
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

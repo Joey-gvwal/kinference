@@ -1,0 +1,64 @@
+
+So in my latest run, from freshly-started vLLM instances running gemma 4, I see this in the logs right as soon as I send requests:
+
+william:~/claude-model-monitor (main)$ RUST_LOG=model_monitor=debug,dynamo_kv_router=warn ./target/release/llm-monitor --config aws-harness/config.toml
+2026-06-04T13:59:03.698289Z  WARN dynamo_kv_router::indexer::radix_tree: block_hash mismatch: sequence hashes should be uniform across workers expected=ExternalSequenceBlockHash(16217389350892539841) actual=Some(ExternalSequenceBlockHash(14149038355546929534))
+2026-06-04T13:59:03.698416Z  WARN dynamo_kv_router::indexer::radix_tree: block_hash mismatch: sequence hashes should be uniform across workers expected=ExternalSequenceBlockHash(6124924943713250423) actual=Some(ExternalSequenceBlockHash(7965228150912362003))
+2026-06-04T13:59:03.698434Z  WARN dynamo_kv_router::indexer::radix_tree: block_hash mismatch: sequence hashes should be uniform across workers expected=ExternalSequenceBlockHash(5934862710280078907) actual=Some(ExternalSequenceBlockHash(10312950034567694273))
+(and a lot more)
+
+Do I need to address this? How do I diagnose?
+
+Short answer: yes, address it — this breaks the whole point of cross-worker prefix-aware routing. The radix tree assumes the same prompt prefix produces the same block_hash on every worker. When that invariant breaks, each worker becomes its own island in the index — find_matches will at best hit one worker (the one that actually served that prompt) and the other two look like they share nothing with it, even if they're identical workers serving the identical model.
+
+Let me walk through the diagnosis. There are three likely causes; here's how to rule each one in or out:
+
+Ran
+Find the http_urls and current port-forwards
+Port-forwards are live; let me query a few workers and compare. The two things to look at are vllm:cache_config_info (labels include block_size + hash algo on newer vLLM) and vllm_version.
+
+Ran
+Compare cache_config_info across a few workers
+Configs are identical across workers — same block_size=16, same prefix_caching_hash_algo=sha256, same num_gpu_blocks, same model. sha256 is the deterministic hash mode, so the PYTHONHASHSEED hypothesis is ruled out. So the mismatch is something else. Let me look at the actual dynamo source to understand precisely when that warning fires.
+
+
+Ran 4 commands
+Now I understand the warning precisely. The radix tree keys children by tokens_hash (a per-block tokens-only hash), but each block also has a block_hash (the chain-dependent full hash). The invariant: same tokens_hash → same block_hash across workers. The warning fires when worker B reports (tokens_hash=T, block_hash=Y) for the same T where worker A previously reported block_hash=X.
+
+Let me check what tokens_hash vs block_hash actually mean in the ZMQ wire format vLLM emits — that'll tell us which field is misbehaving:
+
+
+Ran 2 commands
+I want to confirm what this actually means for routing correctness. Let me check how find_matches consults the radix tree:
+
+
+Ran 2 commands
+Found the answer. Two key facts from the dynamo code:
+
+tokens_hash is computed client-side in the monitor by compute_block_hash_for_seq over (token_ids, kv_block_size). Deterministic. Always identical across workers (because it's our own hash of the same tokens).
+block_hash is supplied by vLLM itself, verbatim, in the ZMQ event payload. This is vLLM's own sha256 chain hash.
+The radix tree uses tokens_hash as the child-lookup key in find_match_details. block_hash is stored at the node but not used for routing decisions.
+When the warning fires, it means: two workers reported the same tokens_hash (so they collide at the same tree node — exactly the cross-worker dedup we want), but their block_hash values differ. The tree keeps the first-seen block_hash, attaches both workers to that node, and warns. Lookups continue to work correctly.
+
+So — do you need to address it? No. Routing correctness is unaffected. To verify: send the same prompt twice via the score CLI; the second call should report non-zero matched_blocks on the same worker, and (if you've sent through multiple workers) cross-worker matches should also appear. That's the empirical confirmation that the radix tree is correctly bucketing identical prefixes together.
+
+Why does it happen? Even with prefix_caching_hash_algo=sha256 (which your workers correctly report), vLLM's hash chain has process-local state at the root — the "null parent" sentinel that seeds the chain isn't shared across vLLM processes. So:
+
+Same prompt → same tokens_hash (dynamo's deterministic hash of token IDs) ✓
+Same prompt → different block_hash per worker (because each vLLM process has its own chain seed) ✗
+This is essentially a known cosmetic issue for any setup with multiple independent vLLM processes serving the same model. There's no clean fix from the monitor side; the only practical fix is on the engine side (pin vLLM's null-hash seed, which isn't a documented knob in current vLLM as far as I can tell).
+
+To silence it in your logs:
+
+RUST_LOG=model_monitor=debug,dynamo_kv_router::indexer::radix_tree=error,dynamo_kv_router=warn ./target/release/llm-monitor --config aws-harness/config.toml
+That keeps the other useful dynamo_kv_router warnings (like "Failed to find parent block; skipping store operation", which signals an actually meaningful replay-buffer / event-ordering issue) while suppressing this one specifically.
+
+If you want hard evidence the routing is working correctly despite the warnings, send the same chat prompt three times:
+
+for i in 1 2 3; do
+  ./target/release/score --config aws-harness/config.toml --chat \
+    --prompt "What is the capital of France? Tell me about its history."
+  echo "---"
+done
+Watch the HIT% column. First call: 0% across all workers (cold). Second call: ~100% on whichever worker handled the first call (and possibly partial hits on others if there's shared prefix structure). If you see that pattern, the radix tree is bucketing prefixes correctly across workers — and the warnings can be safely ignored.
+

@@ -1,0 +1,18 @@
+# servers/qwen-vllm.toml
+name              = "qwen-vllm"
+engine            = "vllm"
+image             = "vllm/vllm-openai:v0.28.0"         # pinned (was :latest on 2026-05-15)
+model_name        = "Qwen/Qwen2.5-32B-Instruct-AWQ"    # what clients pass as "model"
+weights_s3_prefix = "weights/qwen-2-5-32b-awq/"        # ← note the actual prefix in the bucket
+instance_type     = "g6e.xlarge"
+gpu_count         = 1
+block_size        = 16
+replicas          = 3
+
+extra_args = [
+  "--max-model-len=32768",
+  "--gpu-memory-utilization=0.95",
+  "--enable-prefix-caching",
+  "--enable-prompt-tokens-details",                     # expose cached vs uncached prompt tokens in usage + metrics
+  "--quantization=awq_marlin",                          # tell vLLM the weights are AWQ
+]

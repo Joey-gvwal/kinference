@@ -1,0 +1,33 @@
+# HTTPRoute — routes /linky traffic from the ALB to linky.
+#
+# Strips the /linky prefix via URLRewrite so the backend receives requests
+# at / (the linky server's root).
+#
+# Applied by `make linky-server` / `make -f Makefile.31b linky-server` etc.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: linky-route
+  namespace: linky
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: llm-d-inference-gateway
+      namespace: llmd
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /linky
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: linky
+          port: 8080
+          weight: 1

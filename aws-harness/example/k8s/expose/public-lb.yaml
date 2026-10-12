@@ -1,0 +1,29 @@
+# public-lb.yaml — Standalone AWS NLB for public inference access.
+#
+# Creates a separate LoadBalancer service targeting the same pods as the
+# llm-d-inference-gateway service, without touching the agentgateway-managed
+# service (which agentgateway owns and reconciles — patching it breaks things).
+#
+# Applied by `make public`, removed by `make private`.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-public-lb
+  namespace: llmd
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  # Local: only route to nodes that have the pod. Fixes NLB asymmetric routing —
+  # without this, kube-proxy may forward to a pod on another node, and the response
+  # bypasses the NLB entirely, causing client TCP hangs.
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/instance: llm-d-inference-gateway
+    app.kubernetes.io/name: llm-d-inference-gateway
+    gateway.networking.k8s.io/gateway-name: llm-d-inference-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

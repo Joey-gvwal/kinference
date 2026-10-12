@@ -1,0 +1,71 @@
+# Public NLB fronting the in-cluster `gateway` Service. Created by
+# `make expose-gateway`, torn down by `make unexpose-gateway`.
+#
+# Why NLB (not ALB):
+#   NLB does multi-port TCP pass-through natively in one Service — cheap
+#   whether the gateway exposes one port or five. ALB would require an
+#   IngressGroup or multi-listener gymnastics; its L7 advantages (path
+#   routing, WAF, header rewrites) aren't being used here.
+#
+# Why a parallel Service (not patching `gateway` itself):
+#   `gateway` is user-managed, outside the harness. Patching its
+#   `.spec.type` from ClusterIP → LoadBalancer would couple the harness
+#   to a Service it doesn't own. This parallel Service mirrors the
+#   selector AND the port list of the source Service (both rendered in
+#   at apply time), so it targets the same backing pods and forwards
+#   only the ports the pod actually listens on — no health-check drift
+#   when the source's port config changes.
+#
+# Rendered by scripts/expose-gateway.sh from these env vars
+# (referenced below as $-prefixed placeholders, which the script
+# substitutes via python os.path.expandvars):
+#   SELECTOR_YAML  — YAML-indented "key: value" lines copied from
+#                    the source Service's spec.selector
+#   PORTS_YAML     — YAML-indented list of port entries mirrored from
+#                    the source Service's spec.ports (one entry per
+#                    port, all forced to TCP protocol)
+#   PUBLIC_SVC     — Name for this NLB Service, conventionally
+#                    "<source-svc>-public". Both the Service name
+#                    and mm/component label pull from this so the
+#                    down/endpoint subcommands can find the object
+#                    they created.
+#   OWNER_TAG      — Owner tag value (`git config user.email`) so
+#                    the NLB shows up under `make find-resources`
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${PUBLIC_SVC}
+  namespace: default
+  labels:
+    mm/managed-by: model-harness
+    mm/component: ${PUBLIC_SVC}
+  annotations:
+    # `external` opts into AWS Load Balancer Controller (vs. the legacy
+    # in-tree cloud provider). `loadBalancerClass` below seals that
+    # choice — kube-controller-manager won't reconcile this Service.
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    # internet-facing → assigned public IPs in each subnet. Use
+    # `internal` for VPC-only access (we want public here).
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    # `ip` targets pod IPs directly via the VPC CNI ENIs, bypassing
+    # kube-proxy. Lower latency and avoids the iptables hop. The
+    # alternative `instance` mode would route through NodePorts.
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    # Cost-attribution tags so this NLB shows up next to the rest of
+    # the cluster's resources under `make find-resources`.
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "Project=model-harness,Owner=${OWNER_TAG}"
+spec:
+  type: LoadBalancer
+  # Pins NLB-via-LBC. Without this annotation the in-tree cloud
+  # provider would try to create a Classic ELB.
+  loadBalancerClass: service.k8s.aws/nlb
+  # `Cluster` policy: any node can be a target, kube-proxy spreads
+  # traffic. `Local` would only target nodes hosting gateway pods —
+  # cleaner client IP preservation but requires the gateway pods to be
+  # spread across nodes the NLB can reach. `Cluster` is safer for the
+  # general case.
+  externalTrafficPolicy: Cluster
+  selector:
+${SELECTOR_YAML}
+  ports:
+${PORTS_YAML}

@@ -1,0 +1,178 @@
+# Deployment of kinference. Ships at one replica; >1 is supported but opt-in.
+#
+# What multiple replicas cost:
+#  - Each replica opens its own ZMQ SUB connection per worker, so ingest
+#    traffic is N×.
+#  - In-flight tracking splits across replicas, so each sees ~1/N of the
+#    dispatches it is compensating for. This costs PRECISION, not correctness:
+#    predicted_wait_ms already charges queue entries it has no dispatch record
+#    for via its unknown-queue term, and vLLM's queue depth is re-scraped every
+#    second as ground truth.
+#  - Prefix-cache quality is UNAFFECTED. ZMQ PUB fans out, so every replica
+#    sees every KV event and their radix trees agree. The expensive signal
+#    replicates for free; only the cheap one degrades.
+#
+# To scale past 1 (replicaCount) you must:
+#  1. Set `[leader_election] enabled = true` in the config. Exactly one
+#     replica may write CRD status — see the note on POD_NAME below.
+#  2. Set strategyType=RollingUpdate. `Recreate` (the default) exists precisely
+#     to prevent two replicas overlapping, which is the thing you are now
+#     opting into.
+#  3. Add a PodDisruptionBudget with minAvailable: 1.
+#
+# And note the caller-side constraint: every call for one request
+# (PushBody -> Pick -> PullBody -> the report calls) must reach the SAME
+# replica, because stream_id and response_id index process-local state.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kinference.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kinference.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: {{ .Values.strategyType }}
+  selector:
+    matchLabels:
+      {{- include "kinference.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kinference.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Restart the pod when the config changes; the binary reads it once
+        # at startup.
+        checksum/config: {{ .Values.config | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kinference.fullname" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: kinference
+          image: {{ include "kinference.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/kinference/config.toml"]
+          env:
+            # kinference at debug. dynamo_kv_router at warn, EXCEPT indexer::radix_tree
+            # which is pinned to error: `block_hash mismatch` (radix_tree:389)
+            # fires several times per second under normal load and is COSMETIC
+            # (the tree keys on tokens_hash, which kinference computes itself), but at
+            # that volume it buries everything else in the log — including the
+            # `Failed to find parent block` warning it shares a module with. The
+            # CONSEQUENCE of a broken chain is on the Grafana dashboard instead
+            # (Prefix cache row: matched/requested falling, cold-start rising).
+            # See notes/block-hash-mismatch-warnings.txt for the investigation.
+            #
+            # The other diagnostic WARN stays visible (different module):
+            #   Block not published. Block size must be N tokens ... is: M
+            #     spec.kvBlockSize disagrees with what the engine publishes;
+            #     every block is dropped and the tree stays empty. Set
+            #     kvBlockSize to M.
+            #
+            # For KV-event debugging: kinference=trace,dynamo_kv_router=trace.
+            # Dial kinference back to info for steady-state.
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            {{- if .Values.enableReplay }}
+            # KV-event REPLAY. The flag is checked for PRESENCE, not value, so
+            # the template omits it entirely when disabled.
+            #
+            # What it buys: on attach, the listener requests the event history
+            # it missed instead of starting at the live sequence. Without it,
+            # any prefix already cached in an engine is invisible to kinference
+            # forever. What it costs (see src/ingest.rs): the DEALER replay
+            # loop contends with the tokenize HTTP path, and it can adopt state
+            # for blocks the engine has since evicted (hallucinated cache
+            # hits). Watch `replay complete` vs `replay incomplete` in the log.
+            - name: KINFERENCE_ENABLE_REPLAY
+              value: "1"
+            {{- end }}
+            # holderIdentity on the leader Lease. Harmless at one replica and
+            # required past that: it is what `kubectl get lease -o yaml` shows,
+            # so an operator can tell WHICH pod is writing status.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if .Values.hfTokenSecret }}
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.hfTokenSecret }}
+                  key: HUGGING_FACE_HUB_TOKEN
+            {{- end }}
+            {{- if .Values.observationsCsv }}
+            # Predicted-vs-observed CSV sink (ObservationSink::from_env): one
+            # row per streaming observation, for offline tuning of the
+            # wait-time predictor (analysis/analyze-latency.py).
+            - name: KINFERENCE_OBSERVATIONS_CSV
+              value: {{ .Values.observationsCsv | quote }}
+            {{- end }}
+          ports:
+            - name: dashboard
+              containerPort: 9001
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kinference
+              readOnly: true
+            {{- if .Values.observationsCsv }}
+            - name: latency-csv
+              mountPath: {{ dir .Values.observationsCsv }}
+            {{- end }}
+            {{- if or .Values.tokenizers.existingClaim .Values.tokenizers.configMap }}
+            - name: tokenizers
+              mountPath: /etc/tokenizers
+              readOnly: true
+            {{- end }}
+          # Readiness answers "can this process serve a Pick", NOT "is there
+          # anywhere to route to". A Pick for a model nothing serves answers
+          # NO_WORKERS, which is a correct answer rather than a reason to
+          # refuse traffic. The one 503: policy enabled and the CRD watch not
+          # yet listed, where a Pick naming a pool would silently bypass its
+          # policy.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: dashboard
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          # Liveness catches hard hangs only. Kept as a cheap TCP probe on the
+          # gRPC port — if the listener thread is alive, the process is alive.
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kinference.fullname" . }}-config
+        {{- if .Values.observationsCsv }}
+        # emptyDir is local to the pod and disappears on restart — fine for a
+        # live tuning run, since the operator pulls the file with `kubectl cp`
+        # before redeploying. For durable rows, this is the volume to swap to
+        # a PVC.
+        - name: latency-csv
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.tokenizers.existingClaim }}
+        - name: tokenizers
+          persistentVolumeClaim:
+            claimName: {{ .Values.tokenizers.existingClaim }}
+        {{- else if .Values.tokenizers.configMap }}
+        - name: tokenizers
+          configMap:
+            name: {{ .Values.tokenizers.configMap }}
+        {{- end }}

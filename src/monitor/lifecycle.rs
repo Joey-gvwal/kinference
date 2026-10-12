@@ -1,0 +1,1109 @@
+//! The request lifecycle behind `Pick()` — one request from body to chosen
+//! endpoint, and the observation it leaves behind.
+//!
+//! `pick_and_record` is the meeting point of four subsystems: it reads the
+//! classifiers, builds the policy engine's `RequestAttrs`, reads the metrics
+//! registry, and queries the KV index that ingest populates. It is long
+//! because that sequence is one transaction over a `serde_json::Value` that
+//! gets rewritten and then drained, plus a critical section under the pool's
+//! `pick_lock`; the phases are not independently extractable without handing
+//! a partly-drained tree between them. Its internal decomposition is worth
+//! doing and is deliberately NOT part of the file split.
+//!
+//! The observation half lives here too, because it is the same transaction
+//! seen from the other end: `finalize_observation` and `abort_observation`
+//! release exactly what `pick_and_record` reserved, and the sweeps are the
+//! backstop for a caller that never reports at all.
+
+use std::time::Instant;
+
+use super::*;
+use crate::observations::PendingObservation;
+
+impl KinferenceService {
+    /// Full pick path behind gRPC `Pick()`.
+    /// `decide()`:
+    /// 1. Parse the OpenAI body for model + messages + chat-template
+    ///    inputs. Resolve the `"auto"` pseudo-model to a concrete model,
+    ///    then apply the Pick-time body rewrites (`crate::pick_body`):
+    ///    model="auto" → concrete, and `stream_options.include_usage` for
+    ///    streaming requests.
+    /// 2. Call `score_workers` (which tokenizes + queries the indexer),
+    ///    passing the rewritten body so `/render` sees what the engine will.
+    /// 3. Inside `pick_lock`: apply layered overlap, snapshot
+    ///    InflightRegistry, run the picker, bump inflight, insert
+    ///    inflight-prefix, stash PendingObservation.
+    /// 4. Return the chosen endpoint + request id + the resolved model + the
+    ///    rewritten `body`, which is EMPTY when the body was left alone. Empty
+    ///    is an internal fast path, not a wire contract: `grpc::pick` then
+    ///    re-keys the pushed `Arc` into the body store instead of copying it,
+    ///    and `PullBody` serves a complete body either way.
+    ///
+    /// The caller mints `request_id` (today: per-counter on
+    /// EndpointPickerService / KinferenceService) and passes it in
+    /// so the same id flows through pending-observation lookup and
+    /// log correlation.
+    /// All of (`inflight`, `pick_lock`, `predictor_cfg`, `picker_cfg`,
+    /// `inflight_enabled`) come off `self` — both front-ends call
+    /// this with just the request data. The `request_id` is minted
+    /// by the caller (typically via `self.mint_request_id()` for
+    /// gRPC, folded into the
+    /// shared one — see `EndpointPickerService`).
+    // The request (body, ids) and the routing inputs (qos, pool, identity) are
+    // distinct groups, but neither is large enough to earn a wrapper struct.
+    // Same convention as `ingest::spawn_worker_listener`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn pick_and_record(
+        &self,
+        body: &[u8],
+        request_id: u64,
+        client_request_id: Option<&str>,
+        qos: Qos,
+        pool_ref: Option<&crate::policy::PoolRef>,
+        identity: &crate::policy::RequestIdentity,
+    ) -> PickAndRecordOutcome {
+        let req_label = client_request_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| request_id.to_string());
+
+        // 1. Parse the body into a JSON tree (parsed once). We rewrite this
+        //    tree in place to produce the body the caller forwards upstream
+        //    (see `crate::pick_body`), so a typed struct won't do — it would
+        //    drop unknown fields (temperature, max_tokens, vendor extensions,
+        //    …) we must preserve on the way through.
+        let mut obj: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return PickAndRecordOutcome::BadRequest {
+                    reason: format!("body is not a valid OpenAI ChatCompletionRequest: {e}"),
+                    model: String::new(),
+                };
+            }
+        };
+        if !obj.is_object() {
+            return PickAndRecordOutcome::BadRequest {
+                reason: "body is not a valid OpenAI ChatCompletionRequest: expected a JSON object"
+                    .to_string(),
+                model: String::new(),
+            };
+        }
+
+        // The body is the only source for `model`.
+        let body_model = obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        if body_model.is_empty() {
+            return PickAndRecordOutcome::BadRequest {
+                reason: "request body has an empty or absent `model`".to_string(),
+                model: String::new(),
+            };
+        }
+        let mut model = body_model.to_string();
+
+        // 1a. "auto" pseudo-model: kinference chooses a concrete model for
+        //     this prompt (placeholder: random among known models), then
+        //     routes normally. On cold start with no models known yet,
+        //     fall through to the NoWorkers path below. When resolved,
+        //     `force_model` drives the body rewrite (step 1c) so the
+        //     upstream engine never sees the "auto" pseudo-model.
+        let mut force_model: Option<String> = None;
+        if model == AUTO_MODEL {
+            let messages = obj.get("messages").and_then(|v| v.as_array());
+            match self.choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[])) {
+                Some(chosen) => {
+                    tracing::info!(
+                        req = %req_label,
+                        chosen_model = %chosen,
+                        "auto: resolved pseudo-model to concrete model"
+                    );
+                    model = chosen.clone();
+                    force_model = Some(chosen);
+                }
+                None => {
+                    tracing::info!(
+                        req = %req_label,
+                        "auto: no candidate models available yet (cold start?)"
+                    );
+                    return PickAndRecordOutcome::NoWorkers { model };
+                }
+            }
+        }
+
+        // 1b. Resolve the pools serving this model. Unknown model (no pool has
+        //     claimed it yet) is the multi-pool analog of "no workers serve
+        //     model" — same NoWorkers outcome, which the handler maps to
+        //     gRPC to an empty pick.
+        //
+        //     Usually one pool. Several means two worker sets serve the same
+        //     model, which is redundancy rather than a misconfiguration, so
+        //     all of them are scored below and ranked against each other.
+        let mut serving = self.resolve_pools(&model);
+
+        // 1b-i. Alias fallback. `model_router` only ever holds names an engine
+        //     REPORTED on /v1/models, so a client-facing name declared in an
+        //     InferenceWorkerSet's `spec.models` resolves to nothing here — and
+        //     without this, the request is refused before `policy_select`, the
+        //     only code that knows the alias table, is ever reached.
+        //
+        //     Requires the Pick to name an InferencePool: the alias table lives
+        //     on the resolved worker sets in the policy store, so with `[policy]`
+        //     off or no pool named there is nothing to consult.
+        //
+        //     LIMITATION: takes the first upstream that resolves. Two
+        //     upstream models declared interchangeable under one name therefore
+        //     always route to the same one rather than being ranked as
+        //     candidates — the canonical name is gone by the time
+        //     `policy_select` could expand it. Better than the 404 it replaces;
+        //     preserving the fan-out means carrying the canonical name through
+        //     to the policy stage.
+        if serving.is_empty()
+            && let Some(upstream) = self.resolve_alias(pool_ref, &model)
+        {
+            tracing::info!(
+                req = %req_label,
+                alias = %model,
+                upstream_model = %upstream,
+                "pick: resolved declared alias to an upstream model"
+            );
+            // Drives the body rewrite in step 1c, exactly as `auto` does —
+            // otherwise the engine receives the alias and 404s itself.
+            force_model = Some(upstream.clone());
+            model = upstream;
+            serving = self.resolve_pools(&model);
+        }
+
+        // A model NO local pool serves may still be served off-cluster, and the
+        // provider that declares it is only visible through the named pool. So
+        // this gate has to ask the policy store before refusing, or a
+        // provider-only model 404s before `policy_select` — the only code that
+        // can reach a provider — ever runs.
+        if serving.is_empty() {
+            if !self.provider_serves(pool_ref, &model) {
+                tracing::info!(
+                    req = %req_label,
+                    model = %model,
+                    "pick: no pool serves model (unknown model or cold-start before /v1/models)"
+                );
+                return PickAndRecordOutcome::NoWorkers { model };
+            }
+            tracing::debug!(
+                req = %req_label,
+                model = %model,
+                "pick: no local worker set serves this model, but a provider declares it"
+            );
+        }
+        // NOTE: the per-pool config/handles are deliberately NOT bound here —
+        // both the cross-pool ranking below and a policy may settle on a
+        // different worker set than the one scored first, and borrowing off the
+        // wrong pool would pin the wrong predictor, lock, and inflight registry.
+
+        // 1c. Apply the Pick-time body rewrites (model="auto" → concrete,
+        //     and stream_options.include_usage for streaming requests). Only
+        //     re-serialize when something actually changed: the mutated bytes
+        //     become BOTH the body sent to /render (byte-parity with the
+        //     engine) AND the `body` returned to the caller to forward
+        //     upstream. `wire_body` is empty on the fast path — the caller
+        //     then forwards the original body it already holds.
+        let mutated = crate::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
+        // Streaming vs non-streaming decides whether the eventual first-byte
+        // report is a real TTFT (streaming) or the full-response time
+        // (non-streaming). Captured here; consumed by `finalize_observation`
+        // to decide whether the observation is worth recording.
+        // Engine-compatible coercion, NOT `as_bool` — see
+        // [`crate::pick_body::stream_flag`]. The two readers of this flag must
+        // agree or a request gets its usage block but no TTFT sample.
+        let streaming = crate::pick_body::stream_flag(&obj);
+        // Policy can match on `maxTokens`, and context-window fitting needs it:
+        // a prompt that fits but whose completion doesn't is still a request
+        // that dies partway.
+        let parsed_max_tokens = obj.get("max_tokens").and_then(serde_json::Value::as_i64);
+        let outbound = if mutated {
+            serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
+        } else {
+            body.to_vec()
+        };
+        let mut wire_body = if mutated {
+            outbound.clone()
+        } else {
+            Vec::new()
+        };
+        // What `outbound`/`wire_body` currently NAMES. The model is decided
+        // twice — here, and again if a policy crosses to another worker set — so
+        // the second decision has to know whether the body already agrees.
+        let body_model = model.clone();
+
+        // 2. Score. Pull the chat-template inputs out of the (now disposable)
+        //    tree, and pass the outbound body so the HTTP /render leg gets
+        //    byte-perfect parity with what the engine will see.
+        let messages = match obj.get_mut("messages").map(serde_json::Value::take) {
+            Some(serde_json::Value::Array(v)) => v,
+            _ => Vec::new(),
+        };
+        let tools = match obj.get_mut("tools").map(serde_json::Value::take) {
+            Some(serde_json::Value::Array(v)) => v,
+            _ => Vec::new(),
+        };
+        let tool_choice = obj
+            .get_mut("tool_choice")
+            .map(serde_json::Value::take)
+            .filter(|v| !v.is_null());
+        let add_generation_prompt = obj
+            .get("add_generation_prompt")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let chat_extras = ChatExtras {
+            tools,
+            tool_choice,
+            add_generation_prompt,
+        };
+        // Captured BEFORE scoring consumes `messages`. Cheap (one short String)
+        // and unconditional, unlike `spare` below, because the classifiers run
+        // whether or not a policy is active — their tags feed `RequestAttrs`,
+        // which is assembled after the borrow of `messages` is long gone.
+        // Falls back to the completions-API `prompt` when there are no chat
+        // messages at all.
+        let classifier_text = crate::policy::classify::last_user_text(&messages).or_else(|| {
+            obj.get("prompt")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        // Scoring consumes these, and two things downstream may need them
+        // again: a second pool serving this model, and a policy scoring OTHER
+        // (worker set, model) pairs to build its candidate set. Clone only when
+        // one of those is actually in play, so the ordinary path — one pool, no
+        // policy — pays nothing.
+        let policy_active = pool_ref.is_some() && self.policy.is_some();
+        let spare = (policy_active || serving.len() > 1)
+            .then(|| (messages.clone(), chat_extras.clone(), outbound.clone()));
+        let mut degraded_reason: Option<String> = None;
+        let mut groups: Vec<ScoredGroup> = Vec::new();
+        // Skipped whole when nothing local serves the model. There is nothing to
+        // tokenize FOR — scoring is per-(pool, model) and both halves are
+        // missing — and paying a /render round-trip to score an empty fleet
+        // would be latency spent on a question with no answer.
+        if let Some(first) = serving.first() {
+            let (outcome, score_side) = self
+                .score_workers(
+                    first,
+                    &model,
+                    Input::Messages(messages),
+                    HashMap::new(),
+                    chat_extras,
+                    Some(outbound),
+                    /*record_call_telemetry=*/ true,
+                    Some(&req_label),
+                )
+                .await;
+            match outcome {
+                ScoreOutcome::Ok(resp) => groups.push(ScoredGroup {
+                    pool: first.clone(),
+                    model: model.clone(),
+                    scores: resp.scores,
+                    side: score_side,
+                }),
+                ScoreOutcome::Unavailable(resp, why) => {
+                    tracing::warn!(
+                        req = %req_label,
+                        model = %model,
+                        pool = %first.name,
+                        reason = why.as_label(),
+                        "pick: no prefix-cache signal; picking on load metrics only"
+                    );
+                    self.prom.record_score_degraded(why.as_label());
+                    degraded_reason = Some(why.reason().to_string());
+                    groups.push(ScoredGroup {
+                        pool: first.clone(),
+                        model: model.clone(),
+                        scores: resp.scores,
+                        side: score_side,
+                    });
+                }
+                // Not fatal on its own any more: another pool may still serve the
+                // model, and so may a provider.
+                ScoreOutcome::NoWorkers => {}
+            }
+        }
+
+        // 2a. The remaining pools serving this model, if any. Tokenization
+        //     belongs to the MODEL, so the first group's tokens are reused and
+        //     each extra pool pays only its own block hashing and index query.
+        if serving.len() > 1 {
+            let reuse = groups
+                .first()
+                .map(|g| g.side.tokens.clone())
+                .filter(|t| !t.is_empty());
+            for pool in &serving[1..] {
+                let Some((msgs, extras, raw)) = spare.clone() else {
+                    continue;
+                };
+                let (input, raw) = match reuse.clone() {
+                    Some(t) => (Input::Tokens(t), None),
+                    None => (Input::Messages(msgs), Some(raw)),
+                };
+                let (outcome, side) = self
+                    .score_workers(
+                        pool,
+                        &model,
+                        input,
+                        HashMap::new(),
+                        extras,
+                        raw,
+                        // Call telemetry is recorded once, for the first pool;
+                        // the rest are this one request's fan-out, not new
+                        // traffic.
+                        /*record_call_telemetry=*/
+                        false,
+                        Some(&req_label),
+                    )
+                    .await;
+                let scores = match outcome {
+                    ScoreOutcome::Ok(r) => r.scores,
+                    ScoreOutcome::Unavailable(r, why) => {
+                        self.prom.record_score_degraded(why.as_label());
+                        r.scores
+                    }
+                    ScoreOutcome::NoWorkers => continue,
+                };
+                if scores.is_empty() {
+                    continue;
+                }
+                groups.push(ScoredGroup {
+                    pool: pool.clone(),
+                    model: model.clone(),
+                    scores,
+                    side,
+                });
+            }
+        }
+
+        // 2b. Rank across the pools serving this model, on the same
+        //     `predicted_wait_ms` term the policy path ranks candidates on, so
+        //     "better" means one thing in kinference. This chooses the POOL; the
+        //     picker below still chooses the endpoint within it, under that
+        //     pool's lock.
+        //     `None` here is not yet fatal: a policy may still reach a provider,
+        //     or score a different model on another worker set. It becomes
+        //     `NoWorkers` below only once nothing at all has been chosen.
+        // Exactly ONE ranker records its predictions per request, and it is
+        // whichever one actually ranks. With a policy in play `candidates_for`
+        // sees the real candidate set — including the groups the policy's
+        // `consider` reached that were never scored here — so it records and
+        // this does not. Without one, this is the only ranking that happens.
+        //
+        // Recording in both would double-count the winning group's endpoints
+        // and weight the distribution toward the FASTEST group, biasing the
+        // p95 low — the same bias that argues against recording only winners.
+        //
+        // The one gap: a request naming a pool the watch cannot resolve takes
+        // neither branch and contributes no sample. That case is already
+        // counted as `kinference_policy_decisions_total{outcome="unknown_pool"}` or
+        // `"not_listed"`, so it is visible rather than silent.
+        let policy_will_rank = pool_ref.is_some() && self.policy.is_some();
+        let winner = best_group(
+            groups,
+            &req_label,
+            (!policy_will_rank).then_some(&*self.prom),
+        );
+        if winner.is_none() && serving.is_empty() {
+            // Deliberately not a warning: this is the ordinary shape of a
+            // provider-only model, not a degradation.
+            tracing::debug!(
+                req = %req_label,
+                model = %model,
+                "pick: no local group to score; the decision rests entirely with the policy"
+            );
+        }
+
+        // 2c. Policy. Candidates may span worker sets, and each worker set is a
+        //     different kinference pool with its own `pick_lock` — so ranking cannot
+        //     happen under a lock without risking a deadlock between two
+        //     requests taking pool locks in opposite orders. Rank on a
+        //     lock-free snapshot, then let the winner's group commit under its
+        //     own lock below. The commit still bumps inflight atomically; only
+        //     the RANKING input can be up to one concurrent pick stale.
+        let mut forced_endpoint: Option<String> = None;
+        let selected: Option<ScoredGroup>;
+        if let (Some(pref), Some(store)) = (pool_ref, self.policy.as_ref()) {
+            // Assembled here, where every source is in scope: the request
+            // fields, the caller-resolved identity, and `inputTokens` off the
+            // tokenization prefix hashing already did (block granularity —
+            // ample for the thresholds policies express).
+            let attrs = crate::policy::predicate::RequestAttrs {
+                // Upstream first, then its declared aliases. A predicate
+                // writing either spelling matches, which is what makes `matches`
+                // agree with `route.consider[].models.names[]`.
+                model: {
+                    let mut names = vec![model.clone()];
+                    names.extend(self.declared_aliases(pool_ref, &model));
+                    names
+                },
+                // Block-granular, off the tokenization prefix hashing already
+                // did — which means it is unavailable when nothing local was
+                // scored. `None` there is honest rather than convenient: with no
+                // local engine serving the model there is no tokenizer to count
+                // with, so `inputTokens` predicates and the built-in
+                // context-window fit both sit the request out.
+                input_tokens: winner.as_ref().and_then(|w| {
+                    w.scores
+                        .first()
+                        .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
+                }),
+                max_tokens: parsed_max_tokens,
+                qos: Some(qos.as_label().to_string()),
+                tenant: identity.tenant.clone(),
+                // Classifier tags, from the most recent user turn. Keyword
+                // stubs for now — see `policy::classify` for the rules. A
+                // request with no readable user turn gets every classifier's
+                // `-unknown` tag rather than a default verdict, so a policy
+                // written to fail closed matches on `-unknown` too.
+                tag: crate::policy::classify::tags_for_request(
+                    &req_label,
+                    classifier_text.as_deref(),
+                ),
+            };
+            match self
+                .policy_select(pref, store, winner, &model, spare, attrs, &req_label)
+                .await
+            {
+                // An off-cluster destination. This RETURNS, short-circuiting
+                // step 3 entirely: the critical section below is wholly
+                // pool-scoped — inflight counts, the radix tree, the pick lock —
+                // and a provider has no pool for any of it to apply to.
+                //
+                // Everything a provider pick still needs is done here instead:
+                // the body says the vendor's model name, `PullBody` can serve
+                // it, and an observation is held so a reported TTFT lands on the
+                // right provider.
+                Ok(PolicySelection::Provider(pick)) => {
+                    let base = if wire_body.is_empty() {
+                        body
+                    } else {
+                        &wire_body
+                    };
+                    let Some(rewritten) =
+                        crate::pick_body::rewrite_model(base, &pick.upstream_model)
+                    else {
+                        tracing::error!(
+                            req = %req_label,
+                            from_model = %body_model,
+                            to_model = %pick.upstream_model,
+                            provider = %pick.provider.label(),
+                            "policy: chose a provider but the body could not be rewritten; \
+                             refusing rather than sending a model the vendor does not know"
+                        );
+                        return PickAndRecordOutcome::BadRequest {
+                            reason: "could not rewrite body model for the chosen provider"
+                                .to_string(),
+                            model,
+                        };
+                    };
+                    tracing::info!(
+                        req = %req_label,
+                        provider = %pick.provider.label(),
+                        backend = %pick.backend_ref.label(),
+                        from_model = %body_model,
+                        to_model = %pick.upstream_model,
+                        "policy: routing off-cluster"
+                    );
+                    self.record_provider_pick(request_id, &pick, qos, &identity.tenant, streaming);
+                    self.prom.record_routed(
+                        &identity.tenant,
+                        &pick.provider.name,
+                        crate::policy::crd::BackendType::Provider,
+                    );
+                    return PickAndRecordOutcome::Provider {
+                        pick,
+                        response_id: request_id,
+                        body: rewritten,
+                    };
+                }
+                Ok(sel) => {
+                    // Re-bind to the winning group. When the policy stayed in
+                    // the primary group this is a no-op move; when it crossed
+                    // to another worker set, the critical section below now
+                    // operates on THAT pool's scores and prefix hashes — which
+                    // is the whole point, since prefix state is per-pool.
+                    let (group, chosen) = match sel {
+                        PolicySelection::Local { group, endpoint } => (Some(group), Some(endpoint)),
+                        PolicySelection::Picker { group } => (group, None),
+                        PolicySelection::Provider(_) => unreachable!("handled above"),
+                    };
+                    let Some(group) = group else {
+                        // Nothing local was scored and the policy chose no
+                        // provider either. Genuinely nothing serves this request.
+                        tracing::info!(
+                            req = %req_label,
+                            model = %model,
+                            "pick: no local group and no provider chosen"
+                        );
+                        return PickAndRecordOutcome::NoWorkers { model };
+                    };
+                    model = group.model.clone();
+                    selected = Some(group);
+                    forced_endpoint = chosen;
+
+                    // The policy may have chosen a DIFFERENT model — that is the
+                    // point of candidates spanning worker sets — and the body
+                    // still names the one resolved before scoring. Forwarding it
+                    // unchanged sends Qwen's model id to Gemma, which 404s.
+                    //
+                    // Rewritten here rather than at step 1c because the choice
+                    // is not known until now, and `obj` can no longer serve: its
+                    // `messages` were taken out to feed scoring.
+                    if model != body_model {
+                        let base = if wire_body.is_empty() {
+                            body
+                        } else {
+                            &wire_body
+                        };
+                        match crate::pick_body::rewrite_model(base, &model) {
+                            Some(rewritten) => {
+                                tracing::debug!(
+                                    req = %req_label,
+                                    from_model = %body_model,
+                                    to_model = %model,
+                                    "policy: rewriting the body's model to the chosen one"
+                                );
+                                wire_body = rewritten;
+                            }
+                            None => {
+                                // Unreachable for a body we already parsed once.
+                                // Refuse rather than forward a body naming a
+                                // model the chosen endpoint does not serve.
+                                tracing::error!(
+                                    req = %req_label,
+                                    from_model = %body_model,
+                                    to_model = %model,
+                                    "policy: chose a different model but the body could not be \
+                                     rewritten; refusing rather than sending a mismatched model"
+                                );
+                                return PickAndRecordOutcome::BadRequest {
+                                    reason: "could not rewrite body model for the chosen candidate"
+                                        .to_string(),
+                                    model,
+                                };
+                            }
+                        }
+                    }
+                }
+                Err(outcome) => return outcome,
+            }
+        } else {
+            // No pool named, or policy disabled. The cross-pool ranking above
+            // already decided; a provider is unreachable on this path by
+            // construction, since the only route to one is a pool's
+            // `destinations`.
+            selected = winner;
+        }
+
+        // Unwrapped here rather than earlier because the policy may have crossed
+        // to a different worker set, and everything below is bound to whichever
+        // pool actually won.
+        let Some(group) = selected else {
+            tracing::info!(
+                req = %req_label,
+                model = %model,
+                "pick: no workers serve model"
+            );
+            return PickAndRecordOutcome::NoWorkers { model };
+        };
+        let pool = group.pool;
+        let scores = group.scores;
+        let score_side = group.side;
+
+        // Derived AFTER the policy may have re-bound `pool`.
+        let predictor_cfg = &pool.predictor;
+        let picker_cfg = &pool.picker;
+        let inflight = &*pool.inflight;
+        let pick_lock = &*pool.pick_lock;
+        let inflight_enabled = picker_cfg.inflight_tracking;
+
+        // 3. Critical section — pick + state mutation.
+        let chosen_endpoint: String;
+        let pending: PendingObservation;
+        {
+            // Recover from poisoning rather than propagating it. A `Mutex`
+            // poisons permanently once a thread panics while holding it, so
+            // `.expect()` here turned ONE panic anywhere in this section into a
+            // permanent outage for this worker set: every later pick panicked on
+            // the same line, forever, while the process stayed up and other
+            // pools kept serving. No crash, no restart, no self-healing.
+            //
+            // Poisoning is meant to stop callers reading data a panic left
+            // half-written. This mutex guards `()` — it orders the score → pick →
+            // record sequence and protects nothing — so there is no such data,
+            // and the state the section does touch (`inflight`, prefix
+            // dispatches) is TTL-swept and self-corrects. Taking the lock anyway
+            // is the right trade.
+            let _pick_guard = pick_lock.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!(
+                    req = %req_label,
+                    workerset = %pool.name,
+                    "pick_lock was poisoned by an earlier panic; continuing. The lock \
+                     guards ordering only, so this is recoverable — but a panic inside \
+                     the pick critical section is a bug worth chasing"
+                );
+                poisoned.into_inner()
+            });
+
+            let mut scores = scores;
+            let kv_blocks_per_worker: Vec<u32> = scores.iter().map(|s| s.matched_blocks).collect();
+            let expected_overlap_alpha = pool.predictor.expected_overlap_alpha;
+            let dispatches_per_worker: Vec<Vec<crate::inflight_prefixes::DispatchSnapshot>> =
+                scores
+                    .iter()
+                    .map(|s| pool.inflight_prefixes.dispatches_for(&s.endpoint))
+                    .collect();
+            let inflight_workload_per_worker: Vec<Vec<crate::inflight_prefixes::InflightSummary>> =
+                dispatches_per_worker
+                    .iter()
+                    .map(|d| d.iter().map(|s| s.summary()).collect())
+                    .collect();
+            let per_worker_dispatch_overlap: Vec<Vec<f32>> = scores
+                .iter()
+                .zip(dispatches_per_worker.iter())
+                .map(|(s, dispatches)| {
+                    let query_set: std::collections::HashSet<u64> = score_side
+                        .hashes_by_block_size
+                        .get(&s.block_size)
+                        .map(|v| v.iter().copied().collect())
+                        .unwrap_or_default();
+                    dispatches
+                        .iter()
+                        .map(|d| d.remaining.intersection(&query_set).count() as f32)
+                        .collect()
+                })
+                .collect();
+            let inflight_per_worker: Vec<u32> = if inflight_enabled {
+                scores.iter().map(|s| inflight.get(&s.endpoint)).collect()
+            } else {
+                vec![0; scores.len()]
+            };
+
+            let score_now = Instant::now();
+            let per_worker_dispatch_progress: Vec<Vec<f32>> = dispatches_per_worker
+                .iter()
+                .map(|dispatches| {
+                    let capacity = predictor_cfg.inflight_concurrent_capacity;
+                    dispatches
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, d)| {
+                            let position = (idx as u32).saturating_add(1);
+                            if position > capacity {
+                                return 0.0;
+                            }
+                            let est = crate::picker::prefill_ms_for(
+                                predictor_cfg,
+                                d.uncached_at_dispatch,
+                                d.total_at_dispatch,
+                            );
+                            if est <= 0.0 {
+                                return 1.0;
+                            }
+                            let elapsed = score_now
+                                .checked_duration_since(d.dispatched_at)
+                                .map(|d| d.as_millis() as f32)
+                                .unwrap_or(0.0);
+                            (elapsed / est).clamp(0.0, 1.0)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            for (i, s) in scores.iter_mut().enumerate() {
+                let scaled = crate::picker::scale_per_dispatch_by_progress(
+                    &per_worker_dispatch_overlap[i],
+                    &per_worker_dispatch_progress[i],
+                );
+                let layered = crate::picker::compute_layered_overlap(
+                    &scaled,
+                    kv_blocks_per_worker[i] as f32,
+                    expected_overlap_alpha,
+                );
+                s.matched_blocks = layered.round() as u32;
+            }
+
+            // The policy already chose (step 2b, outside this lock — see the
+            // note there on why cross-pool ranking cannot hold one).
+            let forced_pick =
+                forced_endpoint.as_deref().and_then(|ep| {
+                    let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
+                        crate::picker::PickResult {
+                            worker: w,
+                            replication_fired: false,
+                        }
+                    });
+                    if found.is_none() {
+                        // Should be unreachable: the candidate's endpoint came from
+                        // this same group's `scores` via `candidates_for`, and the
+                        // re-bind in 2c moved that whole group across. Loud anyway,
+                        // because the fallback below is otherwise SILENT and the
+                        // decision counter has already recorded `chosen` — so a
+                        // policy quietly overruled by the picker would be
+                        // indistinguishable from one that was honored. Pair
+                        // `chosen` with this label to see it.
+                        tracing::warn!(
+                            req = %req_label,
+                            model = %model,
+                            worker_set = %pool.name,
+                            endpoint = %ep,
+                            n_scored = scores.len(),
+                            "pick: policy chose an endpoint absent from the scored set; \
+                             falling back to the picker"
+                        );
+                        self.prom.record_policy_decision("forced_endpoint_missing");
+                    }
+                    found
+                });
+
+            let pick_result = match forced_pick {
+                Some(r) => r,
+                None => match crate::picker::pick_endpoint(
+                    &scores,
+                    predictor_cfg,
+                    picker_cfg,
+                    &inflight_per_worker,
+                    &inflight_workload_per_worker,
+                    &kv_blocks_per_worker,
+                    score_now,
+                ) {
+                    Some(r) => r,
+                    None => {
+                        tracing::warn!(
+                            req = %req_label,
+                            model = %model,
+                            n_scored = scores.len(),
+                            "pick: picker returned None (defensive); reporting BadRequest"
+                        );
+                        return PickAndRecordOutcome::BadRequest {
+                            reason: "picker returned no eligible worker".to_string(),
+                            model: model.clone(),
+                        };
+                    }
+                },
+            };
+            let chosen = pick_result.worker;
+            let replication_fired = pick_result.replication_fired;
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    "pick: score table for req={}\n{}",
+                    req_label,
+                    crate::picker::format_score_table(
+                        &scores,
+                        predictor_cfg,
+                        picker_cfg,
+                        expected_overlap_alpha,
+                        Some(&chosen.endpoint),
+                        &inflight_per_worker,
+                        &kv_blocks_per_worker,
+                        &inflight_workload_per_worker,
+                        score_now,
+                    )
+                );
+            }
+            tracing::info!(
+                req = %req_label,
+                model = %model,
+                chosen_endpoint = %chosen.endpoint,
+                chosen_name = %chosen.name,
+                scored = scores.len(),
+                "pick"
+            );
+
+            let chosen_idx = scores
+                .iter()
+                .position(|s| s.endpoint == chosen.endpoint)
+                .expect("chosen worker must be in scores");
+            let chosen_inflight = inflight_per_worker[chosen_idx];
+            let chosen_kv_blocks = kv_blocks_per_worker[chosen_idx];
+            let chosen_workload: &[crate::inflight_prefixes::InflightSummary] =
+                &inflight_workload_per_worker[chosen_idx];
+            let chosen_q_breakdown = crate::picker::compute_queue_cost(
+                chosen,
+                predictor_cfg,
+                chosen_workload,
+                score_now,
+            );
+            let chosen_overlap_per_dispatch: Vec<u32> = per_worker_dispatch_overlap[chosen_idx]
+                .iter()
+                .map(|f| *f as u32)
+                .collect();
+            let prediction =
+                crate::picker::predicted_wait_ms(chosen, predictor_cfg, chosen_workload, score_now);
+            // Prefix-cache outcome for the pick we actually made. Skipped when
+            // the pick was degraded: a tokenize failure would look like a
+            // genuine 0% cache hit, and a prefix-index failure can report
+            // matched blocks against a zero-length prompt. Those picks are
+            // already counted by `kinference_score_degraded_total{reason}`.
+            //
+            // `chosen.matched_blocks` is the LAYERED value — it was overwritten
+            // above with radix match plus in-flight prefill credit — while
+            // `chosen_kv_blocks` is the raw tree match for the same pick.
+            if degraded_reason.is_none() {
+                self.prom.record_prefix_match(
+                    &model,
+                    qos.as_label(),
+                    chosen.total_blocks,
+                    chosen.matched_blocks,
+                    chosen_kv_blocks,
+                );
+            }
+
+            let chosen_clone = chosen.clone();
+            pending = PendingObservation {
+                request_id,
+                workerset: pool.name.clone(),
+                profile: pool.profile.clone(),
+                inflight: crate::observations::InflightHandles::of(&pool),
+                picked_at: score_now,
+                chosen_worker: chosen_clone,
+                prediction,
+                q_inflight: chosen_inflight,
+                kv_blocks: chosen_kv_blocks,
+                inflight_workload_blocks: chosen_q_breakdown.inflight_workload_blocks,
+                q_ms_constant: chosen_q_breakdown.q_ms_constant,
+                q_ms_workload: chosen_q_breakdown.q_ms_workload,
+                inflight_overlap_blocks: chosen_overlap_per_dispatch,
+                expected_overlap_alpha,
+                predictor_cfg: predictor_cfg.clone(),
+                picker_cfg: picker_cfg.clone(),
+                external_request_id: client_request_id.map(|s| s.to_string()),
+                replication_fired,
+                model: model.clone(),
+                streaming,
+                qos,
+                tenant: identity.tenant.clone(),
+            };
+            // Side map for ReportFinalToken (tokens + ITL) — the record above
+            // is consumed at ReportFirstToken, so the labels live here too.
+            self.request_labels.insert(
+                request_id,
+                RequestMeta {
+                    model: model.clone(),
+                    qos,
+                    tenant: identity.tenant.clone(),
+                    streaming,
+                    picked_at: score_now,
+                    // A local pick, so there is no provider to attribute
+                    // feedback to.
+                    provider: None,
+                },
+            );
+
+            if inflight_enabled {
+                inflight.inc(&chosen.endpoint);
+            }
+            let chosen_hashes_u64 = score_side
+                .hashes_by_block_size
+                .get(&chosen.block_size)
+                .cloned()
+                .unwrap_or_default();
+            let chosen_hashes_set: std::collections::HashSet<u64> =
+                chosen_hashes_u64.into_iter().collect();
+            let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
+            pool.inflight_prefixes.insert(
+                request_id,
+                chosen.endpoint.clone(),
+                chosen_hashes_set,
+                chosen_uncached,
+                chosen.total_blocks,
+            );
+
+            chosen_endpoint = chosen.endpoint.clone();
+        }
+
+        self.pending_observations.insert(pending);
+        // The key's bare name, as a policy's `backend.name` and a provider's
+        // label spell it: a CRD worker set's `pool.name` is `namespace/name`.
+        self.prom.record_routed(
+            &identity.tenant,
+            &pool.key.name,
+            crate::policy::crd::BackendType::Local,
+        );
+
+        match degraded_reason {
+            Some(reason) => PickAndRecordOutcome::Degraded {
+                endpoint: chosen_endpoint,
+                response_id: request_id,
+                reason,
+                body: wire_body,
+                model,
+            },
+            None => PickAndRecordOutcome::Ok {
+                endpoint: chosen_endpoint,
+                response_id: request_id,
+                body: wire_body,
+                model,
+            },
+        }
+    }
+
+    /// Observation close — write the per-request CSV row and clear
+    /// `InflightPrefixes` / `InflightRegistry` state for the dispatch.
+    ///
+    /// Returns `true` when a `PendingObservation` was found for
+    /// `request_id` and the row was written; `false` when the id was
+    /// unknown (already evicted by sweep, never inserted, or already
+    /// consumed). On `false` no state is changed.
+    ///
+    /// gRPC `ReportFirstToken()` calls
+    /// this with the observed TTFT it measured. The caller passes
+    /// `observed_ttft_ms = first-ResponseBody-chunk - stream-start`;
+    /// gRPC passes whatever the caller reports.
+    /// Release the inflight counter + inflight-prefix entry a pick
+    /// reserved for `record`. Shared by `finalize_observation` (success),
+    /// `abort_observation` (stream died before first byte), and
+    /// `sweep_expired_observations` (caller never reported / a long
+    /// non-streaming request outran the TTL). The inflight counter has no
+    /// sweep of its own, so this is the ONLY place it gets decremented —
+    /// every terminal path for a pick must funnel through here or the
+    /// worker's "occupied" count leaks.
+    /// Total by construction: the handles ride on the record, so there is no
+    /// id to resolve and nothing to miss. A pool torn down mid-request stays
+    /// alive exactly as long as some pending observation still holds it.
+    fn release_inflight_state(&self, record: &PendingObservation) {
+        // Config snapshot travels on the record (captured at pick time),
+        // so we read the inflight-tracking flag from there rather than
+        // re-resolving the pool's live config.
+        if record.picker_cfg.inflight_tracking {
+            record.inflight.inflight.dec(&record.chosen_worker.endpoint);
+        }
+        record.inflight.prefixes.forget(record.request_id);
+    }
+
+    pub(crate) fn finalize_observation(
+        &self,
+        request_id: u64,
+        observed_ttft_ms: u32,
+        upstream_status: i32,
+    ) -> bool {
+        let Some(record) = self.pending_observations.take(request_id) else {
+            return false;
+        };
+        // Always release in-flight bookkeeping — streaming or not.
+        self.release_inflight_state(&record);
+
+        let req_label_owned = record
+            .external_request_id
+            .clone()
+            .unwrap_or_else(|| record.request_id.to_string());
+
+        // Non-streaming responses deliver their first byte only at
+        // completion, so `observed_ttft_ms` is the full response time, not
+        // prefill TTFT. Recording it would poison the residual dataset the
+        // latency model is fit on, so we skip both the CSV row and the
+        // residual log for non-streaming picks. (State cleanup above still
+        // ran, so nothing leaks.)
+        if !record.streaming {
+            tracing::debug!(
+                req = %req_label_owned,
+                endpoint = %record.chosen_worker.endpoint,
+                status = upstream_status,
+                "observation skipped: non-streaming response (reported time is total latency, not TTFT)"
+            );
+            return true;
+        }
+
+        // Streaming: `observed_ttft_ms` is a real prefill TTFT → feed the
+        // per-model histogram exposed on `/metrics`.
+        self.prom.record_ttft(
+            &record.model,
+            record.qos.as_label(),
+            &record.tenant,
+            observed_ttft_ms,
+        );
+
+        let predicted_ms = record.prediction.total_ms();
+        let residual_ms = observed_ttft_ms as f32 - predicted_ms;
+        tracing::debug!(
+            req = %req_label_owned,
+            endpoint = %record.chosen_worker.endpoint,
+            predicted_ms = format!("{predicted_ms:.1}"),
+            observed_ms = observed_ttft_ms,
+            residual_ms = format!("{residual_ms:+.1}"),
+            status = upstream_status,
+            "observation"
+        );
+
+        self.observation_sink.append_line(&format_csv_row(
+            &record,
+            observed_ttft_ms,
+            residual_ms,
+            upstream_status,
+        ));
+        true
+    }
+
+    /// Drop a `PendingObservation` without writing a CSV row.
+    ///
+    /// Used when a request dies without
+    /// ever delivering a first ResponseBody chunk (upstream errored,
+    /// TCP reset, etc.) we still need to clear inflight + inflight-
+    /// prefix bookkeeping so the worker isn't held in the "occupied"
+    /// state forever — but writing a CSV row with `observed_ms=0`
+    /// would poison the observability surfaces with bogus residuals.
+    /// Returns `true` if a record was found and cleaned up.
+    pub(crate) fn abort_observation(&self, request_id: u64) -> bool {
+        let Some(record) = self.pending_observations.take(request_id) else {
+            return false;
+        };
+        self.release_inflight_state(&record);
+        let req_label_owned = record
+            .external_request_id
+            .clone()
+            .unwrap_or_else(|| record.request_id.to_string());
+        tracing::debug!(
+            req = %req_label_owned,
+            endpoint = %record.chosen_worker.endpoint,
+            "abort_observation: cleared inflight/inflight-prefix state without CSV emit"
+        );
+        true
+    }
+
+    /// Release everything held for `response_id` because the request will never
+    /// complete. Backs the `Abort` RPC.
+    ///
+    /// Returns `(released, bytes_released)`. `released` is false only when
+    /// nothing was found — an unknown id, or a duplicate abort. Never an error:
+    /// the proto requires `Abort` to be idempotent and to not fail with
+    /// `NOT_FOUND` for an already-released target.
+    ///
+    /// Un-counting the inflight dispatch is the load-bearing part. Freeing the
+    /// body just returns memory; leaving the dispatch counted makes the endpoint
+    /// look permanently loaded and quietly skews every later pick. We do it for
+    /// BOTH abort reasons — the proto mandates it for `NOT_DISPATCHED`, but
+    /// after `PULL_FAILED` no `ReportFirstToken` is coming either, so not
+    /// releasing would leak until the TTL.
+    pub(crate) fn abort_request(&self, response_id: u64) -> (bool, u64) {
+        let (body_released, bytes) = self.body_store.abort(response_id);
+        let obs_released = self.abort_observation(response_id);
+        self.request_labels.take(response_id);
+        (body_released || obs_released, bytes)
+    }
+
+    /// Reclaim buffered bodies past their TTL. Separate from the observation
+    /// sweep because the TTLs differ by an order of magnitude (bodies are big
+    /// and short-lived; observations are small and outlive a long generation).
+    /// Returns `(entries, bytes)` freed.
+    pub(crate) fn sweep_expired_bodies(&self) -> (usize, u64) {
+        self.body_store.take_expired()
+    }
+
+    /// Evict pending observations past the TTL, releasing each one's
+    /// inflight + inflight-prefix state (exactly as `abort_observation`
+    /// would). This is the backstop for picks whose caller never reports —
+    /// notably a legitimately long NON-streaming request that outran the
+    /// TTL. Dropping the entries without this per-record release would
+    /// silently leak the workers' inflight counts. Returns the number
+    /// evicted. Called periodically from the sweep task in `main`.
+    pub(crate) fn sweep_expired_observations(&self) -> usize {
+        let evicted = self.pending_observations.take_expired();
+        for record in &evicted {
+            self.release_inflight_state(record);
+        }
+        // Backstop-drop request-label entries whose ReportFinalToken never
+        // arrived (nothing inflight is tied to these).
+        self.request_labels.take_expired();
+        evicted.len()
+    }
+}

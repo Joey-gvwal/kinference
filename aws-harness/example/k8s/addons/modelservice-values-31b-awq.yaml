@@ -1,0 +1,134 @@
+# llm-d-modelservice values — Gemma 4 31B Dense AWQ-4bit on g6e.xlarge (1x L40S)
+#
+# cyankiwi/gemma-4-31B-it-AWQ-4bit: ~16GB weights on a single 48GB L40S.
+# No tensor parallelism needed — fits comfortably on one GPU.
+# Same instance cost as the 26B cluster (~$53/day); full 31B dense quality.
+#
+# Install (via make -f Makefile.31b-awq inference):
+#   helm upgrade --install gemma-4-31b-awq llm-d-modelservice/llm-d-modelservice \
+#     --namespace default -f k8s/addons/modelservice-values-31b-awq.yaml \
+#     --version v0.4.9 --wait --timeout 40m
+
+multinode: false
+
+modelArtifacts:
+  name: "google/gemma-4-31B-it"
+  uri: "pvc://gemma-4-31b-awq-weights/"
+  # AWQ-4bit weights on disk: ~16 GB. 20Gi matches the PVC size.
+  size: 20Gi
+  labels:
+    llm-d.ai/inference-serving: "true"
+    llm-d.ai/model: gemma-4-31b-awq
+
+routing:
+  servicePort: 8000
+  proxy:
+    enabled: false
+    targetPort: 8000
+
+accelerator:
+  type: nvidia
+
+# ── Decode pods ────────────────────────────────────────────────────────────────
+decode:
+  create: true
+  replicas: 1
+
+  progressDeadlineSeconds: 1800  # 30 min
+
+  nodeSelector:
+    role: gpu
+
+  parallelism:
+    tensor: 1   # single GPU — AWQ-4bit ~16GB fits on one L40S (48GB)
+    data: 1
+    dataLocal: 1
+    workers: 1
+
+  containers:
+    - name: "vllm"
+      image: "vllm/vllm-openai:gemma4"
+      modelCommand: vllmServe
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: HOME
+          value: /tmp
+        - name: FLASHINFER_WORKSPACE_DIR
+          value: /tmp/flashinfer
+        - name: PYTORCH_ALLOC_CONF
+          value: expandable_segments:True
+      args:
+        # AWQ-4bit weights ~16GB → ~28GB free for KV cache at 0.95 util.
+        - "--gpu-memory-utilization=0.95"
+        # Capped at 48K context. vLLM 0.19.1's activation-memory accounting
+        # leaves ~21.5GB for KV after weights+overhead on a 48GB L40S at
+        # 0.95 util; 65k needs ~27.5GB and won't fit.  48K leaves ~3GB
+        # headroom for prefix-cache blocks and concurrent decode.
+        # (Earlier vLLM builds fit 64K — bump this back up if you upgrade
+        #  and `kubectl logs` reports more KV cache available.)
+        - "--max-model-len=49152"
+        # AWQ quantization (cyankiwi uses compressed-tensors/AWQ format).
+        # vLLM auto-detects from config.json — do not set --quantization explicitly.
+        # fp8 KV cache — halves KV memory per token vs fp16 (L40S has native
+        # fp8 via Ada). Roughly doubles concurrency at any given context length
+        # with <1% quality impact on most benchmarks. Revert to fp16 if you see
+        # regressions: remove this flag (vLLM defaults to auto → fp16 here).
+        - "--kv-cache-dtype=fp8"
+        - "--enable-prefix-caching"
+        - "--enable-auto-tool-choice"
+        - "--tool-call-parser=gemma4"
+        - "--reasoning-parser=gemma4"
+        # Publish KV-cache block events over ZeroMQ for any subscriber
+        # (EPP, test harness, etc).  Requires vLLM ≥ 0.7.
+        #   endpoint        — PUB socket; subscribers connect here for the
+        #                     live event stream.
+        #   replay_endpoint — REP socket; subscribers send a request with
+        #                     a starting sequence number and get buffered
+        #                     events replayed (lets late/disconnected
+        #                     subscribers catch up).
+        #   buffer_steps    — how many engine steps' worth of events the
+        #                     replay buffer retains.
+        - "--kv-events-config"
+        - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"topic":"kv@"}'
+      ports:
+        - containerPort: 8000
+          name: vllm
+          protocol: TCP
+        - containerPort: 5557
+          name: kv-events
+          protocol: TCP
+        - containerPort: 5558
+          name: kv-replay
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "2"
+          memory: "16Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "4"
+          memory: "28Gi"
+          nvidia.com/gpu: "1"
+      mountModelVolume: true
+      startupProbe:
+        httpGet:
+          path: /v1/models
+          port: 8000
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 60   # 30 min window
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /v1/models
+          port: 8000
+        periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 3

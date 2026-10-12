@@ -1,0 +1,34 @@
+{{- if .Values.podMonitor.enabled }}
+# PodMonitor — tells Prometheus to scrape kinference's own /metrics. Requires the
+# Prometheus Operator CRDs, which is why it is opt-in.
+#
+# PodMonitor over ServiceMonitor: /metrics is on the pod, and going through
+# the Service would add an indirection without changing what gets scraped.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "kinference.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kinference.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "kinference.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+      # The CONTAINER PORT NAME, which is still `dashboard` even though the
+      # config key that opens the listener was renamed `dashboard_listen` →
+      # `admin_listen`. Renaming the port would also have to move the
+      # readinessProbe — a deliberate deferral, not an oversight.
+    - port: dashboard
+      path: /metrics
+      # 10s, not faster: two families here (`kinference_index_blocks`,
+      # `kinference_index_workers`) refresh on a throttled ~10s radix-tree dump, so
+      # scraping faster just resamples an unchanged value. Everything else is
+      # a counter, where the interval sets resolution rather than accuracy.
+      interval: 10s
+      scrapeTimeout: 5s
+{{- end }}

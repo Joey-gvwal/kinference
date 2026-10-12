@@ -1,0 +1,22 @@
+{{- if .Values.grafanaDashboard.enabled }}
+# ConfigMap wrapping kinference-dashboard.json for the Grafana sidecar.
+#
+# The sidecar in kube-prometheus-stack watches for ConfigMaps labelled
+# `grafana_dashboard: "1"` and live-loads their contents — no Grafana restart,
+# no provisioning file. (With the stack's `searchNamespace: ALL`, this can
+# live in the release namespace rather than in `monitoring`.)
+#
+# The JSON ships with the chart at dashboards/kinference-dashboard.json; its source
+# of truth is k8s/grafana/kinference-dashboard.json in the repo.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kinference.fullname" . }}-grafana-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kinference.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  kinference-dashboard.json: |
+    {{- .Files.Get "dashboards/kinference-dashboard.json" | nindent 4 }}
+{{- end }}

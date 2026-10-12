@@ -1,0 +1,52 @@
+# Gateway API Inference Extension (GAIE) values — Gemma 4 31B Dense InferencePool
+#
+# Deploys the InferencePool CRD and the EPP (Endpoint Picker Process).
+#
+# Note: prefix-cache-aware routing is inactive because vllm/vllm-openai does
+# not emit ZeroMQ KV-cache events. The EPP falls back to KV utilization +
+# queue depth scoring only.
+#
+# Install (called by make -f Makefile.31b inference):
+#   helm upgrade --install gemma-4-31b-pool \
+#     oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool \
+#     --version v1.4.0 --namespace default \
+#     -f k8s/addons/gaie-values-31b.yaml --wait --timeout 5m
+#
+# The InferencePool resource will be named after the helm release: gemma-4-31b-pool.
+
+inferenceExtension:
+  replicas: 1
+  image:
+    name: llm-d-inference-scheduler
+    hub: ghcr.io/llm-d
+    tag: v0.7.1
+    pullPolicy: IfNotPresent
+  extProcPort: 9002
+  pluginsConfigFile: "default-plugins.yaml"
+  tracing:
+    enabled: false
+  monitoring:
+    interval: "10s"
+    prometheus:
+      enabled: false
+
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      memory: "2Gi"
+
+inferencePool:
+  targetPorts:
+    - number: 8000
+  modelServerType: vllm
+  modelServers:
+    matchLabels:
+      llm-d.ai/inference-serving: "true"
+      llm-d.ai/model: gemma-4-31b

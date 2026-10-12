@@ -1,0 +1,249 @@
+# Deployment of kinference. Ships at one replica; >1 is supported but opt-in.
+#
+# What multiple replicas cost:
+#  - Each replica opens its own ZMQ SUB connection per worker, so ingest
+#    traffic is N×. (An earlier version of this comment called that "N× for no
+#    benefit" — that was written when failover wasn't a goal. The traffic is
+#    real; the benefit is now too.)
+#  - In-flight tracking splits across replicas, so each sees ~1/N of the
+#    dispatches it is compensating for. This costs PRECISION, not correctness:
+#    predicted_wait_ms already charges queue entries it has no dispatch record
+#    for via its unknown-queue term, and vLLM's queue depth is re-scraped every
+#    second as ground truth.
+#  - Prefix-cache quality is UNAFFECTED. ZMQ PUB fans out, so every replica
+#    sees every KV event and their radix trees agree. The expensive signal
+#    replicates for free; only the cheap one degrades.
+#
+# To scale past 1 you must:
+#  1. Set `[leader_election] enabled = true` in the ConfigMap. Exactly one
+#     replica may write CRD status — see the note on POD_NAME below.
+#  2. Change `strategy.type` to RollingUpdate. `Recreate` exists precisely to
+#     prevent two replicas overlapping, which is the thing you are now opting
+#     into.
+#  3. Add a PodDisruptionBudget with minAvailable: 1.
+#
+# And note the caller-side constraint: every call for one request
+# (PushBody -> Pick -> PullBody -> the report calls) must reach the SAME
+# replica, because stream_id and response_id index process-local state. One
+# long-lived gRPC connection per caller gives this for free, since a ClusterIP
+# Service balances connections rather than requests. Per-request L7 balancing
+# in front of kinference is NOT supported.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kinference
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kinference
+spec:
+  replicas: 1
+  strategy:
+    # Recreate (not RollingUpdate) so we never run two replicas
+    # simultaneously, even briefly. Switch to RollingUpdate when scaling past
+    # one — see the checklist above.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kinference
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kinference
+    spec:
+      serviceAccountName: kinference
+      # Schedule on the system node group, NOT the GPU group. The monitor
+      # is CPU-only and competing with vLLM for GPU-tainted nodes would
+      # just be wasted scheduling latency.
+      nodeSelector:
+        role: system
+      containers:
+        - name: kinference
+          # Substituted at apply time by `make deploy` — see k8s/kinference/README.md.
+          # Built from the Dockerfile at the repo root.
+          image: REPLACE_ME_ECR_REPO/kinference:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/kinference/config.toml"]
+          env:
+            # kinference at debug. dynamo_kv_router at warn, EXCEPT indexer::radix_tree
+            # which is pinned to error — see the trade-off below.
+            #
+            # The two WARNs that diagnose a dead prefix-cache signal:
+            #
+            #   Block not published. Block size must be N tokens ... is: M
+            #     (zmq_wire::convert) spec.kvBlockSize disagrees with the tokens
+            #     per block the engine PUBLISHES. Every block is dropped before
+            #     insertion, so events arrive and the tree stays empty. Set
+            #     kvBlockSize to M. NOT always the engine's --block-size.
+            #     STILL VISIBLE — different module, unaffected by the override.
+            #
+            #   Failed to find parent block; skipping store operation
+            #     (indexer::radix_tree:359) a gap in the event stream left the
+            #     chain broken, so descendant stores are rejected. Replay
+            #     recovers it; see KINFERENCE_ENABLE_REPLAY in src/ingest.rs.
+            #     SUPPRESSED by the override. This is the cost.
+            #
+            # WHY ACCEPT THAT COST. `block_hash mismatch: sequence hashes should
+            # be uniform across workers` (radix_tree:389, same module) fires
+            # several times per second under normal load and is COSMETIC: the
+            # tree keys children on `tokens_hash`, which kinference computes itself
+            # and is identical across workers; `block_hash` is vLLM's own chain
+            # hash, whose root seed is process-local, so two engines legitimately
+            # disagree. It is stored but never used for routing. At that volume
+            # it buries everything else in the log, including the parent-block
+            # warning it shares a module with.
+            #
+            # What replaces the lost warning: its CONSEQUENCE is on the Grafana
+            # dashboard. A broken chain leaves the tree sparse, which shows up as
+            # `kinference_prefix_radix_matched_blocks_total / ..._requested_blocks_total`
+            # falling and the cold-start panel rising — Prefix cache row, and
+            # alertable, which a log line never was. See notes/
+            # block-hash-mismatch-warnings.txt for the full investigation.
+            #
+            # To get the parent-block warning back, drop the middle clause:
+            #   kinference=debug,dynamo_kv_router=warn
+            #
+            # For KV-event debugging turn both up — kinference=trace adds a line per
+            # BLOCK plus the ZMQ recv-loop states, dynamo_kv_router=trace adds
+            # RadixTree::apply_event (this overrides the error pin):
+            #   kinference=trace,dynamo_kv_router=trace
+            #
+            # Dial kinference back to info for steady-state.
+            - name: RUST_LOG
+              value: "kinference=debug,dynamo_kv_router::indexer::radix_tree=error,dynamo_kv_router=warn"
+            # KV-event REPLAY. Off by default; uncomment to turn on.
+            #
+            # The flag is checked for PRESENCE, not value — `=0` and `=false`
+            # also enable it, so removing the variable is the only way off.
+            #
+            # What it buys: on attach, the listener requests the event history it
+            # missed instead of starting at the live sequence. Without it, any
+            # prefix already cached in an engine is invisible to kinference forever —
+            # vLLM only announces NEWLY stored blocks, so the chain's root block
+            # is never re-published and every descendant store is rejected with
+            # `Failed to find parent block`. That state survives until the
+            # engine's cache is reset, and a kinference restart re-enters it.
+            #
+            # What it costs (see src/ingest.rs): the DEALER replay loop contends
+            # with the tokenize HTTP path and can degrade tail latency, and it can
+            # adopt state for blocks the engine has since evicted, producing
+            # hallucinated cache hits in the picker. Watch for `replay complete`
+            # vs `replay incomplete` — a `sentinel_seen=false` incomplete means
+            # the engine is not honoring bounded range requests and replay is not
+            # helping.
+            #
+            # Requires a reachable replay socket: `spec.kvEvents.replayPort` on
+            # the InferenceWorkerSet, or a Service port named `kv-replay`. Both
+            # are inside the kvEvents block's scope: a set that declares no
+            # kvEvents resolves no replay socket either. With the
+            # flag set and no endpoint, kinference WARNs and gap recovery stays off.
+            # - name: KINFERENCE_ENABLE_REPLAY
+            #   value: "1"
+            # holderIdentity on the leader Lease. Harmless at one replica and
+            # required past that: it is what `kubectl get lease kinference -o yaml`
+            # shows, so an operator can tell WHICH pod is writing status. Falls
+            # back to hostname, then to a random id.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # HuggingFace Hub auth token for gated models (Gemma, Llama).
+            # Uncomment + create the Secret with:
+            #   kubectl create secret generic hf-token \
+            #     --from-literal=HUGGING_FACE_HUB_TOKEN=hf_xxxxxxxx
+            # If your fleet only uses public models, this isn't needed
+            # — Hub fetches work without a token.
+            # - name: HUGGING_FACE_HUB_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: hf-token
+            #       key: HUGGING_FACE_HUB_TOKEN
+            # Predicted-vs-observed CSV sink. With this set, kinference appends one
+            # row per streaming observation to /var/log/kinference/latency.csv for
+            # offline tuning of the wait-time predictor (analysis/analyze-latency.py).
+            # This is the env var the binary actually reads (ObservationSink::from_env).
+            # Unset to disable (no file created). Path matches the latency-csv
+            # volumeMount + emptyDir below; for durable rows across restarts,
+            # swap the emptyDir to a PVC.
+            - name: KINFERENCE_OBSERVATIONS_CSV
+              value: /var/log/kinference/latency.csv
+          ports:
+            - name: dashboard
+              containerPort: 9001
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kinference
+              readOnly: true
+            # Predicted-vs-observed CSV sink target dir. Paired with
+            # the `latency-csv` volume below + the
+            # EXTPROC_SCORING_SINK_PATH env var. emptyDir means rows
+            # are lost on pod restart; for durable analysis, swap the
+            # volume below to a PVC.
+            - name: latency-csv
+              mountPath: /var/log/kinference
+            # Optional: mount pre-staged tokenizer files for the
+            # models the monitored fleet serves. With this mounted,
+            # local tokenize doesn't need Hub egress at all. Layout:
+            #   /etc/tokenizers/{model_name}/tokenizer.json
+            #   /etc/tokenizers/{model_name}/tokenizer_config.json
+            # Use a PVC (recommended) or a populated ConfigMap.
+            # - name: tokenizers
+            #   mountPath: /etc/tokenizers
+            #   readOnly: true
+          # Readiness answers "can this process serve a Pick", NOT "is there
+          # anywhere to route to". A Pick for a model nothing serves answers
+          # NO_WORKERS, which is a correct answer rather than a reason to refuse
+          # traffic — and gating on endpoints would leave a provider-only
+          # deployment permanently un-Ready, since a provider is not backed by a
+          # pool and so has no workers to count.
+          #
+          # The one 503: policy enabled and the CRD watch not yet listed, where a
+          # Pick naming a pool would silently bypass its policy.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: dashboard
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          # Liveness catches hard hangs only. Kept as a cheap TCP
+          # probe on the gRPC port — if the listener thread is alive,
+          # the process is alive.
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: kinference-config
+        # Predicted-vs-observed CSV. emptyDir is local to
+        # the pod and disappears on restart — fine for a live
+        # tuning run, since the operator pulls the file with
+        # `kubectl cp kinference-<pod>:/var/log/kinference/latency.csv .`
+        # before redeploying. For durable storage across restarts,
+        # swap to a PVC:
+        #   - name: latency-csv
+        #     persistentVolumeClaim:
+        #       claimName: kinference-latency-csv
+        - name: latency-csv
+          emptyDir: {}
+        # Optional: paired with the volumeMount above. Choose ONE.
+        # - name: tokenizers
+        #   persistentVolumeClaim:
+        #     claimName: kinference-tokenizers
+        # - name: tokenizers
+        #   configMap:
+        #     name: kinference-tokenizers

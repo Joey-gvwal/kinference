@@ -1,0 +1,54 @@
+# PersistentVolume backed by Mountpoint for Amazon S3 CSI driver.
+#
+# Provides read-only access to the Gemma 4 26B-A4B AWQ weights stored at:
+#   s3://471112539178-us-west-2/weights/gemma-4-26b-awq/
+#
+# Key advantages over EBS:
+#   • ReadOnlyMany — multiple vLLM pods across different nodes mount simultaneously.
+#     No snapshot/clone step needed for multi-replica serving.
+#   • Cluster-rebuild resilient — weights persist in S3 indefinitely.
+#   • `make init-weights` is a one-time ~20-40 min HF download; subsequent cluster
+#     rebuilds skip the download (S3 already populated) and mount in seconds.
+#
+# Authentication: GPU node IAM role (instance profile) is used automatically.
+# The node role has s3:GetObject + s3:ListBucket on this bucket via
+# aws_iam_policy.s3_model_weights in terraform/eks.tf.
+#
+# Applied by: scripts/install-addons.sh (make addons)
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: gemma-4-26b-weights
+spec:
+  capacity:
+    storage: 20Gi          # informational only — S3 has no fixed capacity quota
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""     # static provisioning; bypass dynamic StorageClass
+  csi:
+    driver: s3.csi.aws.com
+    # volumeHandle must be unique within the cluster.
+    # For static provisioning it is an arbitrary identifier (not the bucket name).
+    volumeHandle: gemma-4-26b-weights-s3
+    volumeAttributes:
+      bucketName: "471112539178-us-west-2"
+  mountOptions:
+    # Route S3 API calls to the bucket's home region.
+    - region=us-west-2
+    # Mount read-only — vLLM only reads weights; writes go to GPU VRAM / /tmp.
+    - read-only
+    # Prefix within the bucket to mount as the volume root (no leading slash).
+    # vLLM will see the safetensors / config files directly at /model-cache/.
+    # Note: subPath as a volumeAttribute is ignored by Mountpoint S3 CSI v2;
+    # the prefix must be specified here as a mount option instead.
+    - prefix=weights/gemma-4-26b-awq/
+    # Required: by default Linux FUSE blocks all processes other than the one
+    # that created the mount — including root — from accessing the filesystem.
+    # The Mountpoint process runs in mp-* pod (uid 1000); vLLM reaches the
+    # mount via the host-side bind mount created by the CSI driver (a different
+    # process). Without allow-other, vLLM sees an empty /model-cache/.
+    # busybox check pods appear to work because each gets its own Mountpoint
+    # process and the fd is passed directly into that container's namespace.
+    - allow-other

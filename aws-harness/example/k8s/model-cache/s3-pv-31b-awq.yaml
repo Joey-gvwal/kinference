@@ -1,0 +1,24 @@
+# PersistentVolume — Gemma 4 31B AWQ-4bit weights
+# s3://471112539178-us-west-2/weights/gemma-4-31b-awq/
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: gemma-4-31b-awq-weights
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: gemma-4-31b-awq-weights-s3
+    volumeAttributes:
+      bucketName: "471112539178-us-west-2"
+  mountOptions:
+    - region=us-west-2
+    - read-only
+    - prefix=weights/gemma-4-31b-awq/
+    - allow-other

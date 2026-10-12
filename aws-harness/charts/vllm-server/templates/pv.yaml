@@ -1,0 +1,34 @@
+{{/*
+Static PersistentVolume backed by Mountpoint for Amazon S3 CSI.
+
+Per-release PV (cluster-scoped resource) so multiple servers in the same
+cluster can mount different prefixes of the same weights bucket. The node
+instance profile carries s3:GetObject + s3:ListBucket — no IRSA required.
+*/}}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "vllm-server.name" . }}-weights
+  labels:
+    {{- include "vllm-server.labels" . | nindent 4 }}
+  annotations:
+    {{- include "vllm-server.annotations" . | nindent 4 }}
+spec:
+  capacity:
+    storage: {{ .Values.weights.capacity }}
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: {{ include "vllm-server.name" . }}-weights-s3
+    volumeAttributes:
+      bucketName: {{ .Values.weights.bucket | quote }}
+  mountOptions:
+    - region={{ .Values.weights.region }}
+    - read-only
+    - prefix={{ .Values.weights.prefix }}
+    # FUSE blocks non-owner access by default. allow-other lets the vLLM
+    # process (which is not the Mountpoint process) read the mount.
+    - allow-other

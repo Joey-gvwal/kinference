@@ -1,0 +1,11 @@
+# Pool with exactly one destination, so ResolvedRefs stays True — unlike the
+# demo configs' inference-local, which deliberately names sets that may not
+# exist.
+apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePool
+metadata:
+  name: smoke
+  namespace: default
+spec:
+  destinations:
+    - {kind: InferenceWorkerSet, name: dummy}

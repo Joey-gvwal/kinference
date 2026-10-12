@@ -1,0 +1,18 @@
+[
+  {
+    "id": "convo-1",
+    "conversations": [
+      {"from": "human", "value": "Hello, what is a benchmark harness?"},
+      {"from": "gpt", "value": "It is a tool that drives load against a system to measure performance."},
+      {"from": "human", "value": "What metrics should it report?"},
+      {"from": "gpt", "value": "Latency percentiles and throughput, typically."}
+    ]
+  },
+  {
+    "id": "convo-2",
+    "conversations": [
+      {"from": "human", "value": "Explain prefix caching in one sentence."},
+      {"from": "gpt", "value": "An inference server reuses precomputed attention state for prompt tokens shared with prior requests."}
+    ]
+  }
+]

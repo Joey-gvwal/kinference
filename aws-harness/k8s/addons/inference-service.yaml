@@ -1,0 +1,53 @@
+# Cross-engine headless Service covering every inference worker pod
+# (both vLLM and SGLang) the harness deploys.
+#
+# Headless (clusterIP: None) so DNS returns one A record per backing
+# pod rather than a single load-balanced VIP. This is what kinference
+# and per-pod consumers want:
+#
+#   • ZMQ subscribers (5557 PUB, 5558 ROUTER) need persistent per-pod
+#     connections. A load-balanced VIP would round-robin messages
+#     across publishers and silently break event ordering.
+#   • Prometheus-style /metrics scrape needs one connection per target.
+#   • kinference's per-worker Score routing already picks the engine
+#     it wants to talk to; it doesn't want anonymisation by a VIP.
+#
+# Selector pivots on `app.kubernetes.io/component=inference` — the
+# engine- and model-agnostic label both chart helpers stamp on every
+# pod. New StatefulSets the harness deploys automatically join this
+# Service's endpoint list without any per-server config.
+#
+# `publishNotReadyAddresses: true` surfaces pods to DNS during their
+# cold-start (vLLM/SGLang reach Ready in ~3-6 min after image pull);
+# kinference can begin polling them as soon as the pod IP is assigned,
+# instead of waiting for Ready and then racing to subscribe.
+#
+# Look up endpoints from anywhere in-cluster:
+#   nslookup inference.default.svc.cluster.local
+# yields one A record per pod across all engines + models.
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: default
+  labels:
+    mm/managed-by: model-harness
+    app.kubernetes.io/component: inference
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/component: inference
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+    - name: kv-pub
+      port: 5557
+      targetPort: 5557
+      protocol: TCP
+    - name: kv-replay
+      port: 5558
+      targetPort: 5558
+      protocol: TCP

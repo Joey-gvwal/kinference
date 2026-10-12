@@ -1,0 +1,54 @@
+# ConfigMap holding the agentgateway YAML config for the kinference
+# EPP path — routes inference requests to kinference's ext_proc port
+# (50052) instead of the standard llm-d GAIE scheduler.
+#
+# Mirrors the user's local reference config at
+# ~/devel/llm-d-local/agentgateway/config-epp-on-50052.yaml, including
+# the admin/stats/readiness port overrides. Inside a K8s pod the
+# overrides are functionally no-ops (each pod has its own network
+# namespace), but keeping the data byte-for-byte identical to the
+# local file means the same YAML works in both contexts.
+#
+# No env-var substitution needed — kinference's Service name is fixed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentgateway-monitor-config
+  namespace: llmd
+  labels:
+    mm/managed-by: model-harness
+    mm/component: agentgateway-monitor-config
+data:
+  config.yaml: |
+    config:
+      adminAddr: 127.0.0.1:15100
+      statsAddr: 127.0.0.1:15120
+      readinessAddr: 127.0.0.1:15121
+
+    services:
+    - name: vllm-placeholder
+      namespace: default
+      hostname: vllm-placeholder
+      vips: []
+      ports:
+        8000: 8000
+
+    binds:
+    - port: 8082
+      listeners:
+      - name: vllm
+        protocol: HTTP
+        routes:
+        - name: inference
+          matches:
+          - path:
+              pathPrefix: /
+          backends:
+          - service:
+              name: default/vllm-placeholder
+              port: 8000
+            policies:
+              inferenceRouting:
+                endpointPicker:
+                  host: kinference.default.svc.cluster.local:50052
+                destinationMode: passthrough

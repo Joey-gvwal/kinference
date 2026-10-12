@@ -1,0 +1,229 @@
+# Default values for the kinference chart. Defaults track k8s/kinference/*.yaml (the
+# hand-maintained manifests this chart was derived from), with one deliberate
+# exception: nodeSelector defaults to {} instead of `role: system`, because
+# that pin is AWS-harness policy, not something the chart should impose on a
+# laptop cluster. The harness sets it back via values.
+
+replicaCount: 1
+
+# Scaling past 1 replica is supported but opt-in — see the checklist in
+# templates/deployment.yaml. Set to RollingUpdate as part of that checklist;
+# Recreate exists precisely so two replicas never overlap.
+strategyType: Recreate
+
+image:
+  repository: ghcr.io/buoyantio/kinference
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The AWS harness sets `role: system` here to keep kinference (CPU-only) off
+# GPU-tainted nodes.
+nodeSelector: {}
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# RUST_LOG. The default and the reasoning behind the radix_tree=error pin are
+# documented in templates/deployment.yaml.
+logLevel: "kinference=debug,dynamo_kv_router::indexer::radix_tree=error,dynamo_kv_router=warn"
+
+# KV-event replay on attach (KINFERENCE_ENABLE_REPLAY). Off by default; the
+# trade-offs are documented in templates/deployment.yaml.
+enableReplay: false
+
+# Predicted-vs-observed CSV sink path (KINFERENCE_OBSERVATIONS_CSV). Set "" to
+# disable (no file created). Rows land on an emptyDir and disappear with the
+# pod; pull with `kubectl cp` before redeploying.
+observationsCsv: /var/log/kinference/latency.csv
+
+# Name of an existing Secret whose HUGGING_FACE_HUB_TOKEN key holds a
+# HuggingFace Hub token, for gated models (Gemma, Llama). "" if the fleet
+# only serves public models:
+#   kubectl create secret generic hf-token \
+#     --from-literal=HUGGING_FACE_HUB_TOKEN=hf_xxxxxxxx
+hfTokenSecret: ""
+
+# Pre-staged tokenizer files mounted at /etc/tokenizers, so local tokenize
+# needs no Hub egress. Layout: /etc/tokenizers/{model}/tokenizer.json.
+# Set at most ONE of these.
+tokenizers:
+  existingClaim: ""
+  configMap: ""
+
+service:
+  type: ClusterIP
+  grpcPort: 50051
+  dashboardPort: 9001
+
+rbac:
+  create: true
+  # The second ClusterRole pair, for CRD-driven routing policy
+  # (`[policy] enabled = true` in the config). Skip if you never enable it.
+  policy: true
+
+# Tells Prometheus to scrape kinference's own /metrics. Requires the Prometheus
+# Operator CRDs — off by default so a plain cluster can install the chart.
+podMonitor:
+  enabled: false
+
+# ConfigMap the kube-prometheus-stack Grafana sidecar live-loads
+# (`grafana_dashboard: "1"`). The JSON ships with the chart.
+grafanaDashboard:
+  enabled: false
+
+# The gateway Extension object that puts kinference in a route's filter
+# chain. Opt-in: the Extension kind is the gateway's CRD
+# (gateway.linkerd.io/v1alpha1), absent on clusters without the gateway.
+# `name` must match `[policy] backend_binding_extension` in the config.
+extension:
+  enabled: false
+  name: chat-picker
+  # Request header carrying the tenant id ("" omits the field).
+  tenantHeader: ""
+  # Interactive (default when empty) | Batch | Deferrable.
+  qos: ""
+
+# HTTPRoute exposing the dashboard through a Gateway API gateway, at
+# `/kinference/dashboard`. Opt-in: it needs the Gateway API CRDs, and it needs
+# a Gateway to attach to, so `parentRef.name` is required once enabled.
+httpRoute:
+  enabled: false
+  parentRef:
+    # The Gateway's name. Required when enabled.
+    name: ""
+    # Defaults to the release namespace. A Gateway elsewhere must allow the
+    # attachment from this namespace.
+    namespace: ""
+    # Pin to one listener by name; "" attaches to every compatible listener.
+    sectionName: ""
+  # PathPrefix match for the dashboard.
+  path: /kinference/dashboard
+  # Restrict the route to these hostnames; [] matches all of the Gateway's.
+  hostnames: []
+  extraPathPrefixes: ["/assets", "/api"]
+
+# The config file the container reads (--config /etc/kinference/config.toml),
+# verbatim. This default is the worked example from k8s/kinference/configmap.yaml;
+# override the whole block for your fleet (e.g. --set-file config=my.toml).
+# NOTE: `[policy] namespace` and `[kubernetes] namespace` inside it are config,
+# not templated — adjust them if you install outside `default`.
+config: |
+  # kinference config for the AWS EKS harness. This file IS the worked example the
+  # README points at; keep it loadable.
+  #
+  # kinference manages one or more WORKER SETS of homogeneous workers; a request
+  # is routed by its model (the model→sets index is learned at runtime from
+  # each worker's /v1/models, and several sets may serve one model). Routing
+  # tuning lives in named [[profile]] blocks that sets reference by name.
+  # This declares ONE set discovering every worker behind the headless
+  # `inference` Service. If the fleet is heterogeneous (different engines /
+  # KV block sizes per model), add one [[workerset]] per model, each with
+  # its own [workerset.discovery] service_name.
+
+  listen = "0.0.0.0:50051"
+  admin_listen = "0.0.0.0:9001"
+  metrics_poll_ms = 1000
+  models_refresh_secs = 30
+  # Dashboard display budget only — NOT a routing cap. Each slot preallocates
+  # ~480 KB of history, and the dashboard is a demo surface. Prometheus'
+  # kinference_workers covers the whole fleet regardless of this number.
+  dashboard_max_workers = 16
+  # observation_ttl_secs = 600   # in-flight bookkeeping TTL; raise above the
+                                  # worst-case full (non-streaming) response time.
+
+  # Body buffer (PushBody → Pick → PullBody). Defaults shown; the global cap
+  # is sized to sit well under this pod's memory limit, so over-budget
+  # pushes are refused with RESOURCE_EXHAUSTED rather than OOM-killing the
+  # pod. If kinference_body_rejected_total starts climbing, raise the cap AND the
+  # container memory limit together.
+  # body_max_total_kb = 262144         # 256 MiB server-wide (KB = 1024 bytes)
+  # body_max_request_kb = 8192         # 8 MiB per request
+  # body_ttl_secs = 60                 # backstop release (Abort only shortens it)
+  # body_idle_timeout_secs = 30        # max silence between PushBody chunks
+
+  # What kinference PUBLISHES on /metrics — not the scrape side. (metrics_poll_ms
+  # above is the other direction: how often kinference reads each engine's
+  # /metrics.)
+  #
+  # tenant_labels = "all" gives every tenant id its own label value on the
+  # per-request families. That is UNBOUNDED by design: about 91 Prometheus
+  # series per (model, qos, tenant), so a caller sending a unique tenant per
+  # request would grow the registry without limit. Replace with an explicit
+  # allowlist — tenant_labels = ["acme", "globex"] — to bound it; anything not
+  # listed, and any request with no tenant, buckets under tenant="default".
+  # Omit the section entirely (or "none") to turn the label off.
+  [metrics]
+  tenant_labels = "all"
+
+  # Fleet-wide tokenize plumbing only (shared HTTP client + on-disk tokenizer
+  # cache). The tokenization STRATEGY is tuning, so it lives in
+  # [profile.tokenize].
+  [tokenize]
+  [tokenize.local]
+  mount_dir = "/etc/tokenizers"   # {mount_dir}/{model}/tokenizer.json; else Hub fetch
+  warmup = true
+
+  # ─── Profile: default ─────────────────────────────────────────────────
+  [[profile]]
+  name = "default"
+
+    # Latency-model coefficients — starting points; refit from the
+    # latency.csv rows carrying this profile name via
+    # analysis/analyze-latency.py.
+    [profile.predictor]
+    base_ms = 400.0
+    queue_ms_per_entry = 0.2
+    attention_uncached_block_ms = 2.3
+    attention_uncached_per_every_block_ms = 0.03
+    cache_pressure_penalty_ms = 0.0
+    q_running_penalty_peak_ms = 0
+    forward_pass_ms = 5
+    # α for layered expected-overlap. Physically a KV eviction rate, so it
+    # tracks GPU SKU and TP degree — which is why it is profile-scoped.
+    expected_overlap_alpha = 1.0
+
+    [profile.picker]
+    top_k_min = 1
+    top_k_fraction = 0.0
+    inflight_tracking = true
+    replication_threshold_pct = 10
+    replication_warm_target = 2
+    tie_tolerance_ms = 0
+
+    # "render" (default) POSTs to the engine's /v1/chat/completions/render
+    # for byte-perfect token IDs; ramp to "compare" then "local" once parity
+    # is confirmed.
+    [profile.tokenize]
+    mode = "local"
+
+  [policy]
+  enabled = true
+  namespace = "default"
+  # One BackendBinding per InferencePool, so a gateway can resolve a route
+  # that names a pool — it has no schema for the kind and never reads one.
+  # Needs the BackendBinding CRD, which ships with the gateway.
+  backend_bindings = true
+  # The Extension each binding lists — an `Extension` object of class
+  # `kinference_selector` in the pool's namespace, pointing at this kinference. Create
+  # it yourself; kinference only names it. Set "" for routes that carry their own
+  # extensionRef filter.
+  backend_binding_extension = "chat-picker"
+
+  [kubernetes]
+  enabled = true
+  namespace = "default"
+
+    [kubernetes.discovery_defaults]
+    # Last-resort ports, used only when a Pod advertises neither named
+    # container ports nor kinference.buoyant.io/* annotations, and the CR names
+    # none either. The harness chart names its ports, so these are
+    # belt-and-suspenders.
+    http_port = 8000
+    zmq_port = 5557
+    replay_port = 5558

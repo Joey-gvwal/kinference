@@ -1,0 +1,288 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release version, e.g. 0.1.0 (no v prefix). Required for publishing:
+          once everything else is published the workflow creates the
+          v<version> GitHub release in the public releases repo and the
+          v<version> tag here, and fails upfront if that version was already
+          released (its tag exists in either repo).
+        type: string
+        required: false
+      publish:
+        description: 'Publish the release (otherwise just dry-run); only allowed from the main branch'
+        type: boolean
+        required: false
+        default: false
+
+# Release runs must never be cancelled mid-flight; dispatches queue up
+# behind one another.
+concurrency:
+  group: ${{ github.workflow }}
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_REGISTRY: ghcr.io/buoyantio
+  # This repo is private, so a GitHub release here can't be downloaded with
+  # plain curl. Releases (the kinfctl binaries + artifact-only notes) go to
+  # this public, source-less repo instead; the image and charts are public
+  # on GHCR already. Written with the KINFERENCE_RELEASES_TOKEN secret: a
+  # fine-grained PAT scoped to that one repo, Contents read/write.
+  RELEASES_REPO: BuoyantIO/kinference-releases
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Validate inputs
+        run: |
+          version='${{ inputs.version }}'
+          if [[ -n $version && ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version '$version' is not semver (expected e.g. 0.1.0, without the v prefix)"
+            exit 1
+          fi
+          if [[ ${{ inputs.publish }} == true && -z $version ]]; then
+            echo "::error::publish requires the version input"
+            exit 1
+          fi
+          if [[ ${{ inputs.publish }} == true && '${{ github.ref }}' != refs/heads/main ]]; then
+            echo "::error::publish is only allowed from the main branch (got '${{ github.ref_name }}')"
+            exit 1
+          fi
+          if [[ -n $version ]] && git ls-remote --exit-code origin "refs/tags/v$version" >/dev/null; then
+            echo "::error::tag v$version already exists: that version has already been released. Choose a new version."
+            exit 1
+          fi
+          if [[ -n $version ]] && git ls-remote --exit-code "https://github.com/$RELEASES_REPO" "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version already exists in $RELEASES_REPO: that version has already been released there. Choose a new version."
+            exit 1
+          fi
+      - id: release
+        run: echo "is_release=${{ inputs.publish == true }}" >> "$GITHUB_OUTPUT"
+      - id: version
+        run: echo "version=${{ inputs.version || '0.0.0-undefined' }}" >> "$GITHUB_OUTPUT"
+    outputs:
+      is_release: ${{ steps.release.outputs.is_release }}
+      version: ${{ steps.version.outputs.version }}
+
+  # The publish gate: build the release-named image, install the charts from
+  # source pointing at it, and run the smoke test. Nothing is pushed unless
+  # this job is green. The tested image bytes are handed to the publish job
+  # as an artifact, so what is pushed is exactly what was tested.
+  #
+  # No rust toolchain / cache here (unlike gateway's release): the build
+  # happens inside docker via `just image`, not on the host.
+  test:
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc
+        with:
+          install_only: true
+      - name: Smoke test against the release image
+        run: |
+          just IMAGE_REPO="$DOCKER_REGISTRY/kinference" \
+               IMAGE_TAG="${{ needs.meta.outputs.version }}" \
+               up
+          just test-smoke
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get inferenceworkersets,inferencepools -A -o yaml || true
+          kubectl logs deployment/kinference --tail=200 || true
+          kubectl logs deployment/dummy-vllm --tail=50 || true
+          kind export logs /tmp/kind-logs --name kinference-smoke || true
+      - name: Upload kind logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kind-logs
+          path: /tmp/kind-logs
+          retention-days: 3
+      - name: Save image
+        if: ${{ needs.meta.outputs.is_release == 'true' }}
+        run: |
+          docker save -o /tmp/kinference-image.tar \
+            "$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ needs.meta.outputs.is_release == 'true' }}
+        with:
+          name: kinference-image.tar
+          path: /tmp/kinference-image.tar
+          retention-days: 1
+
+  # The CLI, one native build per target. Cross-compiling to darwin from
+  # linux would need the Apple SDK.
+  cli:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-15 }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: rustup toolchain install
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build
+        run: |
+          just KINFERENCE_VERSION='${{ needs.meta.outputs.version }}' \
+               cli-bin '${{ matrix.target }}'
+      # The binary must identify as the release it ships in (linkerd asserts
+      # the same of `linkerd version`), its checksum must verify, and it must
+      # actually run a `check` (exit 0 clean / 1 findings; 2 is unusable
+      # input, a crash is anything else). The linker listing is diagnostic:
+      # it should show system libraries only.
+      - name: Verify the binary
+        run: |
+          version='${{ needs.meta.outputs.version }}'
+          for f in target/cli/kinfctl-*; do [[ $f == *.sha256 ]] || bin=$f; done
+          got=$("$bin" --version)
+          if [[ $got != "kinfctl $version" ]]; then
+            echo "::error::'$bin --version' printed '$got', expected 'kinfctl $version'"
+            exit 1
+          fi
+          (cd target/cli && shasum -a 256 -c -- *.sha256)
+          rc=0; "$bin" check -o json k8s/examples/demo-configs/policy-2.yaml > /dev/null || rc=$?
+          if [[ $rc != 0 && $rc != 1 ]]; then
+            echo "::error::'$bin check' exited $rc"
+            exit 1
+          fi
+          if [[ $RUNNER_OS == macOS ]]; then otool -L "$bin"; else ldd "$bin"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kinfctl-${{ matrix.target }}
+          path: target/cli/kinfctl-*
+          retention-days: 3
+
+  publish:
+    if: ${{ needs.meta.outputs.is_release == 'true' }}
+    # `cli` gates the push too: a release is all-or-nothing, so a broken
+    # CLI build must not leave an image and charts out without a release.
+    needs: [meta, test, cli]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: kinference-image.tar
+          path: /tmp
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: buoyantio
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push image
+        run: |
+          docker load -i /tmp/kinference-image.tar
+          docker push "$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
+      - name: Publish charts
+        # Both charts are versioned in lockstep: one release tag stamps
+        # kinference-crds and kinference alike.
+        run: |
+          version='${{ needs.meta.outputs.version }}'
+          for chart in kinference-crds kinference; do
+            helm package "charts/$chart" \
+              --version "$version" \
+              --app-version "$version"
+            helm push "$chart-$version.tgz" "oci://$DOCKER_REGISTRY/charts"
+          done
+
+  release:
+    # Publishes the user-facing release to the public releases repo (the
+    # kinfctl binaries, their checksums, and notes that list the artifacts
+    # and install steps only: no commit history), then tags v<version> here.
+    #
+    # Order matters: the local tag is the "this version is done" marker
+    # that `meta` refuses to recreate. If the public release succeeds and
+    # the tag step fails, the retry stops loudly at `meta`'s public-tag
+    # check instead of silently re-publishing; delete the public release
+    # and its tag, then re-dispatch. A failure before the public release
+    # leaves nothing behind and the version can simply be retried.
+    if: ${{ needs.meta.outputs.is_release == 'true' }}
+    needs: [meta, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: kinfctl-*
+          merge-multiple: true
+          path: cli
+      - name: Write release notes
+        run: |
+          version='${{ needs.meta.outputs.version }}'
+          assets=''
+          for f in cli/kinfctl-*; do
+            [[ $f == *.sha256 ]] || assets+="  - \`${f#cli/}\`"$'\n'
+          done
+          cat > release-notes.md <<EOF
+          ## Artifacts
+
+          - Image: \`$DOCKER_REGISTRY/kinference:$version\`
+          - Charts: \`oci://$DOCKER_REGISTRY/charts/kinference-crds:$version\`, \`oci://$DOCKER_REGISTRY/charts/kinference:$version\`
+          - \`kinfctl\` CLI, attached below (each binary has a \`.sha256\` next to it):
+          $assets
+          ## Install kinfctl
+
+          On macOS (Apple Silicon) or Linux (x86_64), the installer picks the right binary and puts it in \`~/.kinference/bin\`:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/$RELEASES_REPO/main/install.sh | KINFCTL_VERSION=$version sh
+          \`\`\`
+
+          Or by hand:
+
+          \`\`\`sh
+          version=$version
+          os=\$(uname -s | tr '[:upper:]' '[:lower:]')
+          arch=\$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+          curl -fsSL -o kinfctl https://github.com/$RELEASES_REPO/releases/download/v\$version/kinfctl-\$version-\$os-\$arch
+          chmod +x kinfctl
+          sudo mv kinfctl /usr/local/bin/
+          \`\`\`
+          EOF
+          cat release-notes.md
+      - name: Create the public release
+        # No --target: the tag lands on the releases repo's default branch,
+        # the only sensible target in a repo that holds no source.
+        env:
+          GH_TOKEN: ${{ secrets.KINFERENCE_RELEASES_TOKEN }}
+        run: |
+          version='${{ needs.meta.outputs.version }}'
+          prerelease=()
+          [[ $version == *-* ]] && prerelease=(--prerelease)
+          gh release create "v$version" \
+            --repo "$RELEASES_REPO" \
+            --title "v$version" \
+            --notes-file release-notes.md \
+            "${prerelease[@]}" \
+            cli/kinfctl-*
+      - name: Tag this repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/v${{ needs.meta.outputs.version }}" \
+            -f sha="$GITHUB_SHA"

@@ -1,0 +1,102 @@
+# Defaults for one vLLM server instance. Per-server overrides come from
+# servers/<name>.toml via scripts/render-server.sh.
+
+# Helm release name doubles as the in-cluster identity (Deployment / Service /
+# PV / PVC). Must be DNS-safe (lowercase alphanumeric + '-').
+# Pods are named `<release>-<rs-hash>-<random>` per Deployment convention;
+# names rotate on every rollout (new pods get a fresh hash + random suffix).
+nameOverride: ""
+
+# Number of replica pods. Each replica is its own pod with its own
+# KV-event publisher. Deployment creates all replicas in parallel by
+# default — no ordering knob needed.
+replicas: 1
+
+# vLLM container image. Default pinned to a known-good release tag so a
+# server TOML that omits `image` still gets a reproducible deploy. With
+# pullPolicy: IfNotPresent + a versioned tag, all pods of a replicated
+# Deployment are guaranteed to run identical code; with `latest` they
+# could diverge as different nodes pull different digests over time.
+image:
+  repository: vllm/vllm-openai
+  tag: v0.21.0
+  pullPolicy: IfNotPresent
+
+# Model identity. `name` is what clients send as the "model" field in
+# OpenAI-API requests; it must match what vLLM advertises after loading
+# the safetensors from the weights bucket.
+model:
+  name: ""
+  # vLLM KV-cache block size (tokens). Two modes:
+  #   Explicit integer (e.g. 16, 32, 64) — passed to vLLM as --block-size=N
+  #     AND stamped onto the pod as `mm/block-size` annotation so kinference's
+  #     kv_block_size can be derived from `gen-monitor-config.sh`.
+  #   Empty string (default here) — no --block-size flag; vLLM picks the
+  #     block size that matches the model's attention layout (usually the
+  #     right choice for hybrid architectures like Qwen 3.6). The
+  #     `mm/block-size` annotation is then also omitted, so kinference must
+  #     discover the actual value at runtime (e.g. from /server_info).
+  # The prior default of 16 was a foot-gun on hybrid-arch models — pin
+  # only when you know the target value.
+  blockSize: ""
+
+# Where the safetensors live in the shared S3 bucket. Mountpoint S3 mounts
+# `s3://{bucket}/{prefix}` read-only at /model-cache inside the container.
+weights:
+  bucket: "471112539178-us-west-2"
+  prefix: ""          # e.g. "weights/qwen-2.5-7b/"
+  region: "us-west-2"
+  # Informational only — S3 has no fixed quota, but Kubernetes wants a
+  # capacity number on the PV.
+  capacity: 64Gi
+
+# GPU allocation. Tensor / data parallel knobs are passed straight through
+# to vllm serve. instance_type in the server TOML is informational — the
+# harness selects nodes via `role: gpu` plus (optionally) `gpu-pool` below.
+gpu:
+  count: 1
+  tensorParallelSize: 1
+  # Optional node-pool selector. When set, adds `gpu-pool: <value>` to the
+  # pod's nodeSelector, pinning it to a specific GPU node group (e.g.
+  # "l40s" for g6e, "h200" for p5e). Terraform labels the node groups
+  # with this key. Leave empty to allow scheduling on any GPU node —
+  # fine for single-pool clusters, dangerous if the cluster mixes L40S
+  # and H200 (a small pod could land on a $60/hr node).
+  nodePool: ""
+
+# vLLM HTTP + ZMQ ports. Defaults match what kinference's config.aws.toml
+# expects: 5557 PUB (live), 5558 ROUTER (replay), 8000 HTTP (OpenAI + metrics).
+ports:
+  http: 8000
+  kvEventsPub: 5557
+  kvEventsReplay: 5558
+
+# Extra args appended to `vllm serve <model>`. Use this to set
+# --max-model-len, --quantization, --gpu-memory-utilization, etc.
+extraArgs: []
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "16Gi"
+  limits:
+    cpu: "4"
+    memory: "28Gi"
+    # nvidia.com/gpu is added at render time from gpu.count.
+
+# Abort a stuck rollout after this many seconds — covers genuinely-wedged
+# pods (bad image, OOM during model load) without burning forever. 30 min
+# matches the startupProbe budget configured in the Deployment template
+# (initialDelaySeconds 30 + periodSeconds 30 × failureThreshold 60).
+progressDeadlineSeconds: 1800
+
+# Rolling-update strategy. Default `maxSurge=0, maxUnavailable=1` is
+# GPU-friendly: rollout terminates one old pod first and the freed GPU
+# slot is reused by the new pod, so no extra GPU capacity is needed
+# during the rollout window. Trade-off: brief per-pod downtime during
+# transitions. Users with spare GPU capacity (e.g. ran `make scale-gpu`
+# with headroom) can override to `maxSurge: 1, maxUnavailable: 0` for
+# zero-downtime updates.
+rollingUpdate:
+  maxSurge: 0
+  maxUnavailable: 1

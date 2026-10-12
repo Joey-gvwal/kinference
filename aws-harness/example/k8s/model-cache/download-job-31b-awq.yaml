@@ -1,0 +1,103 @@
+# Weight-download Job for Gemma 4 31B AWQ-4bit (cyankiwi quantized).
+#
+# Downloads model weights from HuggingFace directly to S3.
+# ~16 GB AWQ-4bit weights; allow ~20-30 min for HF download + S3 upload.
+#
+# Called by: scripts/init-weights-31b-awq.sh (make -f Makefile.31b-awq init-weights)
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gemma-4-31b-awq-download
+  namespace: default
+  labels:
+    app: model-downloader
+    model: gemma-4-31b-awq
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600  # 1 hour
+  template:
+    metadata:
+      labels:
+        app: model-downloader
+        model: gemma-4-31b-awq
+    spec:
+      restartPolicy: OnFailure
+
+      nodeSelector:
+        role: gpu
+
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      initContainers:
+        - name: hf-download
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip install -q --no-cache-dir huggingface_hub
+              python3 -c "
+              from huggingface_hub import snapshot_download
+              model_repo = 'cyankiwi/gemma-4-31B-it-AWQ-4bit'
+              dest       = '/shared'
+              print(f'Downloading {model_repo} -> {dest} (~16 GB) ...')
+              snapshot_download(
+                  repo_id=model_repo,
+                  local_dir=dest,
+                  ignore_patterns=['*.pt', 'original/*'],
+              )
+              print('HuggingFace download complete.')
+              "
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          env:
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/hf-home
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+
+      containers:
+        - name: s3-upload
+          image: amazon/aws-cli:2.22.0
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              S3_URI="s3://471112539178-us-west-2/weights/gemma-4-31b-awq/"
+              MODEL_ID="cyankiwi/gemma-4-31B-it-AWQ-4bit"
+              echo "Uploading /shared → ${S3_URI} ..."
+              aws s3 sync /shared "${S3_URI}" \
+                --no-progress \
+                --only-show-errors
+              echo "${MODEL_ID}" | aws s3 cp - "${S3_URI}.model-id"
+              FILE_COUNT=$(aws s3 ls "${S3_URI}" --recursive | wc -l | tr -d ' ')
+              echo "Upload complete. ${FILE_COUNT} files now in S3 (model: ${MODEL_ID})."
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          resources:
+            requests:
+              cpu: "2"
+              memory: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "2Gi"
+
+      volumes:
+        - name: shared
+          emptyDir:
+            sizeLimit: 25Gi

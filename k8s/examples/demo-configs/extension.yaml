@@ -1,0 +1,20 @@
+apiVersion: gateway.linkerd.io/v1alpha1
+kind: Extension
+metadata:
+  name: chat-picker
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kinference
+spec:
+  class: kinference_selector
+  config:
+    # Past one replica this needs a per-pod DNS name or shared picker state;
+    # see the scaling checklist in deployment.yaml.
+    service: kinference.default.svc:50051
+    # Request header carrying the tenant id. Worth setting here: configmap.yaml
+    # has `[metrics] tenant_labels = "all"`, and without a header to read from,
+    # every request is attributed to tenant="default" and the per-tenant series
+    # that setting buys are all the same series.
+    tenantHeader: l5d-client-id
+    # Interactive (default) | Batch | Deferrable.
+    qos: Interactive

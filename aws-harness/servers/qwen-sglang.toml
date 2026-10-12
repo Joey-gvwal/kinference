@@ -1,0 +1,71 @@
+# Server instance: Qwen2.5-32B-Instruct AWQ on SGLang, single L40S.
+#
+# Targets the same model + weights prefix as servers/qwen-vllm.toml.example
+# so you can run both side-by-side and A/B llm-monitor against the two
+# engines on identical inputs.
+#
+# Copy to qwen-sglang.toml to deploy:
+#   cp servers/qwen-sglang.toml.example servers/qwen-sglang.toml
+#   make scale-gpu N=2     # need 2 GPUs if you're also running qwen-vllm
+#   make -f Makefile.server server-up CFG=servers/qwen-sglang.toml
+#
+# Known parent-project gaps (see README): SGLang's `sglang:`-prefixed
+# Prometheus metrics aren't yet scraped by llm-monitor (`src/metrics.rs`
+# hardcodes `vllm:` names), and `cargo run --bin score` against SGLang
+# will fail at /tokenize. The ZMQ KV-event path works.
+
+name = "qwen-sglang"
+
+# Selects charts/sglang-server/. The harness's render-server.sh dispatches
+# on this value.
+engine = "sglang"
+
+# SGLang container image. Pinned to the specific version :latest resolved
+# to on 2026-05-23. Bump deliberately when you want a newer release; avoid
+# :latest for replica-set consistency (different nodes can otherwise pull
+# different digests under the chart's IfNotPresent imagePullPolicy).
+# Resolve current latest with:
+#   curl -s https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags/?ordering=last_updated \
+#     | jq -r '.results[].name' | grep '^v' | head -5
+image = "lmsysorg/sglang:v0.5.12.post1"
+
+# Model identity. `model_name` is what clients send as the "model" field
+# in OpenAI requests AND SGLang's --served-model-name. The weights are
+# read from /model-cache regardless; this is purely a label.
+model_name = "Qwen/Qwen2.5-32B-Instruct-AWQ"
+
+# Where the safetensors live in the shared bucket. Same prefix as the
+# vLLM Qwen example — no duplicate weights upload needed.
+weights_s3_prefix = "weights/qwen-2-5-32b-awq/"
+
+# Informational; the chart selects nodes via `role: gpu`, not instance type.
+instance_type = "g6e.xlarge"
+gpu_count = 1
+
+# SGLang's paged-attention block size. MUST equal the value llm-monitor
+# is configured with (kv_block_size in config.aws.toml) or events get
+# silently dropped during decode.
+block_size = 16
+
+# Optional. Default 1 = single release named "qwen-sglang" (bare).
+# replicas >= 2 expands to "qwen-sglang-1", "qwen-sglang-2", ..., each on
+# its own GPU pod with identical config. Run `make scale-gpu N=<replicas>`
+# first. Going between 1 and N is destructive — the bare release is
+# uninstalled before the suffixed set is installed (or vice versa).
+replicas = 3
+
+# Extra args appended to `python3 -m sglang.launch_server`.
+#
+# --context-length:        SGLang's equivalent of vLLM's --max-model-len.
+#                          16K is safely under the L40S KV budget for a
+#                          32B AWQ model; bump cautiously if you need more.
+# --mem-fraction-static:   SGLang's GPU-memory-utilization knob (0..1).
+# --quantization:          Tell SGLang the weights are AWQ. Variants vary
+#                          by release — try `awq_marlin` first, drop the
+#                          flag entirely if SGLang auto-detects from
+#                          config.json (some checkpoints declare it).
+extra_args = [
+  "--context-length=16384",
+  "--mem-fraction-static=0.9",
+  "--quantization=awq_marlin",
+]

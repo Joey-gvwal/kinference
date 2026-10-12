@@ -1,0 +1,146 @@
+---
+# Worker-router Deployment + ConfigMap.
+#
+# An in-cluster nginx proxy that maps the offset-port scheme from
+# scripts/port-forward.sh onto a fixed set of listener ports, so all
+# vLLM workers can be reached from outside the cluster via a single
+# NLB hostname (see worker-router-public.yaml.tmpl).
+#
+# Why nginx (over haproxy / envoy / agentgateway):
+#   • TCP stream proxying (proxy_pass at listen() level) handles HTTP
+#     and ZMQ identically — no L7 inspection needed.
+#   • Available off-the-shelf as nginx:1.27-alpine; ~25MB image.
+#   • Config is plain text, easy to generate and diff.
+#
+# Why a fixed N=8 slot allocation:
+#   • NLB Service spec stays constant across vLLM scale-up/down — no
+#     LBC reconciliation churn on each scale change. Empty slots (when
+#     fewer pods are running than N) just have no nginx server{} block,
+#     so connections to those listener ports get TCP RST and the caller
+#     learns immediately that the slot is empty.
+#   • 8 slots cover every realistic single-cluster benchmark size.
+#     Edit MAX_SLOTS in scripts/expose-workers.sh if you need more.
+#
+# Slot → port mapping (matches scripts/port-forward.sh exactly):
+#   slot 0:  http=8000   pub=5557   rep=5558
+#   slot 1:  http=9000   pub=6557   rep=6558
+#   slot 2:  http=10000  pub=7557   rep=7558
+#   slot 3:  http=11000  pub=8557   rep=8558
+#   slot 4:  http=12000  pub=9557   rep=9558
+#   slot 5:  http=13000  pub=10557  rep=10558
+#   slot 6:  http=14000  pub=11557  rep=11558
+#   slot 7:  http=15000  pub=12557  rep=12558
+#
+# The ConfigMap data field below is overwritten by scripts/expose-workers.sh
+# at apply time with a generated nginx.conf — the placeholder here is just
+# enough to make the chart pass schema validation and the pod start without
+# error if expose-workers hasn't run yet.
+#
+# Rendered by scripts/expose-workers.sh from these env vars
+# (named here without the $ prefix to avoid getting substituted by
+# os.path.expandvars when the comment is processed):
+#   NGINX_CONF       — full nginx.conf content (multi-line), generated
+#                      from the current set of vLLM pod IPs. Must be
+#                      indented to fit the YAML's `|` block scalar
+#                      (the script does this).
+#   CONFIG_REVISION  — opaque string (a timestamp). Stamped onto the
+#                      pod-template annotation so re-applying with the
+#                      same nginx.conf still rolls the router pod —
+#                      otherwise the ConfigMap mount wouldn't propagate.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-router-config
+  namespace: default
+  labels:
+    mm/managed-by: model-harness
+    mm/component: worker-router
+data:
+  nginx.conf: |
+${NGINX_CONF}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-router
+  namespace: default
+  labels:
+    app: worker-router
+    mm/managed-by: model-harness
+    mm/component: worker-router
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: worker-router
+  template:
+    metadata:
+      labels:
+        app: worker-router
+        mm/managed-by: model-harness
+        mm/component: worker-router
+      annotations:
+        # Bumped by scripts/expose-workers.sh on each `regen` so the
+        # pod restarts and picks up the new ConfigMap. We use an
+        # annotation rather than `kubectl rollout restart` so the
+        # rollout reason is self-documenting.
+        mm/config-revision: "${CONFIG_REVISION}"
+    spec:
+      nodeSelector:
+        role: system
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
+          # 8 slots × {http, pub, rep} = 24 named container ports.
+          # Listed explicitly so the named-port targetPort references
+          # in worker-router-public.yaml.tmpl resolve cleanly. Port
+          # names match the slot-index scheme: http-0..http-7,
+          # pub-0..pub-7, rep-0..rep-7.
+          ports:
+            - { name: http-0,  containerPort: 8000,  protocol: TCP }
+            - { name: pub-0,   containerPort: 5557,  protocol: TCP }
+            - { name: rep-0,   containerPort: 5558,  protocol: TCP }
+            - { name: http-1,  containerPort: 9000,  protocol: TCP }
+            - { name: pub-1,   containerPort: 6557,  protocol: TCP }
+            - { name: rep-1,   containerPort: 6558,  protocol: TCP }
+            - { name: http-2,  containerPort: 10000, protocol: TCP }
+            - { name: pub-2,   containerPort: 7557,  protocol: TCP }
+            - { name: rep-2,   containerPort: 7558,  protocol: TCP }
+            - { name: http-3,  containerPort: 11000, protocol: TCP }
+            - { name: pub-3,   containerPort: 8557,  protocol: TCP }
+            - { name: rep-3,   containerPort: 8558,  protocol: TCP }
+            - { name: http-4,  containerPort: 12000, protocol: TCP }
+            - { name: pub-4,   containerPort: 9557,  protocol: TCP }
+            - { name: rep-4,   containerPort: 9558,  protocol: TCP }
+            - { name: http-5,  containerPort: 13000, protocol: TCP }
+            - { name: pub-5,   containerPort: 10557, protocol: TCP }
+            - { name: rep-5,   containerPort: 10558, protocol: TCP }
+            - { name: http-6,  containerPort: 14000, protocol: TCP }
+            - { name: pub-6,   containerPort: 11557, protocol: TCP }
+            - { name: rep-6,   containerPort: 11558, protocol: TCP }
+            - { name: http-7,  containerPort: 15000, protocol: TCP }
+            - { name: pub-7,   containerPort: 12557, protocol: TCP }
+            - { name: rep-7,   containerPort: 12558, protocol: TCP }
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx
+              readOnly: true
+          readinessProbe:
+            tcpSocket: { port: http-0 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: http-0 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "200m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+      volumes:
+        - name: conf
+          configMap:
+            name: worker-router-config

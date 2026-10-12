@@ -1,0 +1,115 @@
+# GAIE (Gateway API Inference Extension) Helm values — InferencePool chart.
+#
+# Source chart: oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+# Version: v1.4.0 (matches the InferencePool CRD version applied earlier
+#                  in scripts/install-llm-d.sh)
+#
+# This chart deploys:
+#   • An InferencePool resource (the pool of pods the gateway routes to)
+#   • The llm-d Inference Scheduler Deployment + Service (the "EPP" — the
+#     external processor that scores candidate pods per request based on
+#     KV-cache locality, load, and priority).
+#
+# Prefix-aware + KV-cache scoring lives inside the inference scheduler
+# image at `pluginsConfigFile` below. The default plugin set bundled in
+# v0.7.1 of the scheduler already enables prefix-cache awareness — no
+# custom plugins file needed for the baseline benchmark setup.
+#
+# Rendered by scripts/install-llm-d.sh from these env vars:
+#   POOL_NAME    — Helm release + InferencePool name (e.g. harness-vllm)
+#   SERVER_NAME  — mm/server-name label value to target (e.g. qwen-3-6-vllm)
+#                  Use this when you want one pool per server instance.
+
+inferenceExtension:
+  # One EPP pod is plenty — it's stateless per-request and the
+  # scheduling decision is microseconds.
+  replicas: 1
+
+  image:
+    # llm-d's fork of the GAIE scheduler. We NEED this image because it
+    # subscribes to vLLM's ZMQ KV-event stream for real-time cache-aware
+    # routing — the whole point of this benchmark. The upstream
+    # `registry.k8s.io/gateway-api-inference-extension/epp` lacks that
+    # event-stream consumer (it polls /metrics on a 50ms cadence instead).
+    #
+    # KNOWN ISSUE: this fork ignores `--secure-serving=false`. The flag
+    # is passed correctly on the command line (helm template renders it,
+    # the pod has it in args) but the binary serves TLS regardless. The
+    # workaround is either an env-var override on the EPP, or configuring
+    # agentgateway to dial TLS. See troubleshooting notes in the README.
+    name: llm-d-inference-scheduler
+    hub: ghcr.io/llm-d
+    tag: v0.7.1
+    pullPolicy: IfNotPresent
+
+  # ext_proc port that agentgateway dials when it needs a routing
+  # decision. Default per the GAIE spec.
+  extProcPort: 9002
+
+  # Use the scheduler image's bundled default plugin config. This
+  # includes:
+  #   • PrefixCacheScorer  — boosts pods that likely have cached prompt prefix
+  #   • LoadAwarenessScorer — penalises pods at high queue depth
+  #   • Priority filter    — honours InferenceObjective priority field
+  # If you need to tweak weights or disable a plugin, set
+  # `pluginsConfigFile: "/path/to/custom-plugins.yaml"` and ship the file
+  # via a ConfigMap mount (out of scope for the baseline benchmark).
+  pluginsConfigFile: "default-plugins.yaml"
+
+  # Disable extra observability to keep the comparison clean — the
+  # harness already publishes metrics via vLLM's /metrics and via
+  # `metrics-server` (kubectl top). Re-enable when you want to inspect
+  # scheduling decisions in detail.
+  tracing:
+    enabled: false
+  monitoring:
+    interval: "10s"
+    prometheus:
+      enabled: false
+
+  # CLI flags forwarded into the EPP binary. The chart turns this map
+  # into args on the scheduler's command line.
+  #
+  # IMPORTANT — secure-serving is NOT in this map even though we want it
+  # off. The chart renders boolean flags as `--flag value` (two args),
+  # which the EPP's pflag CLI misparses as `--flag=true` + a stray
+  # positional. Setting `secure-serving: false` here is silently ignored
+  # by the binary. Instead, scripts/install-llm-d.sh patches the
+  # deployment's args directly post-install with the `=`-joined form
+  # (`--secure-serving=false`), which pflag parses correctly. See the
+  # comment in step 3b of that script for the full reasoning.
+  flags:
+    v: 1
+
+  # Scheduler can run anywhere — it's CPU-only. Defaults pin to
+  # non-tainted nodes (i.e., system nodes). Don't tolerate the GPU
+  # taint — there's no reason to land here.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      memory: "2Gi"
+
+inferencePool:
+  # The single TCP port the inference servers expose for OpenAI-API HTTP.
+  # Matches charts/vllm-server/values.yaml's ports.http default.
+  targetPorts:
+    - number: 8000
+
+  # Tells the scheduler which engine's metrics endpoints to scrape and
+  # which event format to expect. vLLM-only for this benchmark per the
+  # plan's all-vLLM decision.
+  modelServerType: vllm
+
+  # Selector. The harness's vLLM chart stamps `mm/engine=vllm`,
+  # `mm/server-name=<release>`, and `app.kubernetes.io/component=inference`
+  # on every pod (see charts/vllm-server/templates/_helpers.tpl). We
+  # narrow to one specific server release via mm/server-name so the
+  # pool tracks one model — the GAIE scheduler assumes a homogeneous
+  # pool (one model per InferencePool).
+  modelServers:
+    matchLabels:
+      app.kubernetes.io/component: inference
+      mm/engine: vllm
+      mm/server-name: ${SERVER_NAME}

@@ -1,0 +1,207 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vllm-server.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vllm-server.labels" . | nindent 4 }}
+  annotations:
+    {{- include "vllm-server.annotations" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas | default 1 }}
+  # Abort a rollout that hasn't made progress within this many seconds.
+  # 1800 (30 min) matches the startupProbe budget below — vLLM cold-start
+  # (image pull + CUDA init + weight load from S3) is the slow path; if
+  # we exceed 30 min something is genuinely wedged.
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | default 1800 }}
+  # GPU-friendly rolling update: terminate one old pod before creating
+  # its replacement (no extra GPU needed during rollout). Brief per-pod
+  # downtime during transitions. Users with spare GPU capacity can flip
+  # to maxSurge=1/maxUnavailable=0 for zero-downtime updates.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.rollingUpdate.maxSurge | default 0 }}
+      maxUnavailable: {{ .Values.rollingUpdate.maxUnavailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "vllm-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vllm-server.labels" . | nindent 8 }}
+      annotations:
+        {{- include "vllm-server.annotations" . | nindent 8 }}
+    spec:
+      # Schedule onto the GPU node group provisioned by terraform/eks.tf.
+      # gpu-pool selector (when set) pins to a specific pool — "l40s" for
+      # the g6e group, "h200" for the p5e group. Omit for any-GPU-node
+      # scheduling (single-pool cluster only).
+      nodeSelector:
+        role: gpu
+        {{- if .Values.gpu.nodePool }}
+        gpu-pool: {{ .Values.gpu.nodePool }}
+        {{- end }}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Use vllm's own CLI so behavior matches public docs. The model
+          # path is /model-cache because that's where the Mountpoint S3 PV
+          # is mounted; vLLM reads safetensors + config directly from S3.
+          command: ["vllm", "serve"]
+          args:
+            - /model-cache
+            - --served-model-name={{ .Values.model.name }}
+            - --host=0.0.0.0
+            - --port={{ .Values.ports.http }}
+            {{- if .Values.model.blockSize }}
+            - --block-size={{ .Values.model.blockSize }}
+            {{- end }}
+            - --tensor-parallel-size={{ .Values.gpu.tensorParallelSize }}
+            # KV-cache event publishing.
+            # PUB socket: live Stored/Removed events.
+            # ROUTER socket: replay channel.
+            # Bind to all interfaces so kubectl port-forward / NLB / pod IP all
+            # work.
+            #
+            # Topic format: `kv@<pod-ip>:<pub-port>@<model-name>`. The pod-ip
+            # and pub-port are filled in by kubelet's $(VAR) substitution
+            # against the POD_IP / POD_PORT env entries declared below — this
+            # happens at pod admission (BEFORE execve), so vLLM's argparse
+            # sees a fully-resolved literal. Crucially this is K8s-side
+            # substitution, NOT shell expansion: the container runs vllm
+            # directly via execve (no shell in the loop) and shell-style
+            # ${VAR} would never expand. Each pod ends up with a unique
+            # topic, so subscribers can identify the publisher from the
+            # topic string itself.
+            #
+            # Quoted to force YAML to treat the whole flag as a plain string —
+            # the embedded `*` and `:` would otherwise risk being parsed as
+            # YAML alias / mapping syntax in some parsers.
+            - {{ printf "--kv-events-config={\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:%d\",\"replay_endpoint\":\"tcp://*:%d\",\"topic\":\"kv@$(POD_IP):$(POD_PORT)@%s\"}" (int .Values.ports.kvEventsPub) (int .Values.ports.kvEventsReplay) .Values.model.name | quote }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            # Downward API + literal port — substituted into args at pod
+            # creation (NOT shell time). Kubelet scans command/args for
+            # $(VAR_NAME) and replaces with values from this same container's
+            # env block before execve(). Referenced from --kv-events-config
+            # above to build a per-pod ZMQ topic.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_PORT
+              value: {{ .Values.ports.kvEventsPub | quote }}
+            # Enable vLLM's development/debug API endpoints — adds
+            # /server_info, /reset_prefix_cache, /sleep, /wake_up,
+            # /collective_rpc, and exposes the internal worker metrics
+            # at /metrics with more detail. Required for the harness
+            # to introspect cache state directly during benchmarks
+            # (cross-checking kinference's view against the engine's
+            # own truth). Don't enable this on a publicly-reachable
+            # vLLM — the endpoints can mutate engine state with no auth.
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+            # Flashinfer JIT cache lands in $HOME/.cache; vllm-openai's HOME
+            # (/root) is read-only on some image tags. Redirect to /tmp.
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/huggingface
+            - name: FLASHINFER_WORKSPACE_DIR
+              value: /tmp/flashinfer
+            # Stream stdout lines as they're generated instead of waiting
+            # for Python's default block-buffered fill. Matters during
+            # cold-start where `kubectl logs -f` would otherwise show
+            # nothing for minutes.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # Silence the HF tokenizers "forked process" warning that
+            # otherwise floods stderr on every worker spawn.
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            # Telemetry opt-outs (both honored: DO_NOT_TRACK is universal,
+            # VLLM_NO_USAGE_STATS is vLLM-specific). Avoids occasional
+            # outbound HTTPS to telemetry endpoints at cold start.
+            - name: DO_NOT_TRACK
+              value: "1"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            # Lets the CUDA allocator reuse reserved-but-free blocks
+            # instead of fragmenting and OOMing on long-context generation
+            # or on models where vLLM's profile pass under-budgets activations.
+            #
+            # Both env var names set defensively: PyTorch ≥ 2.5 supposedly
+            # aliases PYTORCH_ALLOC_CONF → PYTORCH_CUDA_ALLOC_CONF, but
+            # empirically vLLM v0.21.0's PyTorch (2.7) doesn't honor the
+            # alias — its CUDA allocator only reads the CUDA-prefixed name.
+            # The PyTorch OOM error message itself explicitly suggests
+            # PYTORCH_CUDA_ALLOC_CONF.
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: expandable_segments:True
+            - name: PYTORCH_ALLOC_CONF
+              value: expandable_segments:True
+          ports:
+            - containerPort: {{ .Values.ports.http }}
+              name: http
+              protocol: TCP
+            - containerPort: {{ .Values.ports.kvEventsPub }}
+              name: kv-pub
+              protocol: TCP
+            - containerPort: {{ .Values.ports.kvEventsReplay }}
+              name: kv-replay
+              protocol: TCP
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory | quote }}
+              nvidia.com/gpu: {{ .Values.gpu.count | quote }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory | quote }}
+              nvidia.com/gpu: {{ .Values.gpu.count | quote }}
+          volumeMounts:
+            - name: weights
+              mountPath: /model-cache
+              readOnly: true
+          # Generous startup probe — cold-start (image pull + CUDA init +
+          # weight load) can take 10+ minutes on a fresh node.
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      # Shared PVC: Mountpoint S3 CSI is ReadOnlyMany so every replica
+      # mounts the same prefix without contention. (Deployment doesn't
+      # support volumeClaimTemplates — and we don't want per-pod PVCs
+      # for read-only shared weights anyway.)
+      volumes:
+        - name: weights
+          persistentVolumeClaim:
+            claimName: {{ include "vllm-server.name" . }}-weights
+            readOnly: true

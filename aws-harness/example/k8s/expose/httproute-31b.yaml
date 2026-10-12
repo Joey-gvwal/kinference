@@ -1,0 +1,35 @@
+# HTTPRoute — routes /model/v1/* traffic through the 31B InferencePool (EPP).
+# Strips the /model prefix before forwarding so the backend receives /v1/*.
+# Applied by `make -f Makefile.31b addons` and `make -f Makefile.31b public`.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gemma-4-31b-route
+  namespace: default
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: llm-d-inference-gateway
+      namespace: llmd
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /model/v1
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /v1
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: gemma-4-31b-pool
+          port: 8000
+          weight: 1
+      timeouts:
+        backendRequest: 0s
+        request: 0s

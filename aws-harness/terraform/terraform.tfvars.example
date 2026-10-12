@@ -1,0 +1,15 @@
+# Optional overrides for terraform/. Copy to terraform.tfvars and edit;
+# the real terraform.tfvars is .gitignored so per-user tweaks stay local.
+#
+# `owner` is not set here on purpose — the Makefile derives it from
+# `git config user.email` and passes it as `-var owner=...`. Set it here
+# only if you're invoking terraform directly outside the Makefile.
+
+# aws_region        = "us-west-2"
+# cluster_name      = "model-harness"
+# kubernetes_version = "1.35"
+# gpu_instance_types = ["g6e.xlarge", "g6e.2xlarge"]
+# gpu_max_size       = 4
+# gpu_az             = ""          # default: <region>a
+# system_node_count  = 2
+# weights_bucket     = "471112539178-us-west-2"

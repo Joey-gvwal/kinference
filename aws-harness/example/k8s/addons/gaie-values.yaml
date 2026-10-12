@@ -1,0 +1,75 @@
+# Gateway API Inference Extension (GAIE) values — Gemma 4 26B MoE InferencePool
+#
+# Deploys the InferencePool CRD and the EPP (Endpoint Picker Process).
+# The EPP uses the llm-d-inference-scheduler which reads KV-cache occupancy
+# and request-queue depth from each vLLM pod via gRPC, then routes incoming
+# requests to the optimal replica.
+#
+# Note: prefix-cache-aware routing is inactive because vllm/vllm-openai does
+# not emit ZeroMQ KV-cache events. The EPP falls back to KV utilization +
+# queue depth scoring only.
+#
+# Project:   https://github.com/kubernetes-sigs/gateway-api-inference-extension
+# Chart:     oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+# Version:   v1.4.0
+#
+# Install (called by `make addons` via install-addons.sh):
+#   helm upgrade --install gemma-4-26b-pool \
+#     oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool \
+#     --version v1.4.0 --namespace default \
+#     -f k8s/addons/gaie-values.yaml --wait --timeout 5m
+#
+# The InferencePool resource will be named after the helm release: gemma-4-26b-pool.
+# The HTTPRoute backend ref must use this same name (see k8s/expose/httproute.yaml).
+
+inferenceExtension:
+  replicas: 1
+  image:
+    # llm-d-inference-scheduler is the llm-d-specific EPP image with
+    # KV-cache-aware and prefix-cache-aware scoring plugins.
+    # The upstream `epp` image (registry.k8s.io/gateway-api-inference-extension/epp)
+    # is also compatible if you prefer the upstream version.
+    name: llm-d-inference-scheduler
+    hub: ghcr.io/llm-d
+    tag: v0.7.1
+    pullPolicy: IfNotPresent
+  extProcPort: 9002
+  pluginsConfigFile: "default-plugins.yaml"
+  tracing:
+    enabled: false
+  monitoring:
+    interval: "10s"
+    prometheus:
+      # Disable Prometheus scraping — no Prometheus deployed in this cluster.
+      # Set to true and configure a ServiceMonitor if you add monitoring later.
+      enabled: false
+
+  # Tolerate the GPU node taint so the EPP can schedule on GPU nodes when
+  # system nodes are full. The EPP doesn't request GPU resources so it won't
+  # displace vLLM workloads.
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+  # The chart default (4 CPU / 8 Gi) is sized for large multi-replica pools.
+  # For 1-2 vLLM replicas, the EPP is lightweight — reduce to fit on our nodes.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      memory: "2Gi"
+
+inferencePool:
+  # Port that vLLM listens on (matches routing.servicePort in modelservice-values.yaml)
+  targetPorts:
+    - number: 8000
+  modelServerType: vllm
+  # Label selector to find vLLM pods.
+  # Must match modelArtifacts.labels in modelservice-values.yaml (plus the
+  # llm-d.ai/role label that the chart adds automatically).
+  modelServers:
+    matchLabels:
+      llm-d.ai/inference-serving: "true"
+      llm-d.ai/model: gemma-4-26b

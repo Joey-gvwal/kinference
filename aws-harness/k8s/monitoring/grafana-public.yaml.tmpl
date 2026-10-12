@@ -1,0 +1,44 @@
+# Public NLB fronting the in-cluster Grafana from the kube-prometheus-stack
+# Helm release. Created by `make expose-grafana`, torn down by
+# `make unexpose-grafana`.
+#
+# Why a parallel Service (not `grafana.service.type=LoadBalancer` in the
+# helm values): keeps the helm release reversible without churning the
+# LB on every helm upgrade, and lets cleanup-lbc-sgs.sh poll-delete the
+# NLB independently before `terraform destroy`. Matches the existing
+# expose-gateway / expose-workers pattern.
+#
+# Selector matches the Grafana Deployment's pod labels from kube-prom-stack
+# v87.x — confirmed via `helm template` against the chart's defaults.
+#
+# Rendered by scripts/expose-grafana.sh from this env var (referenced
+# below as ${OWNER_TAG}, substituted via python os.path.expandvars):
+#   OWNER_TAG  — Owner tag value (`git config user.email`) so the NLB
+#                shows up under `make find-resources`
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-public
+  namespace: monitoring
+  labels:
+    mm/managed-by: model-harness
+    mm/component: grafana-public
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "Project=model-harness,Owner=${OWNER_TAG}"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: kube-prom-stack
+  ports:
+    - name: http
+      # Port 80 publicly → 3000 in the Grafana container. Lets users
+      # browse to the bare NLB hostname without a port suffix.
+      port: 80
+      targetPort: 3000
+      protocol: TCP

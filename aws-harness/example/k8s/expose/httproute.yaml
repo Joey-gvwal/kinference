@@ -1,0 +1,42 @@
+# HTTPRoute — routes /model/v1/* traffic through the InferencePool (EPP).
+# Strips the /model prefix before forwarding so the backend receives /v1/*.
+#
+# The EPP (llm-d-inference-scheduler) intercepts each request, reads live
+# KV-cache occupancy from the vLLM pods, and forwards to the optimal replica.
+# Timeouts are set to 0s (no timeout) to support long streaming responses.
+#
+# Applied by `make public` via scripts/expose.sh.
+# The Gateway (llm-d-inference-gateway) is created by `make addons` (llm-d-infra).
+# The InferencePool (gemma-4-26b-pool) is created by `make addons` (GAIE chart).
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gemma-4-26b-route
+  namespace: default
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: llm-d-inference-gateway
+      namespace: llmd
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /model/v1
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /v1
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: gemma-4-26b-pool
+          port: 8000
+          weight: 1
+      timeouts:
+        backendRequest: 0s
+        request: 0s

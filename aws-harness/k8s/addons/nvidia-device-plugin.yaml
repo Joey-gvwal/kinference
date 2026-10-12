@@ -1,0 +1,54 @@
+# NVIDIA Device Plugin DaemonSet
+# Registers GPU devices with kubelet so pods can request `nvidia.com/gpu: 1`.
+# The AL2023_x86_64_NVIDIA AMI already includes NVIDIA drivers; this plugin
+# only advertises them — no driver install required.
+#
+# Source: https://github.com/NVIDIA/k8s-device-plugin
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+  labels:
+    app: nvidia-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: nvidia-device-plugin
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.16.2
+          args:
+            - "--mig-strategy=none"
+            - "--pass-device-specs=true"
+            - "--fail-on-init-error=true"
+            - "--device-list-strategy=envvar"
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins

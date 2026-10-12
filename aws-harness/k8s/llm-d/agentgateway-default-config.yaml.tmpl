@@ -1,0 +1,59 @@
+# ConfigMap holding the agentgateway YAML config for the *default* EPP
+# path — routes inference requests to the standard llm-d GAIE inference
+# scheduler.
+#
+# This mirrors the user's local reference config at
+# ~/devel/llm-d-local/agentgateway/config.yaml, with one in-cluster
+# adaptation: the endpointPicker.host points at the GAIE EPP Service's
+# DNS name instead of 127.0.0.1:9002.
+#
+# Rendered by scripts/install-llm-d.sh from these env vars
+# (referenced as $-prefixed placeholders inside the data block,
+# substituted via python os.path.expandvars):
+#   GAIE_EPP_SVC   — name of the GAIE inference-pool EPP Service in
+#                    default namespace, typically <pool>-epp
+#                    (e.g. qwen-vllm-pool-epp).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentgateway-default-config
+  namespace: llmd
+  labels:
+    mm/managed-by: model-harness
+    mm/component: agentgateway-default-config
+data:
+  config.yaml: |
+    services:
+    - name: vllm-placeholder
+      namespace: default
+      hostname: vllm-placeholder
+      vips: []
+      ports:
+        8000: 8000
+
+    binds:
+    - port: 8081
+      listeners:
+      - name: vllm
+        protocol: HTTP
+        routes:
+        - name: inference
+          matches:
+          - path:
+              pathPrefix: /
+          backends:
+          - service:
+              name: default/vllm-placeholder
+              port: 8000
+            policies:
+              inferenceRouting:
+                endpointPicker:
+                  host: ${GAIE_EPP_SVC}.default.svc.cluster.local:9002
+                destinationMode: passthrough
+              # No TLS block here — agentgateway dials the EPP via plaintext
+              # gRPC. The EPP is patched to serve plaintext via the
+              # `--secure-serving=false` args override in install-llm-d.sh
+              # step 3b (the chart's flags map renders the flag wrong; the
+              # patch corrects it). Tested locally: agentgateway v1.3.0-
+              # alpha.1 has no YAML config knob that makes inferenceRouting
+              # use TLS, so the EPP has to speak plaintext.

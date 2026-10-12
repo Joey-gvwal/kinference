@@ -1,0 +1,103 @@
+# Servers — declare what each workload exposes
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: emoji-grpc
+  namespace: emojivoto
+spec:
+  podSelector:
+    matchLabels:
+      app: emoji-svc
+  port: grpc
+  proxyProtocol: gRPC
+---
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: voting-grpc
+  namespace: emojivoto
+spec:
+  podSelector:
+    matchLabels:
+      app: voting-svc
+  port: grpc
+  proxyProtocol: gRPC
+---
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: web-http
+  namespace: emojivoto
+spec:
+  podSelector:
+    matchLabels:
+      app: web-svc
+  port: http
+  proxyProtocol: HTTP/1
+---
+# Allow only web to call emoji and voting
+apiVersion: policy.linkerd.io/v1alpha1
+kind: MeshTLSAuthentication
+metadata:
+  name: web-identity
+  namespace: emojivoto
+spec:
+  identities:
+    - "web.emojivoto.serviceaccount.identity.linkerd.cluster.local"
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: emoji-allow-web
+  namespace: emojivoto
+spec:
+  targetRef:
+    group: policy.linkerd.io
+    kind: Server
+    name: emoji-grpc
+  requiredAuthenticationRefs:
+    - group: policy.linkerd.io
+      kind: MeshTLSAuthentication
+      name: web-identity
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: voting-allow-web
+  namespace: emojivoto
+spec:
+  targetRef:
+    group: policy.linkerd.io
+    kind: Server
+    name: voting-grpc
+  requiredAuthenticationRefs:
+    - group: policy.linkerd.io
+      kind: MeshTLSAuthentication
+      name: web-identity
+---
+# Allow vote-bot (and anyone) to reach the web frontend
+apiVersion: policy.linkerd.io/v1alpha1
+kind: NetworkAuthentication
+metadata:
+  name: all-networks
+  namespace: emojivoto
+spec:
+  networks:
+    - cidr: 0.0.0.0/0
+    - cidr: ::/0
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: web-allow-all
+  namespace: emojivoto
+spec:
+  targetRef:
+    group: policy.linkerd.io
+    kind: Server
+    name: web-http
+  requiredAuthenticationRefs:
+    - group: policy.linkerd.io
+      kind: NetworkAuthentication
+      name: all-networks
+

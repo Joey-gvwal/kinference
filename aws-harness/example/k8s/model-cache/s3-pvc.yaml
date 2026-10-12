@@ -1,0 +1,26 @@
+# PersistentVolumeClaim that binds to the S3-backed PV (s3-pv.yaml).
+#
+# ReadOnlyMany access mode allows all vLLM decode pods — across all GPU nodes —
+# to mount this PVC simultaneously without any volume cloning or snapshot dance.
+#
+# Prerequisites:
+#   • s3-pv.yaml applied (make addons handles this)
+#   • Mountpoint for S3 CSI driver installed (make addons handles this)
+#   • Weights uploaded to S3 (make init-weights)
+#
+# Applied by: scripts/install-addons.sh (make addons)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gemma-4-26b-weights
+  namespace: default
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 20Gi
+  # Bind explicitly to the named PV — prevents dynamic provisioning.
+  volumeName: gemma-4-26b-weights
+  storageClassName: ""

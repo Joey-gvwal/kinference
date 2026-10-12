@@ -1,0 +1,17 @@
+# PersistentVolumeClaim that binds to the S3-backed PV (s3-pv-31b.yaml).
+#
+# Applied by: make -f Makefile.31b inference
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gemma-4-31b-weights
+  namespace: default
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 70Gi
+  volumeName: gemma-4-31b-weights
+  storageClassName: ""

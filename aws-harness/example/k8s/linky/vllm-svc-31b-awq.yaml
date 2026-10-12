@@ -1,0 +1,15 @@
+# Internal ClusterIP service for direct in-cluster access to the 31B AWQ vLLM pod.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma-4-31b-awq-vllm
+  namespace: default
+spec:
+  selector:
+    llm-d.ai/inference-serving: "true"
+    llm-d.ai/model: gemma-4-31b-awq
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

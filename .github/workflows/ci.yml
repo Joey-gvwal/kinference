@@ -1,0 +1,118 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    # Generous relative to gateway's 15: a cold cache compiles the dynamo
+    # monorepo git dep. Warm-cache runs finish far inside this.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # The `zmq` crate links libzmq via pkg-config. No protobuf-compiler:
+      # `protoc-bin-vendored` bundles protoc for tonic-build.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libzmq3-dev pkg-config g++
+      # No toolchain action: rust-toolchain.toml pins the version AND the
+      # rustfmt/clippy components, and a bare `rustup toolchain install`
+      # installs exactly that. One place to bump.
+      - run: rustup toolchain install
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: just lint
+
+  # `dashboard/dist` is committed and baked into the binary at compile time
+  # (rust-embed via src/dashboard.rs); this rebuilds it from source and fails
+  # on any diff, so a stale bundle can't ship silently.
+  dashboard-fresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      - run: npm run build
+        working-directory: dashboard
+      - name: Check committed bundle is fresh
+        run: |
+          if [[ -n "$(git status --porcelain dashboard/dist)" ]]; then
+            git status --porcelain dashboard/dist
+            git diff --stat dashboard/dist
+            echo "::error::dashboard/dist is stale — run (cd dashboard && npm ci && npm run build) and commit the result"
+            exit 1
+          fi
+
+  # Installs both charts on a kind cluster and asserts the deployed system
+  # FUNCTIONS against the real engine: kinference goes Ready, discovers a
+  # dummy-weights vLLM worker (CPU, tests/e2e/manifests, image pinned by
+  # digest), ingests the KV events a real completion request produces, and
+  # writes CRD status. This is the release workflow's gate.
+  #
+  # The docker image build is cold on runners (the BuildKit cache mounts in
+  # the Dockerfile don't persist here), so most of the wall clock is one
+  # cargo release build — hence the wide timeout. Wiring buildx's gha cache
+  # backend is a later optimization if this hurts.
+  test-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc
+        with:
+          install_only: true
+      - run: just up
+      - run: just test-smoke
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          # Events and describe catch what pod listings can't — e.g. a
+          # Pending pod's FailedScheduling reason.
+          kubectl get events --sort-by=.lastTimestamp | tail -30 || true
+          kubectl describe pods -l app.kubernetes.io/name=kinference || true
+          kubectl describe pods -l mm/server-name=dummy-vllm || true
+          kubectl get inferenceworkersets,inferencepools -A -o yaml || true
+          kubectl logs deployment/kinference --tail=200 || true
+          kubectl logs deployment/dummy-vllm --tail=50 || true
+          kind export logs /tmp/kind-logs --name kinference-smoke || true
+      - name: Upload kind logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kind-logs
+          path: /tmp/kind-logs
+          retention-days: 3
+
+  test-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libzmq3-dev pkg-config g++
+      - run: rustup toolchain install
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: just test-unit

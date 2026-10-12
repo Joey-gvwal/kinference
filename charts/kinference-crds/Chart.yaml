@@ -1,0 +1,14 @@
+apiVersion: v2
+name: kinference-crds
+description: >-
+  The kinference.buoyant.io CustomResourceDefinitions kinference watches
+  (InferencePool, InferencePolicy, InferenceProvider, InferenceWorkerSet).
+  Install and upgrade this chart BEFORE the kinference workload chart. The
+  CRDs live in templates/ rather than helm's crds/ dir precisely so that
+  `helm upgrade` applies schema changes — the flip side is that
+  `helm uninstall` removes the CRDs and with them every CR in the cluster.
+type: application
+# Both are overridden at release time by the release workflow
+# (helm package --version X --app-version X); these are dev placeholders.
+version: 0.1.0
+appVersion: "0.1.0"

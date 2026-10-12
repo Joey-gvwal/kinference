@@ -1,0 +1,43 @@
+# The Extension object that puts kinference in a gateway's request path.
+#
+# kinference NAMES this object but never creates it. Every BackendBinding the router
+# publishes (`[policy] backend_bindings = true`) lists the extension named by
+# `[policy] backend_binding_extension` in configmap.yaml — `chat-picker` — and
+# the gateway prepends it to the filter chain of every rule routing to the pool.
+# The binding says WHICH backends the pool spans; this extension is what asks
+# kinference, per request, which one the request goes to. Rename it in both places or
+# in neither: a binding naming an Extension that does not exist programs a route
+# whose filter chain cannot be built.
+#
+# Namespace matters twice over. The gateway resolves the reference in the
+# BINDING's namespace, and a binding lives in its pool's namespace — so this has
+# to sit alongside the pools, which is `[policy] namespace = "default"` here.
+#
+# The CRD is the GATEWAY's (`gateway.linkerd.io/v1alpha1`, shipped in its Helm
+# chart), not one of kinference's own under k8s/crds — and `make crds` does not
+# install it. It is applied by `make deploy` all the same, because the gateway
+# is a prerequisite of installing kinference at all, so the kind always resolves.
+#
+# A route may skip the binding path entirely and carry its own
+# `extensionRef` filter naming this object; see documents/ in the gateway repo.
+# Set `backend_binding_extension = ""` in that case so bindings list none.
+apiVersion: gateway.linkerd.io/v1alpha1
+kind: Extension
+metadata:
+  name: chat-picker
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kinference
+spec:
+  class: kinference_selector
+  config:
+    # Past one replica this needs a per-pod DNS name or shared picker state;
+    # see the scaling checklist in deployment.yaml.
+    service: kinference.default.svc:50051
+    # Request header carrying the tenant id. Worth setting here: configmap.yaml
+    # has `[metrics] tenant_labels = "all"`, and without a header to read from,
+    # every request is attributed to tenant="default" and the per-tenant series
+    # that setting buys are all the same series.
+    # tenantHeader: x-tenant-id
+    # Interactive (default) | Batch | Deferrable.
+    # qos: Interactive

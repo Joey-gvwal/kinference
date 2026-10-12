@@ -1,0 +1,284 @@
+# Standalone dev/test vLLM deployment: CPU-only, dummy-weights, tiny model.
+#
+# Purpose: exercise kinference's full event-subscription and routing pipeline
+# without needing GPUs, weight downloads, or the AWS harness. Intended for
+# Docker Desktop's built-in Kubernetes, `kind`, `minikube`, or any other
+# local single-node cluster. Do NOT deploy to the production EKS cluster.
+#
+# What it does:
+#   - Runs vLLM on CPU (no `nvidia.com/gpu` requests, no GPU tolerations,
+#     no S3-CSI weight mount).
+#   - Uses `--load-format dummy` so vLLM initializes model tensors with
+#     random values — no safetensors download from HuggingFace, no
+#     real weight loading. Config+tokenizer are still fetched once.
+#   - Uses `HuggingFaceTB/SmolLM2-135M-Instruct` — 135M params, ~1 GB
+#     total RAM. Small enough to run on any laptop; Llama-style arch so
+#     vLLM's normal code paths execute cleanly.
+#   - Publishes real KV-cache events on ZMQ 5557 (Store/Remove per block)
+#     with the same topic format as production pods: this is the whole
+#     point of the deployment.
+#
+# What responses look like: garbage text (random-init weights → random
+# tokens), but valid OpenAI-format JSON. Integration tests that assert on
+# response *shape* work; tests that assert on content quality don't.
+#
+# Deploy:
+#   kubectl apply -f k8s/dev/vllm-dummy.yaml
+#
+# Verify:
+#   kubectl get pod -l mm/server-name=dummy-vllm -w
+#   kubectl logs -l mm/server-name=dummy-vllm -f | grep -iE 'kv.*event|running'
+#
+# Point kinference at it — from another pod in the cluster:
+#   http://dummy-vllm.default.svc.cluster.local:8000/v1/completions
+#   tcp://dummy-vllm.default.svc.cluster.local:5557       (KV events PUB)
+#
+# Or from the host (Docker Desktop / kind / minikube):
+#   kubectl port-forward svc/dummy-vllm 8000:8000 5557:5557 5558:5558
+#   → point kinference's workers.toml at 127.0.0.1:{8000,5557,5558}
+#
+# Teardown:
+#   kubectl delete -f k8s/dev/vllm-dummy.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-vllm
+  namespace: default
+  labels:
+    # Mirror the production chart's label set so existing tooling
+    # (gen-monitor-config.sh, port-forward.sh) can discover this pod
+    # via the same selectors when running against a local cluster.
+    mm/managed-by: model-harness
+    mm/engine: vllm
+    mm/server-name: dummy-vllm
+    app.kubernetes.io/component: inference
+spec:
+  # Headless (clusterIP: None) is unnecessary for CPU dummy — one replica,
+  # simple ClusterIP is fine. Kinference connects via DNS lookup either way.
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+    - name: kv-pub
+      port: 5557
+      targetPort: 5557
+      protocol: TCP
+    - name: kv-replay
+      port: 5558
+      targetPort: 5558
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: dummy-vllm
+    app.kubernetes.io/instance: dummy-vllm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-vllm
+  namespace: default
+  labels:
+    mm/managed-by: model-harness
+    mm/engine: vllm
+    mm/server-name: dummy-vllm
+    app.kubernetes.io/name: dummy-vllm
+    app.kubernetes.io/instance: dummy-vllm
+    app.kubernetes.io/component: inference
+  annotations:
+    # Same annotation shape as production chart. block-size intentionally
+    # omitted; kinference discovers it at runtime (or you can set it to 16 if
+    # you're pinning kinference's kv_block_size for this test.)
+    mm/model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dummy-vllm
+      app.kubernetes.io/instance: dummy-vllm
+  template:
+    metadata:
+      labels:
+        mm/managed-by: model-harness
+        mm/engine: vllm
+        mm/server-name: dummy-vllm
+        app.kubernetes.io/name: dummy-vllm
+        app.kubernetes.io/instance: dummy-vllm
+        app.kubernetes.io/component: inference
+      annotations:
+        mm/model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+    spec:
+      # NO nodeSelector. NO gpu tolerations. Runs on any Ready node —
+      # which on a Docker Desktop single-node cluster is just the one
+      # local node. On a mixed cluster it schedules wherever CPU +
+      # memory are available.
+      containers:
+        - name: vllm
+          # Community-built CPU wheels + Docker image. Official
+          # vllm/vllm-openai is GPU-only (fails at CUDA init on CPU
+          # hosts). Version pinning is coarse (community lags official
+          # by 1-2 releases); acceptable for dev/test. Bump when
+          # community catches up if you need a specific vLLM feature.
+          image: mekayelanik/vllm-cpu:latest
+          imagePullPolicy: IfNotPresent
+          command: ["vllm", "serve"]
+          args:
+            - HuggingFaceTB/SmolLM2-135M-Instruct
+            - --host=0.0.0.0
+            - --port=8000
+            # DUMMY WEIGHTS — random-init, no safetensors download.
+            # config.json + tokenizer are still fetched from HF once
+            # per pod (small, ~5 MB total).
+            - --load-format=dummy
+            # NOTE: do NOT pass `--device=cpu`. In recent vLLM versions
+            # (v0.7+) --device accepts only integer device *indexes*
+            # (0, 1, ...) with CPU-vs-GPU chosen by which wheel is
+            # installed. The CPU wheel in this image already knows it's
+            # on CPU; passing `--device=cpu` triggers
+            # `ValueError: Non-integer device ID 'cpu' is not supported`.
+            #
+            # CPU has no CUDA graphs. --enforce-eager is required (or
+            # implicit on CPU); setting it explicitly avoids surprises.
+            - --enforce-eager
+            # Disable torch.compile / inductor at the PyTorch level (see
+            # TORCH_COMPILE_DISABLE=1 in env below). vLLM 0.9+ uses
+            # torch.compile to JIT-compile the model forward pass on
+            # CPU, which needs the full torch dev headers (specifically
+            # torch/csrc/inductor/cpp_prefix.h). The community CPU
+            # image doesn't ship these — first request crashes with
+            # `CppCompileError: fatal error: cpp_prefix.h: No such
+            # file or directory`. --enforce-eager alone isn't enough
+            # (it only disables CUDA graphs, not inductor), and vLLM's
+            # --compilation-config schema changes between versions
+            # (level → mode → …). TORCH_COMPILE_DISABLE=1 is a stable
+            # PyTorch-level kill switch that skips compilation
+            # regardless of what vLLM asks for. Fine for dummy/dev —
+            # perf doesn't matter here.
+            # Small values to keep RAM footprint minimal on a laptop.
+            - --max-model-len=4096
+            - --max-num-seqs=8
+            # CPU backend quirk: `--gpu-memory-utilization` is repurposed
+            # to control *CPU* memory reservation as a fraction of what
+            # psutil reports as available. Default 0.92 is aggressive
+            # and fails on Docker Desktop VMs where a few GiB is already
+            # committed to other containers/system. 0.3 gives vLLM ~1
+            # GiB on a 4-GiB pod — enough for the 135M dummy weights
+            # + small KV cache pool. Bump if you enlarge max-model-len
+            # or max-num-seqs; lower if `Available memory on node 0`
+            # errors return.
+            - --gpu-memory-utilization=0.3
+            # KV-cache event publishing — same format as production so
+            # kinference treats this pod identically to a real vLLM worker.
+            # $(POD_IP) and $(POD_PORT) are substituted by kubelet at
+            # pod admission (downward API + env-var interpolation, not
+            # shell expansion — same mechanism as the production chart).
+            - >-
+              --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","topic":"kv@$(POD_IP):$(POD_PORT)@HuggingFaceTB/SmolLM2-135M-Instruct"}
+            # Prefix caching — real functionality, works with dummy
+            # weights. Cache blocks hash by token id, not weight
+            # values, so prefix-cache hits fire normally on repeat
+            # requests. Kinference integration tests exercise this.
+            - --enable-prefix-caching
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_PORT
+              value: "5557"
+            # vLLM dev endpoints (matches production chart) — enables
+            # /server_info, /reset_prefix_cache, etc. Fine for local
+            # dev; do NOT enable in production.
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/huggingface
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: DO_NOT_TRACK
+              value: "1"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            # PyTorch-level kill switch for torch.compile / inductor.
+            # See the --enforce-eager comment above for why we need
+            # this on the community CPU image.
+            - name: TORCH_COMPILE_DISABLE
+              value: "1"
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+            - containerPort: 5557
+              name: kv-pub
+              protocol: TCP
+            - containerPort: 5558
+              name: kv-replay
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "4Gi"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/huggingface
+            - name: tmp
+              mountPath: /tmp
+            # Overlay /dev/shm with a larger tmpfs. Default K8s /dev/shm
+            # is 64 MiB, but vLLM needs 160+ MiB for worker IPC. Sized
+            # to 1 GiB — generous, but a Memory-medium emptyDir doesn't
+            # actually consume RAM until data is written, and it counts
+            # against the pod's memory limit either way. sizeLimit is a
+            # ceiling, not an allocation.
+            - name: dshm
+              mountPath: /dev/shm
+          # Generous startup probe — the first pod on a fresh cluster
+          # has to pip-download vLLM's runtime deps (if the image is
+          # a slim wheel install rather than a fully-baked layer) plus
+          # fetch the model config+tokenizer from HuggingFace. 5 min
+          # ceiling is safe.
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      volumes:
+        # emptyDir → fresh HF cache per pod. Config+tokenizer re-download
+        # on each pod start (~5 MB, cheap). Swap to a PVC or hostPath
+        # if repeat startup latency matters.
+        - name: hf-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        # Larger /dev/shm for vLLM worker IPC. Memory-medium tmpfs, sized
+        # to 1 GiB. This counts against the pod's memory limit; if you
+        # tighten `resources.limits.memory` below ~2 GiB you'll want to
+        # trim this proportionally.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi

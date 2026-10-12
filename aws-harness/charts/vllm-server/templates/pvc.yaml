@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vllm-server.name" . }}-weights
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vllm-server.labels" . | nindent 4 }}
+  annotations:
+    {{- include "vllm-server.annotations" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: {{ .Values.weights.capacity }}
+  volumeName: {{ include "vllm-server.name" . }}-weights
+  storageClassName: ""
