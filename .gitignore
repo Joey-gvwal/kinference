@@ -1,8 +1,2 @@
 /target
-# Cargo.lock IS tracked. kinference ships as a binary (and as a container image), so
-# the lockfile is what makes a build reproducible — without it, `cargo build` on
-# a different day silently resolves different dependency versions than the ones
-# that were tested. The ignore-the-lockfile convention is for libraries, whose
-# consumers do their own resolution.
-aws-harness/config.toml
 .*.swp
