@@ -17,10 +17,6 @@ tokio-util = "0.7"
 # `PullBody` method requires. Already a transitive dep via tonic, but
 # pulled in directly for clarity.
 tokio-stream = "0.1"
-# SHA-256 for the TokenReview cache key. Must be CRYPTOGRAPHIC: a fast hash
-# would let a caller who can present tokens construct a collision against
-# someone else's cached positive and be handed their identity.
-sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 zmq = "0.10"

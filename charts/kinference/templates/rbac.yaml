@@ -43,14 +43,6 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
-  # TokenReview, for `[token_review] enabled = true`. `create` only — the
-  # resource is virtual and non-persisted, so creating one IS the read. This is
-  # the standard grant for a delegated authenticator. In the BASE role because
-  # token review is not routing policy: a deployment may want it with
-  # `[policy]` switched off.
-  - apiGroups: ["authentication.k8s.io"]
-    resources: ["tokenreviews"]
-    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

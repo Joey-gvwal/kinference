@@ -87,8 +87,6 @@ pub struct Config {
     pub tokenize: TokenizeConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
-    #[serde(default)]
-    pub token_review: crate::token_review::TokenReviewConfig,
     /// Labelling of the metrics kinference *publishes* (`crate::prom`). Not to
     /// be confused with `metrics_poll_ms` and friends, which concern scraping
     /// the engines.

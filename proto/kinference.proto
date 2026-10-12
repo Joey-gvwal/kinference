@@ -227,31 +227,6 @@ message AbortResponse {
 }
 
 /*
-Validate a Kubernetes bearer token.
-
-Treat the token as a credential: do not log it, do not put it in an error
-message, and do not include it in a trace attribute.
-
-Results may be cached, keyed on (token, audiences), with a TTL short enough
-that a revoked token stops working promptly. A cached negative is as useful as
-a cached positive.
-*/
-
-service TokenReview {
-  rpc ReviewToken(ReviewTokenRequest) returns (ReviewTokenResponse);
-}
-
-message ReviewTokenRequest {
-  string token = 1;
-  repeated string audiences = 2;
-}
-
-message ReviewTokenResponse {
-  bool authenticated = 1;
-  string username = 2;
-}
-
-/*
 Body push/pull conformance check
 
 Clients MUST:

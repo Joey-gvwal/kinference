@@ -34,7 +34,6 @@ mod pool_manager;
 mod prom;
 mod proto;
 mod telemetry;
-mod token_review;
 mod tokenize;
 mod tokenize_client;
 mod version;

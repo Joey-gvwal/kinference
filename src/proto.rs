@@ -5,12 +5,11 @@
 //!
 //! It sits at the crate root rather than inside `crate::grpc` — where it used
 //! to live — because the generated code is shared vocabulary, not part of the
-//! `Picker` handler. Two subsystems implement a service from it
-//! (`crate::grpc` the `Picker`, `crate::token_review` the `TokenReview`),
-//! and `crate::mock` implements a second `Picker`. Reaching those through
-//! `crate::grpc` made every one of
-//! them depend on a 668-line file they otherwise have no interest in, and put
-//! `grpc.rs` in the edit path of subsystems that never touch it.
+//! `Picker` handler. `crate::grpc` implements the `Picker` from it and
+//! `crate::mock` implements a second one. Reaching the types through
+//! `crate::grpc` made every user depend on a 668-line file they otherwise have
+//! no interest in, and put `grpc.rs` in the edit path of subsystems that never
+//! touch it.
 //!
 //! The mount point is invisible to the wire format and to the build: the
 //! service names in `proto/kinference.proto` are what callers see, and
