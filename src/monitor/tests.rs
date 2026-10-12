@@ -224,7 +224,7 @@ fn ws(aliases: &[(&str, &str)]) -> crate::policy::store::ResolvedWorkerSet {
         name: "set-a".into(),
         namespace: "default".into(),
         labels: std::collections::BTreeMap::new(),
-        pool_id: crate::pool::PoolId::from_raw(0),
+        pool_id: crate::policy::PoolId::from_raw(0),
         service_name: "svc".into(),
         service_port: None,
         kv_events_declared: false,

@@ -627,7 +627,7 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
         .filter_map(|w| {
             Some((
                 super::PoolKey::namespaced(&w.namespace()?, w.name_any()),
-                crate::pool::PoolId::next(),
+                super::PoolId::next(),
             ))
         })
         .collect();

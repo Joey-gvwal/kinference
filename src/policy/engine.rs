@@ -28,12 +28,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::PoolId;
 use super::compile::{
     BackendMatch, CompiledPolicy, CompiledRoute, CompiledRule, ModelChoice, Rank,
 };
 use super::crd::{BackendType, OnEmpty, TieBreak, Unmatched};
 use super::predicate::{CandidateAttrs, RequestAttrs};
-use crate::pool::PoolId;
 
 /// One `(model, destination)` pair — the unit a policy chooses between. One
 /// decision covers which model serves the request AND where it runs, so a policy

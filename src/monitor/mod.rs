@@ -27,16 +27,11 @@ use crate::metrics::MetricsRegistry;
 use crate::observation_sink::ObservationSink;
 use crate::observations::{PendingObservations, RequestLabels, RequestMeta, format_csv_row};
 use crate::picker::WorkerScore;
-use crate::pool::{Pool, PoolId};
+use crate::policy::{AUTO_MODEL, PoolId};
+use crate::pool::Pool;
 use crate::telemetry::{CallSample, Telemetry, TopWorker};
 use crate::tokenize::TokenizeInput;
 use crate::workers::WorkerEntry;
-
-/// The pseudo-model string that means "kinference, you choose the model."
-/// A request whose `model` is exactly this is resolved to a concrete
-/// model by [`KinferenceService::choose_model_for_auto`] before pool +
-/// endpoint selection. No worker ever serves this name.
-pub(crate) const AUTO_MODEL: &str = "auto";
 
 /// Quality-of-service class for a request. Mapped from the proto
 /// `PickRequest.QosClass` at the gRPC boundary so this module stays

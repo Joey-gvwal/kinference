@@ -19,7 +19,8 @@ use crate::discovery::{
 use crate::metrics::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::mock::MockKinferenceService;
 use crate::monitor::KinferenceService;
-use crate::pool::{Pool, PoolId};
+use crate::policy::PoolId;
+use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
 use crate::telemetry::{Telemetry, WorkerMeta};
 use crate::workers::{WorkerEntry, WorkerRegistry};
@@ -327,8 +328,7 @@ pub async fn run() -> Result<()> {
         // old one, and the old pool's Removed then cancels the NEW pool's
         // listeners — a healthy worker in the correct pool goes dark, and the
         // logs blame the pool that left.
-        let task_tokens: Arc<DashMap<(pool::PoolId, u64), CancellationToken>> =
-            Arc::new(DashMap::new());
+        let task_tokens: Arc<DashMap<(PoolId, u64), CancellationToken>> = Arc::new(DashMap::new());
 
         // Eviction signal — subsystems (ingest, metrics) request a
         // worker's removal here when they detect a homogeneity
@@ -901,7 +901,7 @@ fn handle_added(
     warmup_enabled: bool,
     telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
-    task_tokens: &Arc<DashMap<(pool::PoolId, u64), CancellationToken>>,
+    task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     parent_cancel: &CancellationToken,
     // The fleet-wide local tokenizer registry (keyed by model). Passed
     // through to the per-worker warmup/poller only when this pool's
@@ -909,9 +909,7 @@ fn handle_added(
     local_tokenizer: Option<Arc<local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: &eviction::EvictionTx,
     model_router: &Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<String, std::collections::BTreeSet<pool::PoolId>>,
-        >,
+        std::sync::RwLock<std::collections::HashMap<String, std::collections::BTreeSet<PoolId>>>,
     >,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
 ) {
@@ -1147,7 +1145,7 @@ struct MainHooks {
     kube_client: Option<kube::Client>,
     telemetry: Arc<Telemetry>,
     metrics: Arc<MetricsRegistry>,
-    task_tokens: Arc<DashMap<(pool::PoolId, u64), CancellationToken>>,
+    task_tokens: Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: Arc<DashMap<u64, Arc<Pool>>>,
     observation_ttl: std::time::Duration,
     /// Per-pool token scoping that pool's discovery, forwarder, and prefix
@@ -1158,7 +1156,7 @@ struct MainHooks {
     /// after cancellation. Discovery has the opposite requirement — it must
     /// stop the instant the pool retires, or it keeps announcing workers into
     /// a pool nothing routes to.
-    discovery_tokens: DashMap<pool::PoolId, CancellationToken>,
+    discovery_tokens: DashMap<PoolId, CancellationToken>,
 }
 
 impl pool_manager::PoolHooks for MainHooks {
@@ -1270,7 +1268,7 @@ async fn evict_worker(
     pool: &Arc<pool::Pool>,
     telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
-    task_tokens: &Arc<DashMap<(pool::PoolId, u64), CancellationToken>>,
+    task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
 ) {
     drop_worker_state(
@@ -1304,7 +1302,7 @@ fn drop_worker_state(
     pool: &Arc<pool::Pool>,
     telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
-    task_tokens: &Arc<DashMap<(pool::PoolId, u64), CancellationToken>>,
+    task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
 ) {
     // Resolved BEFORE the registry entry is dropped below, and only for the

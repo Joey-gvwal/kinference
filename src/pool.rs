@@ -39,7 +39,6 @@
 //! `KinferenceService` and is shared across pools.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
@@ -48,53 +47,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{PickerConfig, PoolSpec, PredictorConfig, TokenizeMode};
 use crate::inflight_prefixes::InflightPrefixes;
 use crate::inflight_registry::InflightRegistry;
-use crate::policy::PoolKey;
+use crate::policy::{PoolId, PoolKey};
 use crate::workers::WorkerRegistry;
-
-/// Opaque, process-unique handle to a pool. The readable name is [`Pool::name`].
-///
-/// **Not an index, and never reused.** It used to be a positional index into a
-/// `Vec<Arc<Pool>>` — fine while the pool set was fixed at startup, and a
-/// silent-corruption engine once pools come and go. A recycled slot would
-/// decrement the wrong pool's inflight counter, route a model to an unrelated
-/// worker set, and publish one pool's endpoint counts into another's CRD status,
-/// all without an error. Ids that merely *shifted* (from compacting the vec)
-/// would mis-target every live observation at once.
-///
-/// The field is **private** on purpose: it makes the compiler enumerate every
-/// site that used to index by it, instead of leaving that to a grep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PoolId(u64);
-
-impl PoolId {
-    /// Mint a fresh id. Monotonic and never recycled, so a stale id resolves to
-    /// `None` rather than to somebody else's pool.
-    pub fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        PoolId(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// A placeholder for candidates no real pool scored — a policy simulation
-    /// evaluates hypothetical candidates that belong to no pool. `next()` starts
-    /// at 1, so this is never minted and never registered: looking it up
-    /// resolves to nothing, which is exactly right for a candidate that exists
-    /// only in a simulation.
-    pub const UNSCORED: PoolId = PoolId(0);
-
-    /// Construct a specific id. Test-only — production ids come from
-    /// [`PoolId::next`], and a public raw constructor would reintroduce exactly
-    /// the aliasing this type exists to prevent.
-    #[cfg(test)]
-    pub fn from_raw(n: u64) -> Self {
-        PoolId(n)
-    }
-}
-
-impl std::fmt::Display for PoolId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "pool#{}", self.0)
-    }
-}
 
 /// An immutable view of the fleet's pools.
 ///

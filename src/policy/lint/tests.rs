@@ -1,8 +1,8 @@
 use super::*;
+use crate::policy::PoolId;
 use crate::policy::PoolKey;
 use crate::policy::crd::{InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet};
 use crate::policy::store::{PoolIndex, resolve};
-use crate::pool::PoolId;
 use serde_json::json;
 use std::sync::Arc;
 

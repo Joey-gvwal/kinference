@@ -42,7 +42,8 @@ use super::store::{
     DanglingPolicy, PolicyStore, ResolvedPolicy, ResolvedPool, ResolvedWorkerSet, UnresolvedReason,
 };
 use crate::metrics::MetricsRegistry;
-use crate::pool::{Pool, PoolId};
+use crate::policy::PoolId;
+use crate::pool::Pool;
 
 /// The controller identity written into `status.parents[].controllerName`.
 pub const CONTROLLER_NAME: &str = "kinference.buoyant.io/router";

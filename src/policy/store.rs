@@ -50,6 +50,7 @@ use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::{Api, Resource, ResourceExt};
 use tokio_util::sync::CancellationToken;
 
+use super::PoolId;
 use super::compile::CompiledPolicy;
 use super::crd::{
     ApiFormat, BackendType, HTTPRoute, InferencePolicy, InferencePool, InferenceProvider,
@@ -57,7 +58,6 @@ use super::crd::{
 };
 use super::engine::ObjectKey;
 use super::services::ServiceIndex;
-use crate::pool::PoolId;
 
 /// `(namespace, name)`.
 pub type ObjKey = (String, String);

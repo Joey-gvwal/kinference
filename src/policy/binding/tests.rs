@@ -2,11 +2,11 @@ use super::*;
 
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
+use crate::policy::PoolId;
 use crate::policy::compile::CompiledPolicy;
 use crate::policy::crd::{Condition, IntOrString};
 use crate::policy::engine::ObjectKey;
 use crate::policy::store::{ResolvedProvider, ResolvedWorkerSet};
-use crate::pool::PoolId;
 
 /// The configured picker, as `main` passes it: the default name unless an
 /// operator changed it.

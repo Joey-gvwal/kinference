@@ -91,6 +91,8 @@ pub mod store;
 pub mod warning;
 pub mod worker_sets;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// The pool a request named, lifted off the wire so `crate::monitor` stays
 /// proto-agnostic (it references no generated type today, and this keeps it
 /// that way).
@@ -106,6 +108,57 @@ pub struct PoolRef {
 impl PoolRef {
     pub fn label(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
+    }
+}
+
+/// The pseudo-model string that means "kinference, you choose the model."
+/// A request whose `model` is exactly this is resolved to a concrete
+/// model by the monitor's `choose_model_for_auto` before pool +
+/// endpoint selection. No worker ever serves this name.
+pub(crate) const AUTO_MODEL: &str = "auto";
+
+/// Opaque, process-unique handle to a pool. The readable name is `pool::Pool::name`.
+///
+/// **Not an index, and never reused.** It used to be a positional index into a
+/// `Vec<Arc<Pool>>` — fine while the pool set was fixed at startup, and a
+/// silent-corruption engine once pools come and go. A recycled slot would
+/// decrement the wrong pool's inflight counter, route a model to an unrelated
+/// worker set, and publish one pool's endpoint counts into another's CRD status,
+/// all without an error. Ids that merely *shifted* (from compacting the vec)
+/// would mis-target every live observation at once.
+///
+/// The field is **private** on purpose: it makes the compiler enumerate every
+/// site that used to index by it, instead of leaving that to a grep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PoolId(u64);
+
+impl PoolId {
+    /// Mint a fresh id. Monotonic and never recycled, so a stale id resolves to
+    /// `None` rather than to somebody else's pool.
+    pub fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        PoolId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// A placeholder for candidates no real pool scored — a policy simulation
+    /// evaluates hypothetical candidates that belong to no pool. `next()` starts
+    /// at 1, so this is never minted and never registered: looking it up
+    /// resolves to nothing, which is exactly right for a candidate that exists
+    /// only in a simulation.
+    pub const UNSCORED: PoolId = PoolId(0);
+
+    /// Construct a specific id. Test-only — production ids come from
+    /// [`PoolId::next`], and a public raw constructor would reintroduce exactly
+    /// the aliasing this type exists to prevent.
+    #[cfg(test)]
+    pub fn from_raw(n: u64) -> Self {
+        PoolId(n)
+    }
+}
+
+impl std::fmt::Display for PoolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pool#{}", self.0)
     }
 }
 

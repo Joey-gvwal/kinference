@@ -1,9 +1,9 @@
 use super::*;
+use crate::policy::PoolId;
 use crate::policy::compile::CompiledPolicy;
 use crate::policy::crd::InferencePolicySpec;
 use crate::policy::engine::{CandidateTarget, ObjectKey};
 use crate::policy::predicate::CandidateAttrs;
-use crate::pool::PoolId;
 
 /// Fixtures are JSON, not YAML, following the convention `crd/tests.rs`
 /// established. These mirror the demo policies in `src/policy/check/tests.rs`.

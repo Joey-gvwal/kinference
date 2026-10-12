@@ -46,13 +46,14 @@ use tokio::sync::Semaphore;
 
 use crate::metrics::MetricsRegistry;
 use crate::picker::{self, WorkerScore};
+use crate::policy::PoolId;
 use crate::policy::classify;
 use crate::policy::crd::{OnEmpty, Unmatched};
 use crate::policy::engine::{Candidate, CandidateTarget, ObjectKey};
 use crate::policy::explain::{self, Explanation, RuleStep};
 use crate::policy::predicate::{CandidateAttrs, QOS_VALUES, RequestAttrs};
 use crate::policy::store::{PolicyIndex, PolicyStore, ResolvedPool};
-use crate::pool::{PoolId, PoolRegistry};
+use crate::pool::PoolRegistry;
 
 // ── limits ───────────────────────────────────────────────────────────────────
 

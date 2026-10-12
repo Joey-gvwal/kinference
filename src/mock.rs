@@ -160,12 +160,12 @@ impl Picker for MockKinferenceService {
         // resolve it, `force_model` drives the same body rewrite the real
         // service does, so a mock-backed caller never forwards "auto".
         let mut force_model: Option<String> = None;
-        if model == crate::monitor::AUTO_MODEL {
+        if model == crate::policy::AUTO_MODEL {
             let candidates: Vec<String> = self
                 .registry
                 .known_models()
                 .into_iter()
-                .filter(|m| m != crate::monitor::AUTO_MODEL)
+                .filter(|m| m != crate::policy::AUTO_MODEL)
                 .collect();
             if candidates.is_empty() {
                 handle.discard();

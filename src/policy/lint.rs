@@ -369,7 +369,7 @@ impl Checker<'_, '_> {
     }
 
     fn model(&mut self, name: &str, path: &str, rule: &str) {
-        if name == crate::monitor::AUTO_MODEL {
+        if name == super::AUTO_MODEL {
             self.out.push(PolicyWarning::new(
                 WarningCode::UnknownModel,
                 path,
