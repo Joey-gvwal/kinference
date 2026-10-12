@@ -1771,6 +1771,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinfctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "kinference-policy",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "kinference"
 version = "0.1.0"
 dependencies = [
@@ -1784,6 +1795,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "k8s-openapi",
+ "kinference-policy",
  "kube",
  "minijinja",
  "minijinja-contrib",
@@ -1792,11 +1804,8 @@ dependencies = [
  "prost",
  "protoc-bin-vendored",
  "reqwest",
- "schemars",
  "serde",
- "serde-saphyr",
  "serde_json",
- "serde_path_to_error",
  "tempfile",
  "tokenizers",
  "tokio",
@@ -1809,6 +1818,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zmq",
+]
+
+[[package]]
+name = "kinference-policy"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "serde_path_to_error",
+ "tracing",
 ]
 
 [[package]]

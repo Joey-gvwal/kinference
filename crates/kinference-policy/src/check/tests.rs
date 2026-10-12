@@ -1,5 +1,5 @@
 use super::*;
-use crate::policy::warning::WarningCode;
+use crate::warning::WarningCode;
 
 fn input(source: &str, text: &str) -> Input {
     Input {
@@ -346,7 +346,7 @@ spec:
 fn known_keys_match_the_crd_schema() {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/charts/kinference-crds/templates/kinference.buoyant.io_inferencepolicies.yaml"
+        "/../../charts/kinference-crds/templates/kinference.buoyant.io_inferencepolicies.yaml"
     ))
     .expect("the CRD is the source of truth");
     let crd: Value = serde_saphyr::from_str(&text).expect("CRD parses");

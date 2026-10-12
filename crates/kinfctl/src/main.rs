@@ -6,16 +6,18 @@
 //! code, `-o json` is a documented schema, and the exit status alone says
 //! whether there is anything to fix.
 //!
-//! All the judgement lives in [`crate::policy::check`]; this module reads
+//! All the judgement lives in [`kinference_policy::check`]; this crate reads
 //! files and prints.
+
+mod version;
 
 use std::io::Read;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::policy::check::{self, Input, NameCheckSkip, Options, Report};
-use crate::policy::warning::WarningCode;
+use kinference_policy::check::{self, Input, NameCheckSkip, Options, Report};
+use kinference_policy::warning::WarningCode;
 
 /// Exit statuses. Distinct for "found problems" and "could not look", so a
 /// script — or an agent — never mistakes an unreadable file for a clean one.
@@ -59,7 +61,7 @@ Exit status: 0 nothing to fix, 1 findings, 2 input that could not be checked.";
 #[derive(Parser, Debug)]
 #[command(
     name = "kinfctl",
-    version = crate::version::VERSION,
+    version = version::VERSION,
     about = "The kinference command-line tool",
     propagate_version = true
 )]
@@ -112,7 +114,7 @@ enum Format {
 }
 
 /// Parse the command line, run it, and turn the outcome into an exit status.
-pub fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Check(args) => run_check(args),

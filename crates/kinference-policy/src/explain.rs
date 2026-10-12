@@ -21,7 +21,7 @@
 //! Three things the hot path deliberately does not compute, because they cost
 //! work per pick and nobody reads them at 1000 rps:
 //!
-//! 1. **Per-predicate detail.** [`predicate::CompiledRequestPredicate::matches`]
+//! 1. **Per-predicate detail.** [`crate::predicate::CompiledRequestPredicate::matches`]
 //!    returns a bare `bool`. Here each term is evaluated separately via
 //!    `Matcher::eval`, so a rule that did not match can say which attribute
 //!    failed. Additive — nothing in `predicate.rs` changes.
@@ -182,7 +182,7 @@ pub fn nondeterminism(policy: &CompiledPolicy) -> Vec<Nondeterminism> {
     // `ServeLocal` is the default, so nearly every policy has this source —
     // and missing it meant the explorer called a policy reproducible while
     // two idle, equally fast endpoints traded wins between runs.
-    if policy.unmatched == crate::policy::crd::Unmatched::ServeLocal {
+    if policy.unmatched == crate::crd::Unmatched::ServeLocal {
         out.push(Nondeterminism {
             code: "UnmatchedRandomTieBreak",
             rule: None,

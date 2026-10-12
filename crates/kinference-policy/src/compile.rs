@@ -9,8 +9,6 @@
 //! policy that admission accepts and that then does nothing. Those are the
 //! expensive kind, because nothing surfaces them at apply time.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use super::crd::{

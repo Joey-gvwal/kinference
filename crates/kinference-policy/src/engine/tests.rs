@@ -1,5 +1,5 @@
 use super::*;
-use crate::policy::crd::InferencePolicySpec;
+use crate::crd::InferencePolicySpec;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -51,14 +51,6 @@ fn prov(name: &str, model: &str, observed: Option<f32>) -> Candidate {
             backend_observed_ttft_ms: observed.map(|ms| ms as f64),
             ..Default::default()
         },
-    }
-}
-
-/// The endpoint of a local win, for assertions.
-fn endpoint_of(c: &Candidate) -> &str {
-    match &c.target {
-        CandidateTarget::Local { endpoint, .. } => endpoint,
-        CandidateTarget::Provider { .. } => panic!("expected a local candidate"),
     }
 }
 
@@ -1004,14 +996,14 @@ fn the_unmatched_route_rejects_a_provider_as_ineligible_not_unmeasurable() {
     let route = CompiledPolicy::default_route();
     assert!(
         !route.select[0].backends.matches(
-            crate::policy::crd::BackendType::Provider,
+            crate::crd::BackendType::Provider,
             "together",
             &BTreeMap::new()
         ),
         "the implicit tier must not admit a provider in the first place"
     );
     assert!(route.select[0].backends.matches(
-        crate::policy::crd::BackendType::Local,
+        crate::crd::BackendType::Local,
         "h100",
         &BTreeMap::new()
     ));
@@ -1025,7 +1017,7 @@ fn unmatched_generation_does_not_target_providers() {
     let targets = models_to_score(&route, &["m".to_string()]);
     assert_eq!(targets.len(), 1);
     assert!(!targets[0].backends.matches(
-        crate::policy::crd::BackendType::Provider,
+        crate::crd::BackendType::Provider,
         "together",
         &BTreeMap::new()
     ));

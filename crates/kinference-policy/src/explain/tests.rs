@@ -1,12 +1,12 @@
 use super::*;
-use crate::policy::PoolId;
-use crate::policy::compile::CompiledPolicy;
-use crate::policy::crd::InferencePolicySpec;
-use crate::policy::engine::{CandidateTarget, ObjectKey};
-use crate::policy::predicate::CandidateAttrs;
+use crate::PoolId;
+use crate::compile::CompiledPolicy;
+use crate::crd::InferencePolicySpec;
+use crate::engine::{CandidateTarget, ObjectKey};
+use crate::predicate::CandidateAttrs;
 
 /// Fixtures are JSON, not YAML, following the convention `crd/tests.rs`
-/// established. These mirror the demo policies in `src/policy/check/tests.rs`.
+/// established. These mirror the demo policies in `check/tests.rs`.
 fn policy(json: serde_json::Value) -> CompiledPolicy {
     let spec: InferencePolicySpec =
         serde_json::from_value(json).expect("fixture is a valid InferencePolicySpec");

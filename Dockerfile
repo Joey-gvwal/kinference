@@ -36,8 +36,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
+# The other workspace members: the policy crate the router depends on, and
+# `kinfctl`.
+COPY crates ./crates
+
 # Build-time version override. Passed in via `docker build --build-arg
-# KINFERENCE_VERSION=<tag>`; consumed by `src/version.rs` via `option_env!`.
+# KINFERENCE_VERSION=<tag>`; consumed by `src/version.rs` and
+# `crates/kinfctl/src/version.rs` via `option_env!`.
 # Falls back to `CARGO_PKG_VERSION` when unset, so an unannotated build
 # still has a usable version.
 ARG KINFERENCE_VERSION

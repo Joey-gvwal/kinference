@@ -2,7 +2,7 @@
 //! as `store`'s and `discovery::kubernetes`'s tests.
 use super::*;
 use k8s_openapi::api::core::v1::ServiceSpec;
-use kube::api::ObjectMeta;
+use kube::core::ObjectMeta;
 
 /// `(name, port)` pairs, in declaration order. An unnamed port is `""`, which
 /// is how a single-port Service is usually written.

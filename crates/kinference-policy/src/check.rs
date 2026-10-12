@@ -636,7 +636,7 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
         .zip(&parsed)
         .filter_map(|(doc, spec)| {
             Some(Arc::new(InferencePolicy {
-                metadata: kube::api::ObjectMeta {
+                metadata: kube::core::ObjectMeta {
                     name: Some(doc.name.clone()),
                     namespace: Some(doc.namespace.clone()),
                     ..Default::default()

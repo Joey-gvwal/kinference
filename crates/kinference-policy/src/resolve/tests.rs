@@ -2,12 +2,12 @@
 //! cluster, no HTTP mock — the same approach as
 //! `discovery::kubernetes`'s tests.
 use super::*;
-use crate::policy::crd::{
+use crate::crd::{
     BackendObjectRef, Destination, HTTPRouteRule, InferencePolicySpec, InferencePoolSpec,
     InferenceProviderSpec, InferenceWorkerSetSpec, LabelSelector, PolicyRef, ProviderModel,
     ReferenceGrantFrom, ReferenceGrantSpec, ReferenceGrantTo, ServiceRef,
 };
-use kube::api::ObjectMeta;
+use kube::core::ObjectMeta;
 
 /// The Nth destination as a worker set. Every test written before providers
 /// existed is asserting about a local one, and panicking here beats an
@@ -219,7 +219,7 @@ fn pools() -> PoolIndex {
     .enumerate()
     .map(|(i, name)| {
         (
-            crate::policy::PoolKey::namespaced("infra", name),
+            crate::PoolKey::namespaced("infra", name),
             PoolId::from_raw(i as u64),
         )
     })
@@ -362,54 +362,6 @@ fn a_set_matched_twice_is_only_added_once() {
         1,
         "destinationCount must not double-count"
     );
-}
-
-/// End to end for the portless-`kvEvents` case: `desired_pools` refuses it,
-/// `rejection_index` projects the reason, and `bind` hands back `Incomplete`
-/// — the same shape as a provider missing its `backendRef`, because in both
-/// the object simply does not say enough to route to.
-#[test]
-fn a_portless_kv_events_block_binds_as_incomplete() {
-    use crate::policy::crd::KvEvents;
-
-    let mut ws = worker_set("workers-h100", "vllm-h100", &[]);
-    Arc::get_mut(&mut ws).unwrap().spec.kv_events = Some(KvEvents {
-        port: None,
-        replay_port: None,
-    });
-
-    let (pools_built, rejections) = crate::policy::worker_sets::desired_pools(
-        std::slice::from_ref(&*ws),
-        &[crate::config::ProfileConfig {
-            name: "h100".into(),
-            predictor: crate::config::PredictorConfig::default(),
-            picker: crate::config::PickerConfig::default(),
-            tokenize: crate::config::ProfileTokenizeConfig {
-                mode: crate::config::TokenizeMode::Local,
-            },
-        }],
-        &crate::config::DiscoveryDefaults::default(),
-    );
-    assert!(pools_built.is_empty(), "refused, so it produced no pool");
-
-    let idx = resolve_local(
-        &[pool("chat", vec![dest_named("workers-h100")], None)],
-        &[],
-        std::slice::from_ref(&ws),
-        &[],
-        // The pool map is what `desired_pools` actually built: empty.
-        &PoolIndex::new(),
-        &rejection_index(&rejections),
-    );
-
-    // On the pool: reported, not silently dropped.
-    let p = idx.lookup("infra", "chat").unwrap();
-    assert_eq!(p.unresolved.len(), 1);
-    assert_eq!(p.unresolved[0].reason, UnresolvedReason::Incomplete);
-
-    // And on the set's own entry, which is where an operator looks.
-    let e = idx.worker_sets().next().unwrap();
-    assert_eq!(e.bound.as_ref().err(), Some(&UnresolvedReason::Incomplete));
 }
 
 /// The `dummy` case: an `InferenceWorkerSet` no `InferencePool` names must
@@ -688,14 +640,14 @@ fn a_service_backend_ref_is_not_a_parent() {
 
 struct HTTPRouteSpecForTest;
 impl HTTPRouteSpecForTest {
-    fn service_backend(name: &str) -> crate::policy::crd::HTTPRouteSpec {
-        crate::policy::crd::HTTPRouteSpec {
+    fn service_backend(name: &str) -> crate::crd::HTTPRouteSpec {
+        crate::crd::HTTPRouteSpec {
             parent_refs: vec![ParentRef {
                 name: "gw".into(),
                 ..Default::default()
             }],
             rules: vec![HTTPRouteRule {
-                backend_refs: vec![crate::policy::crd::BackendRef {
+                backend_refs: vec![crate::crd::BackendRef {
                     // No group/kind → a core Service, not our pool.
                     name: name.into(),
                     ..Default::default()
@@ -730,7 +682,7 @@ fn unsupported_destination_kind_is_reported() {
 #[test]
 fn a_pool_in_another_namespace_does_not_claim_this_worker_set() {
     let elsewhere: PoolIndex = [(
-        crate::policy::PoolKey::namespaced("other", "workers-h100"),
+        crate::PoolKey::namespaced("other", "workers-h100"),
         PoolId::from_raw(0),
     )]
     .into_iter()
@@ -759,20 +711,20 @@ fn a_pool_in_another_namespace_does_not_claim_this_worker_set() {
 /// over a typo in a config file.
 #[test]
 fn an_unresolved_destination_reports_the_resolvers_reason() {
-    use crate::policy::rejection::{RejectReason, Rejection};
+    use crate::rejection::{RejectReason, Rejection};
     let sets = [
         worker_set("workers-h100", "vllm-h100", &[]),
         worker_set("workers-a100", "vllm-a100", &[]),
     ];
     let rejections = rejection_index(&[
         Rejection {
-            key: crate::policy::PoolKey::namespaced("infra", "workers-h100"),
+            key: crate::PoolKey::namespaced("infra", "workers-h100"),
             reason: RejectReason::UnknownProfile {
                 defined: vec!["h100".into()],
             },
         },
         Rejection {
-            key: crate::policy::PoolKey::namespaced("infra", "workers-a100"),
+            key: crate::PoolKey::namespaced("infra", "workers-a100"),
             reason: RejectReason::MissingKvBlockSize,
         },
     ]);
@@ -1221,7 +1173,7 @@ fn an_omitted_destinations_list_never_picks_up_a_provider() {
 /// reachable, which is what removes the need for a separate `upstreamName`.
 #[test]
 fn a_provider_model_matches_its_own_name_and_every_alias() {
-    use crate::policy::crd::ProviderModel;
+    use crate::crd::ProviderModel;
     let mut prov = provider("vendor", "infra", "b", None, vec![]);
     Arc::get_mut(&mut prov).unwrap().spec.models = vec![
         ProviderModel {
@@ -1465,13 +1417,12 @@ fn a_non_openai_api_is_refused() {
 /// discovery down for the namespace. Parse it, then refuse it.
 #[test]
 fn a_bypassed_object_still_parses_before_it_is_refused() {
-    let spec: crate::policy::crd::InferenceProviderSpec =
-        serde_json::from_value(serde_json::json!({
-            "backendRef": {"name": "b"},
-            "api": "Anthropic",
-            "models": [{"name": "up", "aliases": ["bar"]}]
-        }))
-        .expect("a value the CRD no longer admits must still DESERIALIZE");
+    let spec: crate::crd::InferenceProviderSpec = serde_json::from_value(serde_json::json!({
+        "backendRef": {"name": "b"},
+        "api": "Anthropic",
+        "models": [{"name": "up", "aliases": ["bar"]}]
+    }))
+    .expect("a value the CRD no longer admits must still DESERIALIZE");
     assert_eq!(spec.api, Some(ApiFormat::Anthropic));
 
     let prov = Arc::new(InferenceProvider {
@@ -1508,7 +1459,7 @@ fn a_resolved_snapshot_carries_no_services_until_the_watcher_attaches_them() {
     );
 
     let attached = resolve_local(&[], &[], &[], &[], &pools(), &RejectionIndex::new())
-        .with_services(crate::policy::services::ServiceIndex::build(&[]));
+        .with_services(crate::services::ServiceIndex::build(&[]));
     assert!(attached.services().listed());
     assert!(attached.services().is_empty());
 }

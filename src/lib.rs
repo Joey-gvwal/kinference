@@ -1,14 +1,13 @@
 //! kinference — a KV-cache-aware router for inference requests.
 //!
-//! One library, two binaries:
+//! The server binary, `kinference` (`src/main.rs`), runs [`server::run`].
+//! `kinfctl`, the command-line tool for checking `InferencePolicy` manifests
+//! before they are applied, is its own crate (`crates/kinfctl`), built on the
+//! same `kinference-policy` crate this one re-exports as `policy`.
 //!
-//! - `kinference` (`src/main.rs`), the server, runs [`server::run`].
-//! - `kinfctl` (`src/bin/kinfctl.rs`), the command-line tool for checking
-//!   `InferencePolicy` manifests before they are applied, runs [`cli::main`].
-//!
-//! Every other module is private to the crate. The two entry points are the
-//! only public surface, which is what lets the server's internals stay
-//! `pub(crate)`-free without either binary reaching past what it needs.
+//! Every other module is private to the crate. The entry point is the only
+//! public surface, which is what lets the server's internals stay
+//! `pub(crate)`-free without the binary reaching past what it needs.
 
 mod admin;
 mod body_store;
@@ -39,5 +38,4 @@ mod tokenize_client;
 mod version;
 mod workers;
 
-pub mod cli;
 pub mod server;

@@ -1,7 +1,7 @@
 //! `kinfctl` end to end: the real binary, real files, real exit statuses.
 //!
-//! The checks themselves are unit-tested in `src/policy/check/tests.rs`. What
-//! only a test of the binary can catch is the contract a script or an agent
+//! The checks themselves are unit-tested in `kinference-policy`'s
+//! `check/tests.rs`. What only a test of the binary can catch is the contract a script or an agent
 //! relies on: which inputs it reads, what goes to stdout versus stderr, and
 //! that the exit status alone separates "clean", "findings" and "could not
 //! check".
