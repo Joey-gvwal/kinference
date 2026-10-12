@@ -3,9 +3,9 @@
 //!
 //! Falls back to `CARGO_PKG_VERSION` (i.e. whatever's in `Cargo.toml`)
 //! when the env var isn't set — which is the case for local
-//! `cargo build` invocations. The Makefile in
-//! `k8s/kinference/` sets `KINFERENCE_VERSION=$(TAG)` so
-//! container images advertise the same identity as their tag.
+//! `cargo build` invocations. The `justfile` and the Dockerfile set
+//! `KINFERENCE_VERSION` from the image tag so container images advertise the
+//! same identity as their tag.
 //!
 //! `option_env!` is a compile-time read; we use the `match` form so this
 //! resolves to a `&'static str` constant (clap's `version = …` attribute

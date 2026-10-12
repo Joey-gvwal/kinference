@@ -660,7 +660,7 @@ fn an_empty_tenant_does_not_match_a_named_tenant() {
 ///
 /// The failure this prevents is silent in the worst way. `CandidateAttr::name()`
 /// is what traces, warnings and the policy explorer print, and
-/// `k8s/crds/kinference.buoyant.io_inferencepolicies.yaml` declares the same strings
+/// `charts/kinference-crds/templates/kinference.buoyant.io_inferencepolicies.yaml` declares the same strings
 /// — so an operator copies a name out of a trace into a manifest, the
 /// structural schema admits it, serde ignores the unknown field, the predicate
 /// evaporates, and the rule matches everything it was written to exclude.

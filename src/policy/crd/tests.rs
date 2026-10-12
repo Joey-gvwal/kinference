@@ -1,6 +1,6 @@
 use super::*;
 
-/// The YAML in `k8s/crds/` is the contract; these pin that our types actually
+/// The YAML in `charts/kinference-crds/templates/` is the contract; these pin that our types actually
 /// deserialize the guide's own examples.
 #[test]
 fn worker_set_from_guide_example() {

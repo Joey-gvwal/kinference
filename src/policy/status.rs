@@ -885,7 +885,7 @@ pub fn desired_policy_status(
 }
 
 /// `status.warnings` limits from the InferencePolicy CRD schema
-/// (`k8s/crds/kinference.buoyant.io_inferencepolicies.yaml`).
+/// (`charts/kinference-crds/templates/kinference.buoyant.io_inferencepolicies.yaml`).
 const STATUS_WARNINGS_MAX_ITEMS: usize = 32;
 const STATUS_WARNING_MAX_CHARS: usize = 2048;
 

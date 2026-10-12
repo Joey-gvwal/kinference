@@ -17,8 +17,7 @@ prefix with this so two releases can coexist.
 
 {{/*
 Selector labels — the immutable Deployment selector, so keep this minimal.
-`app.kubernetes.io/name: kinference` is what the PodMonitor and the raw manifests
-in k8s/kinference select on.
+`app.kubernetes.io/name: kinference` is what the PodMonitor selects on.
 */}}
 {{- define "kinference.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "kinference.name" . }}

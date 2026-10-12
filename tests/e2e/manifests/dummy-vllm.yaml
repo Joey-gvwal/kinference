@@ -24,7 +24,7 @@
 # response *shape* work; tests that assert on content quality don't.
 #
 # Deploy:
-#   kubectl apply -f k8s/dev/vllm-dummy.yaml
+#   kubectl apply -f tests/e2e/manifests/dummy-vllm.yaml
 #
 # Verify:
 #   kubectl get pod -l mm/server-name=dummy-vllm -w
@@ -39,7 +39,7 @@
 #   → point kinference's workers.toml at 127.0.0.1:{8000,5557,5558}
 #
 # Teardown:
-#   kubectl delete -f k8s/dev/vllm-dummy.yaml
+#   kubectl delete -f tests/e2e/manifests/dummy-vllm.yaml
 ---
 apiVersion: v1
 kind: Service

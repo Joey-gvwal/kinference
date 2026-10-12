@@ -32,7 +32,7 @@ fn read(path: &str) -> Input {
 fn known_keys_match_the_crd_schema() {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/k8s/crds/kinference.buoyant.io_inferencepolicies.yaml"
+        "/charts/kinference-crds/templates/kinference.buoyant.io_inferencepolicies.yaml"
     ))
     .expect("the CRD is the source of truth");
     let crd: Value = serde_saphyr::from_str(&text).expect("CRD parses");
@@ -154,11 +154,11 @@ fn spec_findings_are_errors_and_name_findings_warnings() {
     let r = check(
         &[
             read("tests/fixtures/kinfctl/broken-policy.yaml"),
-            read("k8s/examples/demo-configs/pool-all.yaml"),
-            read("k8s/examples/demo-configs/databricks/provider.yaml"),
-            read("k8s/examples/demo-configs/workerset-gemma-4.yaml"),
-            read("k8s/examples/demo-configs/workerset-qwen-2-5.yaml"),
-            read("k8s/examples/demo-configs/workerset-qwen-3-6-35b-a3b.yaml"),
+            read("tests/fixtures/demo/pool-all.yaml"),
+            read("tests/fixtures/demo/databricks/provider.yaml"),
+            read("tests/fixtures/demo/workerset-gemma-4.yaml"),
+            read("tests/fixtures/demo/workerset-qwen-2-5.yaml"),
+            read("tests/fixtures/demo/workerset-qwen-3-6-35b-a3b.yaml"),
         ],
         &Options {
             namespace: "default".into(),
@@ -239,7 +239,7 @@ spec:
 
 #[test]
 fn without_a_pool_name_checks_are_skipped_and_say_how_to_run_them() {
-    let r = check(&[read("k8s/examples/demo-configs/policy-3.yaml")], &opts()).unwrap();
+    let r = check(&[read("tests/fixtures/demo/policy-3.yaml")], &opts()).unwrap();
     let p = &r.policies[0];
     assert!(!p.name_checks.ran);
     assert_eq!(p.name_checks.skipped, Some(NameCheckSkip::NoPool));
@@ -253,7 +253,7 @@ fn against_pool_all(policy: Input, files: &[&str]) -> Report {
     inputs.extend(
         files
             .iter()
-            .map(|f| read(&format!("k8s/examples/demo-configs/{f}"))),
+            .map(|f| read(&format!("tests/fixtures/demo/{f}"))),
     );
     let opts = Options {
         namespace: "default".into(),
@@ -278,7 +278,7 @@ fn a_pool_alone_is_enough_for_backend_names_and_classes() {
     // policy-4 is right for its pool: a local tier, a provider tier, and
     // `databricks` by name. Given only the pool, none of that may look wrong.
     let r = against_pool_all(
-        read("k8s/examples/demo-configs/policy-4.yaml"),
+        read("tests/fixtures/demo/policy-4.yaml"),
         &["pool-all.yaml"],
     );
     let p = &r.policies[0];
@@ -349,7 +349,7 @@ fn a_pool_that_does_not_name_its_destinations_needs_their_manifests() {
         namespace: "default".into(),
         pool: Some("default/everything".into()),
     };
-    let policy = || read("k8s/examples/demo-configs/policy-1.yaml");
+    let policy = || read("tests/fixtures/demo/policy-1.yaml");
     let r = check(&[policy(), pool()], &o).unwrap();
     assert!(!r.policies[0].name_checks.ran);
     assert_eq!(
@@ -358,7 +358,7 @@ fn a_pool_that_does_not_name_its_destinations_needs_their_manifests() {
     );
     assert!(r.ok, "skipping is not a finding");
 
-    let gemma = read("k8s/examples/demo-configs/workerset-gemma-4.yaml");
+    let gemma = read("tests/fixtures/demo/workerset-gemma-4.yaml");
     let r = check(&[policy(), pool(), gemma], &o).unwrap();
     assert!(r.policies[0].name_checks.ran);
     assert_eq!(r.policies[0].name_checks.skipped, None);
@@ -413,7 +413,7 @@ fn input_that_cannot_be_checked_is_an_error_not_a_finding() {
         }
     );
     assert_eq!(
-        check(&[read("k8s/examples/demo-configs/pool-all.yaml")], &opts()).unwrap_err(),
+        check(&[read("tests/fixtures/demo/pool-all.yaml")], &opts()).unwrap_err(),
         InputError::NoPolicies
     );
     let o = Options {
@@ -421,7 +421,7 @@ fn input_that_cannot_be_checked_is_an_error_not_a_finding() {
         pool: Some("default/nope".into()),
     };
     assert_eq!(
-        check(&[read("k8s/examples/demo-configs/policy-1.yaml")], &o).unwrap_err(),
+        check(&[read("tests/fixtures/demo/policy-1.yaml")], &o).unwrap_err(),
         InputError::PoolNotFound("default/nope".into())
     );
 }
@@ -456,7 +456,7 @@ fn manifests_joined_without_a_separator_get_a_hint() {
 
 #[test]
 fn the_same_policy_twice_is_an_error_on_the_second() {
-    let p = read("k8s/examples/demo-configs/policy-1.yaml");
+    let p = read("tests/fixtures/demo/policy-1.yaml");
     let again = input("copy.yaml", &p.text);
     let r = check(&[p, again], &opts()).unwrap();
     assert!(r.policies[0].errors.is_empty());
@@ -477,7 +477,7 @@ fn the_same_policy_twice_is_an_error_on_the_second() {
 /// guessing at it.
 #[test]
 fn every_shipped_policy_checks_clean_against_its_demo_pool() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/k8s/examples/demo-configs");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/demo");
     let mut files: Vec<String> = Vec::new();
     for sub in ["", "/databricks"] {
         for e in std::fs::read_dir(format!("{dir}{sub}")).unwrap() {
@@ -508,13 +508,13 @@ fn every_shipped_policy_checks_clean_against_its_demo_pool() {
     assert!(r.ok, "{:#?}", r.other_errors);
 }
 
-/// And every InferencePolicy anywhere under `k8s/`, on its own: the spec
+/// And every InferencePolicy anywhere under `tests/fixtures/demo/`, on its own: the spec
 /// checks need no pool, so nothing escapes them by living outside the demo.
 #[test]
-fn every_policy_under_k8s_passes_the_spec_checks() {
+fn every_policy_in_the_fixtures_passes_the_spec_checks() {
     let mut stack = vec![std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/k8s"
+        "/tests/fixtures/demo"
     ))];
     let mut checked = 0;
     while let Some(dir) = stack.pop() {
@@ -542,7 +542,7 @@ fn every_policy_under_k8s_passes_the_spec_checks() {
     }
     assert!(
         checked >= 5,
-        "found only {checked} policies under k8s/ — did they move?"
+        "found only {checked} policies under tests/fixtures/demo/ — did they move?"
     );
 }
 

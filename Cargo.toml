@@ -58,7 +58,7 @@ kube = { version = "4", default-features = false, features = ["client", "runtime
 # types we use (EndpointSlice, Lease, ObjectMeta). Cost is inherent to the crate.
 k8s-openapi = { version = "0.28", features = ["latest"] }
 # Required by `kube`'s `CustomResource` derive, which generates a `JsonSchema`
-# impl. We never emit a schema (the CRDs in `k8s/crds/` are hand-written and are the
+# impl. We never emit a schema (the CRDs in `charts/kinference-crds/templates/` are hand-written and are the
 # source of truth) — this is purely to satisfy the derive, so nothing downstream
 # consumes its output.
 schemars = "1"

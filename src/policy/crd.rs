@@ -1,8 +1,8 @@
 //! Rust types for the `kinference.buoyant.io/v1alpha1` custom resources, plus the
 //! sliver of Gateway API we need to read.
 //!
-//! These mirror `k8s/crds/*.yaml` field-for-field. **The YAML is the source of
-//! truth** — it is hand-written and applied with `kubectl apply -f k8s/crds/`, and
+//! These mirror `charts/kinference-crds/templates/*.yaml` field-for-field. **The YAML is the source of
+//! truth** — it is hand-written and installed by the `kinference-crds` chart, and
 //! we never generate a schema from these types. The `JsonSchema` derive exists
 //! only because `kube`'s `CustomResource` macro requires it.
 //!
@@ -922,7 +922,7 @@ pub struct CandidatePredicate {
     pub context_window: Option<RawPredicateValue>,
     /// Renamed EXPLICITLY, like its `observedTTFTP95` sibling below.
     /// `rename_all = "camelCase"` would give `predictedTtft`, which disagrees
-    /// with both the CRD schema in `k8s/crds/` and the name
+    /// with both the CRD schema in `charts/kinference-crds/templates/` and the name
     /// `CandidateAttr::name()` prints in traces — and the disagreement was
     /// silent: the structural schema admits `predictedTTFT`, serde ignored it,
     /// and the predicate simply vanished, so the rule matched everything it
@@ -1177,7 +1177,7 @@ pub struct InferencePolicyStatus {
 /// that knows what a pool resolves to — and therefore the one that owns these
 /// objects. See `super::binding`.
 ///
-/// The one kind in this file whose YAML is NOT in `k8s/crds/`: the schema ships
+/// The one kind in this file whose YAML is NOT in `charts/kinference-crds/templates/`: the schema ships
 /// with the gateway (`deploy/chart/gateway/crds/backendbinding.yaml` there),
 /// which is what owns and validates it. This mirrors that schema
 /// field-for-field, and drifts from it the moment the gateway's own moves —

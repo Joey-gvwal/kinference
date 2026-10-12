@@ -10,7 +10,7 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 const KINFCTL: &str = env!("CARGO_BIN_EXE_kinfctl");
-const DEMO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/k8s/examples/demo-configs");
+const DEMO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/demo");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kinfctl");
 
 fn kinfctl(args: &[&str]) -> Output {
@@ -312,7 +312,7 @@ fn unusable_input_exits_2_with_the_reason_on_stderr() {
                 "check",
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/k8s/examples/demo-configs/pool-all.yaml"
+                    "/tests/fixtures/demo/pool-all.yaml"
                 ),
             ],
             "no InferencePolicy",
@@ -324,7 +324,7 @@ fn unusable_input_exits_2_with_the_reason_on_stderr() {
                 "default/missing",
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/k8s/examples/demo-configs/policy-1.yaml"
+                    "/tests/fixtures/demo/policy-1.yaml"
                 ),
             ],
             "no InferencePool by that name",

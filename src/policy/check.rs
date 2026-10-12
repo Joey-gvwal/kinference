@@ -387,7 +387,7 @@ fn in_group(v: &Value, group: &str) -> bool {
 ///
 /// The parser refuses more than 32 consecutive comment lines before a list
 /// entry — a fixed limit, not a configurable budget — and a well-commented
-/// manifest reaches that easily (`k8s/kinference/deployment.yaml` does). So on
+/// manifest reaches that easily (`charts/kinference/templates/deployment.yaml` does). So on
 /// exactly that error, parse again with every full-line comment blanked.
 /// Blanked, not deleted, so line numbers in any later error still point at
 /// the file as written. Nothing structural changes: a full-line comment is

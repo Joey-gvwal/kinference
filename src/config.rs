@@ -179,7 +179,7 @@ impl<'de> serde::Deserialize<'de> for TenantLabels {
 pub struct PolicyConfig {
     /// Watch the CRDs and honor `PickRequest.inference_pool`. When off, a
     /// pool-naming request falls back to model-based routing. Requires the RBAC
-    /// in `k8s/kinference/rbac.yaml`.
+    /// in `charts/kinference/templates/rbac.yaml`.
     #[serde(default)]
     pub enabled: bool,
     /// Namespace to watch; `None` watches all.

@@ -1,6 +1,5 @@
-# Default values for the kinference chart. Defaults track k8s/kinference/*.yaml (the
-# hand-maintained manifests this chart was derived from), with one deliberate
-# exception: nodeSelector defaults to {} instead of `role: system`, because
+# Default values for the kinference chart. One deliberate choice:
+# nodeSelector defaults to {} instead of `role: system`, because
 # that pin is AWS-harness policy, not something the chart should impose on a
 # laptop cluster. The harness sets it back via values.
 
@@ -109,7 +108,7 @@ httpRoute:
   extraPathPrefixes: ["/assets", "/api"]
 
 # The config file the container reads (--config /etc/kinference/config.toml),
-# verbatim. This default is the worked example from k8s/kinference/configmap.yaml;
+# verbatim. This default is a worked example;
 # override the whole block for your fleet (e.g. --set-file config=my.toml).
 # NOTE: `[policy] namespace` and `[kubernetes] namespace` inside it are config,
 # not templated — adjust them if you install outside `default`.

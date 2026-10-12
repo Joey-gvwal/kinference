@@ -30,7 +30,7 @@ Examples:
 
   # Also check the names it uses against the pool it will serve. The pool
   # covers backend names; its worker sets and providers add models and labels
-  kinfctl check --pool default/inference-all policy.yaml k8s/demo/*.yaml
+  kinfctl check --pool default/inference-all policy.yaml demo/*.yaml
 
   # Check against what is in the cluster right now (`-` is standard input).
   # -A because a destination in another namespace, and the ReferenceGrant

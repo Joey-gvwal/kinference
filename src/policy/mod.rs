@@ -47,7 +47,7 @@
 //!
 //! ## Layout
 //!
-//! - [`crd`] — the resource types. `k8s/crds/*.yaml` is the source of truth.
+//! - [`crd`] — the resource types. `charts/kinference-crds/templates/*.yaml` is the source of truth.
 //! - `predicate` — the predicate grammar, compiled to a typed AST once per
 //!   policy revision rather than interpreted per request.
 //! - `compile` — `InferencePolicy` → `CompiledPolicy`, collecting the warnings
