@@ -1,5 +1,0 @@
-{"timestamp": 0, "input_length": 1100, "output_length": 32, "hash_ids": [101, 102]}
-{"timestamp": 50, "input_length": 1100, "output_length": 32, "hash_ids": [101, 103]}
-{"timestamp": 120, "input_length": 600, "output_length": 16, "hash_ids": [101]}
-{"timestamp": 300, "input_length": 1700, "output_length": 24, "hash_ids": [201, 202, 203]}
-{"timestamp": 320, "input_length": 1700, "output_length": 24, "hash_ids": [201, 202, 204]}
