@@ -180,7 +180,7 @@ impl PoolManager {
             desired.into_iter().map(|s| (s.key.clone(), s)).collect();
 
         // Retire first, so a replace frees its workers' fleet-wide telemetry
-        // slots before the replacement asks for them. `dashboard_max_workers` is a hard
+        // slots before the replacement asks for them. `telemetry_max_workers` is a hard
         // cap and `handle_added` skips silently once it is hit.
         let going: Vec<PoolKey> = self
             .live

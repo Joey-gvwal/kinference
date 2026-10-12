@@ -725,7 +725,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Memory usage",
-      "description": "Container working set per kinference pod, against its configured limit. NOT a kinference metric: the registry is a fresh `Registry::new()` rather than the default one, so there are no `process_*` collectors and this comes from cAdvisor and kube-state-metrics instead.\n\nWorth a panel because kinference's memory is dominated by things that grow with traffic rather than with time: the radix prefix index, the request-body buffer, and the dashboard's per-worker rings (~478 KB per slot, bounded by `dashboard_max_workers`). Working set climbing toward the limit while `kinference_index_blocks` climbs too is the index; climbing while `kinference_body_buffer_bytes` climbs is a body leak.",
+      "description": "Container working set per kinference pod, against its configured limit. NOT a kinference metric: the registry is a fresh `Registry::new()` rather than the default one, so there are no `process_*` collectors and this comes from cAdvisor and kube-state-metrics instead.\n\nWorth a panel because kinference's memory is dominated by things that grow with traffic rather than with time: the radix prefix index, the request-body buffer, and the dashboard's per-worker rings (~478 KB per slot, bounded by `telemetry_max_workers`). Working set climbing toward the limit while `kinference_index_blocks` climbs too is the index; climbing while `kinference_body_buffer_bytes` climbs is a body leak.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -5244,7 +5244,7 @@
           "id": 65,
           "type": "timeseries",
           "title": "Demo dashboard slot pool",
-          "description": "NOT A SERVING-PATH METRIC. These count display slots for the built-in SPA on :9001, whose per-worker rings cost ~478 KB each — which is why the pool is bounded by `dashboard_max_workers` (default 16) independently of how many workers `kinference_workers` tracks. `denied` is EXPECTED NON-ZERO on any fleet larger than the pool and is not an error, which is why it carries no threshold. Included for completeness, not for alerting.",
+          "description": "NOT A SERVING-PATH METRIC. These count display slots for the built-in SPA on :9001, whose per-worker rings cost ~478 KB each — which is why the pool is bounded by `telemetry_max_workers` (default 16) independently of how many workers `kinference_workers` tracks. `denied` is EXPECTED NON-ZERO on any fleet larger than the pool and is not an error, which is why it carries no threshold. Included for completeness, not for alerting.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -5301,7 +5301,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "kinference_dashboard_slots_used{namespace=\"$namespace\", pod=~\"$pod\"}",
+              "expr": "kinference_telemetry_slots_used{namespace=\"$namespace\", pod=~\"$pod\"}",
               "refId": "A",
               "range": true,
               "legendFormat": "used · {{pod}}"
@@ -5312,7 +5312,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "kinference_dashboard_slots_capacity{namespace=\"$namespace\", pod=~\"$pod\"}",
+              "expr": "kinference_telemetry_slots_capacity{namespace=\"$namespace\", pod=~\"$pod\"}",
               "refId": "B",
               "range": true,
               "legendFormat": "capacity · {{pod}}"
@@ -5323,7 +5323,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "60 * sum(rate(kinference_dashboard_slots_denied_total{namespace=\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "expr": "60 * sum(rate(kinference_telemetry_slots_denied_total{namespace=\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
               "refId": "C",
               "range": true,
               "legendFormat": "denied/min"

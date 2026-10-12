@@ -1,10 +1,10 @@
 # ClusterIP service. Two ports:
-#   - dashboard — live /api/snapshot + the embedded React SPA
+#   - admin     — /readyz, /metrics and the JSON API under /api
 #   - grpc      — what consumers call for Pick()
 #
 # ClusterIP keeps all ports internal. To reach them from your laptop:
 #
-#   kubectl port-forward svc/<release> 50051:grpc 9001:dashboard
+#   kubectl port-forward svc/<release> 50051:grpc 9001:admin
 #
 # If you'd rather expose externally, set service.type=LoadBalancer and
 # consider TLS — the gRPC server is plaintext.
@@ -30,7 +30,7 @@ spec:
       port: {{ .Values.service.grpcPort }}
       targetPort: grpc
       protocol: TCP
-    - name: dashboard
-      port: {{ .Values.service.dashboardPort }}
-      targetPort: dashboard
+    - name: admin
+      port: {{ .Values.service.adminPort }}
+      targetPort: admin
       protocol: TCP

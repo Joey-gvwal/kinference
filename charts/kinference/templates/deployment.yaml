@@ -113,7 +113,7 @@ spec:
               value: {{ .Values.observationsCsv | quote }}
             {{- end }}
           ports:
-            - name: dashboard
+            - name: admin
               containerPort: 9001
               protocol: TCP
             - name: grpc
@@ -141,7 +141,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: dashboard
+              port: admin
             initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 3

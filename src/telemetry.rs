@@ -1,4 +1,4 @@
-//! In-memory telemetry for the live dashboard.
+//! In-memory telemetry behind `/api/snapshot`.
 //!
 //! Two layers:
 //! - **Live counters** (atomics + a small mutex), written by the gRPC `score()`
@@ -7,16 +7,14 @@
 //!   read only by `snapshot_json`. The rollup folds the live counters and the
 //!   latest per-worker metrics sample into one sample per second.
 //!
-//! `snapshot_json` emits exactly the shape the dashboard prototype's
-//! `simulation.js::snapshot()` produced, so the ported React panels consume it
-//! unchanged.
+//! `snapshot_json` is the contract a dashboard polls; its shape is the API.
 //!
 //! ## Slot pool
 //!
 //! Per-worker state lives in fixed-capacity, slot-indexed arrays. A worker
 //! gets a slot index when `register_worker` is called; the slot is stable
 //! for that worker's lifetime and recycled on `unregister_worker`. The
-//! capacity is set at `Telemetry::new(dashboard_max_workers, ...)` time and never
+//! capacity is set at `Telemetry::new(telemetry_max_workers, ...)` time and never
 //! grows. Allocations stay bounded; `topWorkerIdx` references in recent
 //! calls remain valid until that worker is removed.
 //!
@@ -101,7 +99,7 @@ pub struct RollupDeltas {
     pub events_cleared: u64,
     pub blocks_stored: u64,
     pub blocks_removed: u64,
-    /// Telemetry slots occupied, and the fixed pool size. `dashboard_max_workers` binds
+    /// Telemetry slots occupied, and the fixed pool size. `telemetry_max_workers` binds
     /// when these meet.
     pub slots_used: u64,
     pub slots_capacity: u64,
@@ -168,7 +166,7 @@ pub enum RegisterError {
     /// UID. So two worker sets whose Services select overlapping pods produce
     /// the same id twice. Registering it twice used to pop a second slot and
     /// overwrite `idx_of`, stranding the first slot permanently — the fleet
-    /// then stopped growing at `dashboard_max_workers` with no explanation. Refusing is
+    /// then stopped growing at `telemetry_max_workers` with no explanation. Refusing is
     /// the honest answer while the fleet-wide keyspaces are keyed by id alone.
     AlreadyRegistered { worker_set: String },
 }
@@ -179,7 +177,7 @@ impl std::fmt::Display for RegisterError {
             Self::SlotExhausted { capacity } => write!(
                 f,
                 "telemetry slot pool exhausted (capacity = {capacity}); \
-                 raise `dashboard_max_workers` to display more workers"
+                 raise `telemetry_max_workers` to display more workers"
             ),
             Self::AlreadyRegistered { worker_set } => write!(
                 f,
@@ -279,7 +277,7 @@ struct LiveCounters {
     latencies: Mutex<Vec<f32>>,
     /// Worker registrations refused for want of a telemetry slot, since the
     /// last tick. The worker still routes — only its observability is lost —
-    /// so this counter is the only signal that `dashboard_max_workers` is
+    /// so this counter is the only signal that `telemetry_max_workers` is
     /// binding. Expected to be non-zero on any fleet larger than the dashboard.
     slots_denied: AtomicU64,
     // Radix-tree ingest counters (since last tick), fed by ingest.rs.
@@ -481,11 +479,11 @@ pub struct Telemetry {
 }
 
 impl Telemetry {
-    /// Build an empty Telemetry with a slot pool of size `dashboard_max_workers`.
+    /// Build an empty Telemetry with a slot pool of size `telemetry_max_workers`.
     /// All slots start free; the coordinator calls `register_worker` per
     /// discovered worker.
-    pub fn new(dashboard_max_workers: usize, metrics: Arc<MetricsRegistry>) -> Arc<Self> {
-        let capacity = dashboard_max_workers.max(1);
+    pub fn new(telemetry_max_workers: usize, metrics: Arc<MetricsRegistry>) -> Arc<Self> {
+        let capacity = telemetry_max_workers.max(1);
         let live = LiveCounters {
             calls: AtomicU64::new(0),
             inflight: AtomicI64::new(0),
@@ -875,8 +873,8 @@ impl Telemetry {
                         prom.set_worker_states(ok, unresponsive);
                         prom.set_worker_states_by_model(&self.worker_health_by_model(&pools));
                         prom.set_worker_saturation(&self.worker_saturation(&pools));
-                        prom.set_dashboard_slots(d.slots_used, d.slots_capacity);
-                        prom.record_dashboard_slots_denied(d.slots_denied);
+                        prom.set_telemetry_slots(d.slots_used, d.slots_capacity);
+                        prom.record_telemetry_slots_denied(d.slots_denied);
                         n = n.wrapping_add(1);
                     }
                 }
@@ -889,7 +887,7 @@ impl Telemetry {
     /// Count routable workers by reachability, for `kinference_workers`.
     ///
     /// Walks the POOL registries rather than this module's slots, so the count
-    /// is independent of `dashboard_max_workers` — a worker missing from the
+    /// is independent of `telemetry_max_workers` — a worker missing from the
     /// dashboard is still counted here, because it is still being routed to.
     ///
     /// `ids()` rather than `iter_snapshot()`: only the id is needed to look up

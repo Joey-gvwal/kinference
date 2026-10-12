@@ -1079,9 +1079,8 @@ fn listed_store() -> Arc<crate::policy::store::PolicyStore> {
     store
 }
 
-/// A typo'd endpoint used to come back as the SPA's `index.html` with a 200 —
-/// a "success" that would not parse. Now it is a JSON 404 that names the real
-/// endpoints, so a caller can correct itself from the error alone.
+/// A typo'd endpoint is a JSON 404 that names the real endpoints, so a caller
+/// can correct itself from the error alone.
 #[tokio::test]
 async fn an_unknown_api_path_is_a_json_404_listing_the_endpoints() {
     let (app, _) = admin_router(Some(listed_store()));
@@ -1103,10 +1102,13 @@ async fn an_unknown_api_path_is_a_json_404_listing_the_endpoints() {
             "{path}: {v}"
         );
     }
-    // The SPA's own routes still serve the SPA.
-    let (s, h, _) = call(&app, "GET", "/some/spa/route", None, Body::empty()).await;
-    assert_eq!(s, StatusCode::OK);
-    assert!(h["content-type"].to_str().unwrap().starts_with("text/html"));
+    // Nothing is served outside `/api`, `/metrics` and `/readyz`: the root and
+    // any other path get the same JSON 404.
+    for path in ["/", "/some/other/route"] {
+        let (s, h, b) = call(&app, "GET", path, None, Body::empty()).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(json_body(&h, &b)["error"]["code"], "NotFound", "{path}");
+    }
 }
 
 #[tokio::test]

@@ -19,11 +19,8 @@ spec:
     matchLabels:
       {{- include "kinference.selectorLabels" . | nindent 6 }}
   podMetricsEndpoints:
-      # The CONTAINER PORT NAME, which is still `dashboard` even though the
-      # config key that opens the listener was renamed `dashboard_listen` →
-      # `admin_listen`. Renaming the port would also have to move the
-      # readinessProbe — a deliberate deferral, not an oversight.
-    - port: dashboard
+      # The container port name of the admin listener (`admin_listen`).
+    - port: admin
       path: /metrics
       # 10s, not faster: two families here (`kinference_index_blocks`,
       # `kinference_index_workers`) refresh on a throttled ~10s radix-tree dump, so

@@ -36,11 +36,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
-# `src/dashboard.rs` embeds the built SPA from `dashboard/dist` at compile time
-# (rust-embed). The folder must exist in the build context or the derive
-# generates no accessors and the build fails.
-COPY dashboard/dist ./dashboard/dist
-
 # Build-time version override. Passed in via `docker build --build-arg
 # KINFERENCE_VERSION=<tag>`; consumed by `src/version.rs` via `option_env!`.
 # Falls back to `CARGO_PKG_VERSION` when unset, so an unannotated build

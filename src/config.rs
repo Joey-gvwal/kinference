@@ -67,7 +67,7 @@ pub struct Config {
     /// span a slow client upload. Defaults to 30.
     #[serde(default)]
     pub body_idle_timeout_secs: Option<u64>,
-    /// HTTP bind address for the dashboard, `/metrics`, `/api`, and `/readyz`.
+    /// HTTP bind address for the admin listener: `/readyz`, `/metrics` and `/api`.
     /// Unset disables them. Ignored in mock mode.
     #[serde(default)]
     pub admin_listen: Option<String>,
@@ -75,14 +75,14 @@ pub struct Config {
     /// no tokenization. The gRPC surface is unchanged.
     #[serde(default)]
     pub mock_mode: bool,
-    /// How many workers the dashboard can display at once. Defaults to
-    /// [`DEFAULT_DASHBOARD_MAX_WORKERS`].
+    /// How many workers `/api/snapshot` carries telemetry for. Defaults to
+    /// [`DEFAULT_TELEMETRY_MAX_WORKERS`].
     ///
     /// Only affects `/api/snapshot`: a worker without a slot is still routed to
     /// and still exported to Prometheus (see
-    /// `kinference_dashboard_slots_denied_total`). Each slot preallocates ~480 KB.
+    /// `kinference_telemetry_slots_denied_total`). Each slot preallocates ~480 KB.
     #[serde(default)]
-    pub dashboard_max_workers: Option<usize>,
+    pub telemetry_max_workers: Option<usize>,
     #[serde(default)]
     pub tokenize: TokenizeConfig,
     #[serde(default)]
@@ -856,8 +856,8 @@ pub enum DiscoveryMode {
     Kubernetes,
 }
 
-/// Default for [`Config::dashboard_max_workers`].
-pub const DEFAULT_DASHBOARD_MAX_WORKERS: usize = 16;
+/// Default for [`Config::telemetry_max_workers`].
+pub const DEFAULT_TELEMETRY_MAX_WORKERS: usize = 16;
 
 /// A worker's inference engine, detected from the `owned_by` field of
 /// `/v1/models`. Only used for display.

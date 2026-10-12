@@ -16,8 +16,7 @@
 //!   simulations gets `429 Busy`, not a slower router.
 //! - **JSON, always.** Every response under `/api` is JSON, errors included,
 //!   in one envelope: `{"error": {"code", "message", "field"?}}`. An unknown
-//!   path is a JSON 404 listing the real ones, not the SPA's `index.html` with
-//!   a 200; a wrong method is a JSON 405. Unknown request fields are rejected
+//!   path is a JSON 404 listing the real ones; a wrong method is a JSON 405. Unknown request fields are rejected
 //!   by name, so a typo cannot be silently ignored.
 //!
 //! The decision itself comes from [`crate::policy::explain`]; this module

@@ -12,7 +12,7 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
-use crate::config::{Config, DEFAULT_DASHBOARD_MAX_WORKERS, DiscoveryMode};
+use crate::config::{Config, DEFAULT_TELEMETRY_MAX_WORKERS, DiscoveryMode};
 use crate::discovery::{
     Discovery, WorkerChange, kubernetes::KubeDiscovery, static_config::StaticDiscovery,
 };
@@ -24,7 +24,7 @@ use crate::proto::picker_server::PickerServer;
 use crate::telemetry::{Telemetry, WorkerMeta};
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
-    body_store, config, dashboard, eviction, ingest, leader, local_tokenize, observation_sink,
+    admin, body_store, config, eviction, ingest, leader, local_tokenize, observation_sink,
     observations, policy, pool, pool_manager, prom, telemetry, version,
 };
 
@@ -74,9 +74,9 @@ pub async fn run() -> Result<()> {
     );
 
     let cancel = CancellationToken::new();
-    let dashboard_max_workers = cfg
-        .dashboard_max_workers
-        .unwrap_or(DEFAULT_DASHBOARD_MAX_WORKERS);
+    let telemetry_max_workers = cfg
+        .telemetry_max_workers
+        .unwrap_or(DEFAULT_TELEMETRY_MAX_WORKERS);
 
     // Pre-bind so we can log READY only after the socket is genuinely
     // listening — i.e., a successful nc/grpcurl/score connection would now
@@ -124,10 +124,10 @@ pub async fn run() -> Result<()> {
         let _ = next_num;
         tracing::info!("MOCK mode: ingest, metrics polling, and /tokenize are all bypassed");
         if cfg.admin_listen.is_some() {
-            // The dashboard exists to diagnose real-world traffic; mock data
+            // The admin listener exists to diagnose real-world traffic; mock data
             // there is misleading. Surface the no-op clearly.
             tracing::warn!(
-                "admin_listen is set but ignored in mock mode (the dashboard is for diagnosing real-world traffic)"
+                "admin_listen is set but ignored in mock mode (its telemetry is for diagnosing real-world traffic)"
             );
         }
         tracing::info!(
@@ -188,7 +188,7 @@ pub async fn run() -> Result<()> {
 
         // Telemetry aggregates its index gauge across every pool's tree; it
         // reads the registry each rollup tick rather than holding the indexers.
-        let telemetry = Telemetry::new(dashboard_max_workers, metrics.clone());
+        let telemetry = Telemetry::new(telemetry_max_workers, metrics.clone());
 
         // Reactive model→pool routing + worker→pool reverse index.
         let model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>> =
@@ -543,7 +543,7 @@ pub async fn run() -> Result<()> {
                                     poll_ms,
                                     models_refresh_secs,
                                     replay_timeout_ms,
-                                    dashboard_max_workers,
+                                    telemetry_max_workers,
                                     warmup_enabled,
                                     &coord_telemetry,
                                     &coord_metrics,
@@ -573,7 +573,7 @@ pub async fn run() -> Result<()> {
             }
         });
 
-        // Live dashboard + telemetry rollup — only when configured.
+        // Admin listener + telemetry rollup — only when configured.
         // One `PolicyStore` for the whole process, made before anything that
         // reads it. `None` when policy is off, which `/readyz` treats as "nothing
         // to wait for".
@@ -596,7 +596,7 @@ pub async fn run() -> Result<()> {
             let dash_prom = prom.clone();
             let dash_cancel = cancel.clone();
             tokio::spawn(async move {
-                if let Err(err) = dashboard::serve(
+                if let Err(err) = admin::serve(
                     dash_addr,
                     tel,
                     dash_pools,
@@ -607,10 +607,10 @@ pub async fn run() -> Result<()> {
                 )
                 .await
                 {
-                    tracing::error!(error = %err, "dashboard server exited with error");
+                    tracing::error!(error = %err, "admin server exited with error");
                 }
             });
-            tracing::info!(listen = %dash_addr, "Live dashboard enabled");
+            tracing::info!(listen = %dash_addr, "Admin listener enabled");
         }
 
         tracing::info!(
@@ -897,7 +897,7 @@ fn handle_added(
     poll_ms: u64,
     models_refresh_secs: u64,
     replay_timeout_ms: u64,
-    dashboard_max_workers: usize,
+    telemetry_max_workers: usize,
     warmup_enabled: bool,
     telemetry: &Arc<Telemetry>,
     metrics: &Arc<MetricsRegistry>,
@@ -944,23 +944,23 @@ fn handle_added(
         match err {
             // Capacity only. Telemetry is pure observability — nothing on the
             // routing path reads it — so a worker without a slot routes
-            // perfectly well, it is just invisible on the dashboard and absent
-            // from `kinference_workers`. Refusing to add it would trade an
+            // perfectly well, it is just absent from `/api/snapshot` and
+            // `kinference_workers`. Refusing to add it would trade an
             // unobservable worker for an idle one, and idle is more expensive:
             // the GPU is paid for either way. Every telemetry write looks its
             // worker up first, so the missing slot is inert rather than unsafe.
             telemetry::RegisterError::SlotExhausted { .. } => {
-                // DEBUG, not ERROR: with a small `dashboard_max_workers` this
-                // is the normal state of any fleet larger than the dashboard,
+                // DEBUG, not ERROR: with a small `telemetry_max_workers` this
+                // is the normal state of any fleet larger than the slot pool,
                 // and one line per worker at ERROR would be alarming and wrong.
-                // `kinference_dashboard_slots_denied_total` carries the signal.
+                // `kinference_telemetry_slots_denied_total` carries the signal.
                 tracing::debug!(
                     pool = pool.name,
                     worker_id = w.worker_id_str,
-                    capacity = dashboard_max_workers,
-                    "dashboard slot pool full; this worker routes normally and is \
-                     counted by kinference_workers, but the live dashboard will not \
-                     show it. Raise dashboard_max_workers to display more"
+                    capacity = telemetry_max_workers,
+                    "telemetry slot pool full; this worker routes normally and is \
+                     counted by kinference_workers, but /api/snapshot will not \
+                     carry it. Raise telemetry_max_workers to include more"
                 );
                 // Fall through: register everywhere else.
             }

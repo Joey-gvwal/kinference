@@ -251,11 +251,11 @@ pub struct PromMetrics {
     /// deleted stops appearing in the input, and a gauge left alone would hold
     /// its last non-zero value forever; this lets the recorder zero it instead.
     workers_by_model_seen: Mutex<HashSet<String>>,
-    /// `kinference_dashboard_slots_used` / `_capacity` — the dashboard's arena.
-    dashboard_slots_used: IntGauge,
-    dashboard_slots_capacity: IntGauge,
-    /// `kinference_dashboard_slots_denied_total` — workers the dashboard omits.
-    dashboard_slots_denied: IntCounter,
+    /// `kinference_telemetry_slots_used` / `_capacity` — the telemetry slot pool.
+    telemetry_slots_used: IntGauge,
+    telemetry_slots_capacity: IntGauge,
+    /// `kinference_telemetry_slots_denied_total` — workers the snapshot omits.
+    telemetry_slots_denied: IntCounter,
     /// `kinference_index_blocks` — blocks in the radix tree, fleet-wide.
     index_blocks: IntGauge,
     /// `kinference_index_workers` — workers present in the radix tree, fleet-wide.
@@ -692,26 +692,26 @@ impl PromMetrics {
             &["result"],
         )
         .expect("tokenize_compare counter opts are valid");
-        let dashboard_slots_used = IntGauge::new(
-            "kinference_dashboard_slots_used",
-            "Dashboard display slots occupied. The pool is preallocated at startup \
-             and sized by `dashboard_max_workers`",
+        let telemetry_slots_used = IntGauge::new(
+            "kinference_telemetry_slots_used",
+            "Telemetry slots occupied. The pool is preallocated at startup and \
+             sized by `telemetry_max_workers`",
         )
-        .expect("dashboard_slots_used gauge opts are valid");
-        let dashboard_slots_capacity = IntGauge::new(
-            "kinference_dashboard_slots_capacity",
-            "Dashboard slot pool size, from `dashboard_max_workers`. Compare against \
-             kinference_dashboard_slots_used for headroom",
+        .expect("telemetry_slots_used gauge opts are valid");
+        let telemetry_slots_capacity = IntGauge::new(
+            "kinference_telemetry_slots_capacity",
+            "Telemetry slot pool size, from `telemetry_max_workers`. Compare against \
+             kinference_telemetry_slots_used for headroom",
         )
-        .expect("dashboard_slots_capacity gauge opts are valid");
-        let dashboard_slots_denied = IntCounter::new(
-            "kinference_dashboard_slots_denied_total",
-            "Workers not shown on the live dashboard for want of a display slot. \
-             They route normally and are still counted by kinference_workers — only \
-             the demo dashboard omits them. EXPECTED whenever the fleet is \
-             larger than dashboard_max_workers; it is not an error condition",
+        .expect("telemetry_slots_capacity gauge opts are valid");
+        let telemetry_slots_denied = IntCounter::new(
+            "kinference_telemetry_slots_denied_total",
+            "Workers absent from /api/snapshot for want of a telemetry slot. \
+             They route normally and are still counted by kinference_workers. \
+             EXPECTED whenever the fleet is larger than telemetry_max_workers; \
+             it is not an error condition",
         )
-        .expect("dashboard_slots_denied counter opts are valid");
+        .expect("telemetry_slots_denied counter opts are valid");
         let workers = IntGaugeVec::new(
             Opts::new(
                 "kinference_workers",
@@ -1001,14 +1001,14 @@ impl PromMetrics {
             .register(Box::new(build_info))
             .expect("register build_info");
         registry
-            .register(Box::new(dashboard_slots_used.clone()))
-            .expect("register dashboard_slots_used");
+            .register(Box::new(telemetry_slots_used.clone()))
+            .expect("register telemetry_slots_used");
         registry
-            .register(Box::new(dashboard_slots_capacity.clone()))
-            .expect("register dashboard_slots_capacity");
+            .register(Box::new(telemetry_slots_capacity.clone()))
+            .expect("register telemetry_slots_capacity");
         registry
-            .register(Box::new(dashboard_slots_denied.clone()))
-            .expect("register dashboard_slots_denied");
+            .register(Box::new(telemetry_slots_denied.clone()))
+            .expect("register telemetry_slots_denied");
         registry
             .register(Box::new(picks.clone()))
             .expect("register picks");
@@ -1095,9 +1095,9 @@ impl PromMetrics {
             .expect("register policy_warnings");
         let m = Self {
             tenants,
-            dashboard_slots_used,
-            dashboard_slots_capacity,
-            dashboard_slots_denied,
+            telemetry_slots_used,
+            telemetry_slots_capacity,
+            telemetry_slots_denied,
             picks,
             pick_duration_ms,
             tokenize_path,
@@ -1270,18 +1270,18 @@ impl PromMetrics {
         self.tokenize_compare.with_label_values(&[result]).inc();
     }
 
-    /// Dashboard slot occupancy, recomputed each rollup tick.
-    pub fn set_dashboard_slots(&self, used: u64, capacity: u64) {
-        self.dashboard_slots_used.set(used as i64);
-        self.dashboard_slots_capacity.set(capacity as i64);
+    /// Telemetry slot occupancy, recomputed each rollup tick.
+    pub fn set_telemetry_slots(&self, used: u64, capacity: u64) {
+        self.telemetry_slots_used.set(used as i64);
+        self.telemetry_slots_capacity.set(capacity as i64);
     }
 
     /// Registrations refused for want of a slot, this tick.
     ///
     /// Takes a DELTA: the underlying counter is `swap(0)`-ed each tick, as with
     /// the index counters.
-    pub fn record_dashboard_slots_denied(&self, n: u64) {
-        self.dashboard_slots_denied.inc_by(n);
+    pub fn record_telemetry_slots_denied(&self, n: u64) {
+        self.telemetry_slots_denied.inc_by(n);
     }
 
     /// Worker reachability, recomputed each rollup tick.
