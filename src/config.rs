@@ -953,12 +953,28 @@ impl PoolSpec {
 }
 
 impl Config {
+    /// Load the config file at `path`: JSON when the extension is `.json`,
+    /// TOML otherwise.
+    ///
+    /// JSON exists for the Helm chart, which renders structured values with
+    /// `toJson`. It cannot render TOML: Helm reads every number in
+    /// `values.yaml` as a float64, `toToml` writes `1000` as `1000.0`, and an
+    /// integer field rejects a float. `toJson` writes `1000`. Both formats go
+    /// through the same serde structs, so they accept exactly the same keys.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let mut cfg: Self = toml::from_str(&text)
-            .with_context(|| format!("parsing config TOML from {}", path.display()))?;
+        let is_json = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+        let mut cfg: Self = if is_json {
+            serde_json::from_str(&text)
+                .with_context(|| format!("parsing config JSON from {}", path.display()))?
+        } else {
+            toml::from_str(&text)
+                .with_context(|| format!("parsing config TOML from {}", path.display()))?
+        };
         // Resolve relative `workers_file`s against the config file's directory
         // rather than the CWD.
         if let Some(base) = path.parent() {

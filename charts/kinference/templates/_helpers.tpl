@@ -36,3 +36,82 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- define "kinference.image" -}}
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end -}}
+
+{{/*
+The rendered kinference config.
+JSON, not TOML: Helm reads every number in values.yaml as a float64, and
+`toToml` writes `1000` as `1000.0`, which an integer field rejects. `toJson`
+writes `1000`. kinference picks the parser from the file extension.
+*/}}
+{{- define "kinference.config" -}}
+{{- $cfg := deepCopy (.Values.config | default dict) -}}
+{{- $_ := set $cfg "listen" (printf "0.0.0.0:%d" (int .Values.service.grpcPort)) -}}
+{{- $_ := set $cfg "admin_listen" (printf "0.0.0.0:%d" (int .Values.service.adminPort)) -}}
+{{- /* Maps keyed by name become the lists kinference reads, so one entry (or
+one field of it) can be overridden without restating the rest. A null entry
+drops it. */ -}}
+{{- range $from, $to := dict "profiles" "profile" "workersets" "workerset" -}}
+{{- $items := list -}}
+{{- range $name, $item := (get $cfg $from | default dict) -}}
+{{- if $item -}}
+{{- $items = append $items (set $item "name" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := unset $cfg $from -}}
+{{- if $items -}}
+{{- $_ := set $cfg $to $items -}}
+{{- end -}}
+{{- end -}}
+{{- /* Namespaces: unset means the release namespace; "" means all namespaces
+(kinference reads an absent key that way). */ -}}
+{{- range $section := list "policy" "kubernetes" -}}
+{{- $s := get $cfg $section -}}
+{{- if kindIs "map" $s -}}
+{{- if not (hasKey $s "namespace") -}}
+{{- $_ := set $s "namespace" $.Release.Namespace -}}
+{{- else if empty (get $s "namespace") -}}
+{{- $_ := unset $s "namespace" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $policy := get $cfg "policy" -}}
+{{- if kindIs "map" $policy -}}
+{{- $_ := set $policy "backend_binding_extension" .Values.extension.name -}}
+{{- end -}}
+{{- if or .Values.tokenizers.existingClaim .Values.tokenizers.configMap -}}
+{{- $tokenize := get $cfg "tokenize" | default dict -}}
+{{- $_ := set $cfg "tokenize" $tokenize -}}
+{{- $local := get $tokenize "local" | default dict -}}
+{{- $_ := set $tokenize "local" $local -}}
+{{- if not (hasKey $local "mount_dir") -}}
+{{- $_ := set $local "mount_dir" "/etc/tokenizers" -}}
+{{- end -}}
+{{- end -}}
+{{- toPrettyJson $cfg -}}
+{{- end -}}
+
+{{/*
+Whether CRD-driven routing policy is on, which gates its RBAC. With configFile
+the chart cannot see inside the TOML, so it grants the policy role.
+*/}}
+{{- define "kinference.policyEnabled" -}}
+{{- if .Values.configFile -}}
+true
+{{- else if dig "policy" "enabled" false (.Values.config | default dict) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/* The config file's name in the ConfigMap, which also picks its parser. */}}
+{{- define "kinference.configFileName" -}}
+{{- if .Values.configFile -}}config.toml{{- else -}}config.json{{- end -}}
+{{- end -}}
+
+{{/* The config file's contents. */}}
+{{- define "kinference.configContents" -}}
+{{- if .Values.configFile -}}
+{{- .Values.configFile -}}
+{{- else -}}
+{{- include "kinference.config" . -}}
+{{- end -}}
+{{- end -}}

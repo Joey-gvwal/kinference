@@ -6,5 +6,5 @@ metadata:
   labels:
     {{- include "kinference.labels" . | nindent 4 }}
 data:
-  config.toml: |
-    {{- .Values.config | nindent 4 }}
+  {{ include "kinference.configFileName" . }}: |
+    {{- include "kinference.configContents" . | nindent 4 }}
