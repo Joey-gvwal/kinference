@@ -38,9 +38,10 @@ use super::crd::{
     UnresolvedDestination, WorkerSetModelStatus,
 };
 use super::provider_health::{FailureKind, ProviderHealth};
-use super::store::{
-    DanglingPolicy, PolicyStore, ResolvedPolicy, ResolvedPool, ResolvedWorkerSet, UnresolvedReason,
+use super::resolve::{
+    DanglingPolicy, ResolvedPolicy, ResolvedPool, ResolvedWorkerSet, UnresolvedReason,
 };
+use super::store::PolicyStore;
 use crate::metrics::MetricsRegistry;
 use crate::policy::PoolId;
 use crate::pool::Pool;
@@ -302,8 +303,8 @@ pub fn desired_pool_status(
         }
         (Some(DanglingPolicy::WrongKind { name, group, kind }), _) => format!(
             "policyRef `{name}` names {group}/{kind}, not {}/{}; serving without policy",
-            super::store::POLICY_GROUP,
-            super::store::POLICY_KIND
+            super::resolve::POLICY_GROUP,
+            super::resolve::POLICY_KIND
         ),
         (None, 0) => "all destinations and the policyRef resolved".to_string(),
         (None, n) => format!("{n} destination(s) did not resolve"),
@@ -610,10 +611,10 @@ pub fn desired_provider_status(
 /// `Accepted=False` rather than `ResolvedRefs=False` — nothing was resolved far
 /// enough to have a ref problem. The spec itself is the thing to fix.
 pub fn rejected_provider_status(
-    reason: super::store::UnresolvedReason,
+    reason: super::resolve::UnresolvedReason,
     previous: Option<&InferenceProviderStatus>,
 ) -> InferenceProviderStatus {
-    use super::store::UnresolvedReason as R;
+    use super::resolve::UnresolvedReason as R;
     let prev = previous.map(|s| s.conditions.as_slice());
     let msg = match reason {
         R::UnsupportedApiFormat => {
@@ -1268,7 +1269,7 @@ impl StatusWriter {
     /// are watching `kubectl apply` and the logs, not the status subresource.
     /// Once per appearance, because a WARN line repeated every ten seconds is
     /// one nobody reads.
-    fn report_policy_warnings(&self, snapshot: &super::store::PolicyIndex) {
+    fn report_policy_warnings(&self, snapshot: &super::resolve::PolicyIndex) {
         let mut current: HashSet<String> = HashSet::new();
         let mut rows: Vec<(String, &'static str, i64)> = Vec::new();
         for resolved in snapshot.policies() {

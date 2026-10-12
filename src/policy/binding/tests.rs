@@ -6,7 +6,7 @@ use crate::policy::PoolId;
 use crate::policy::compile::CompiledPolicy;
 use crate::policy::crd::{Condition, IntOrString};
 use crate::policy::engine::ObjectKey;
-use crate::policy::store::{ResolvedProvider, ResolvedWorkerSet};
+use crate::policy::resolve::{ResolvedProvider, ResolvedWorkerSet};
 
 /// The configured picker, as `main` passes it: the default name unless an
 /// operator changed it.

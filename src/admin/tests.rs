@@ -87,7 +87,7 @@ async fn not_ready_until_the_policy_watch_has_listed() {
 
     // A listed-but-empty snapshot is enough: there is nothing left to get
     // wrong, even with no pools in it.
-    store.publish(Arc::new(crate::policy::store::PolicyIndex::listed_empty()));
+    store.publish(Arc::new(crate::policy::resolve::PolicyIndex::listed_empty()));
     let (status, body) = status_and_body(PoolRegistry::new(), Some(store)).await;
     assert_eq!(status, StatusCode::OK, "got: {body:?}");
 }
@@ -101,7 +101,7 @@ async fn ready_immediately_when_policy_is_disabled() {
 
 // ── Policy explorer API ───────────────────────────────────────────────────
 
-use crate::policy::store::PolicyIndex;
+use crate::policy::resolve::PolicyIndex;
 
 fn api_state(policy: Option<Arc<crate::policy::store::PolicyStore>>) -> policy_api::PolicyApiState {
     policy_api::PolicyApiState::new(
@@ -233,7 +233,7 @@ fn index_with_policy(name: &str, spec: serde_json::Value) -> Arc<PolicyIndex> {
         spec: serde_json::from_value::<InferencePolicySpec>(spec).expect("valid spec"),
         status: None,
     });
-    Arc::new(crate::policy::store::resolve(
+    Arc::new(crate::policy::resolve::resolve(
         &[],
         &[p],
         &[],
@@ -489,7 +489,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
     );
 
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::store::resolve(
+    store.publish(Arc::new(crate::policy::resolve::resolve(
         &[ip],
         &[],
         &[ws],
@@ -614,7 +614,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
         pool_id,
     );
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::store::resolve(
+    store.publish(Arc::new(crate::policy::resolve::resolve(
         &[ip],
         &[pol],
         &[ws],
@@ -758,7 +758,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
         );
     }
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::store::resolve(
+    store.publish(Arc::new(crate::policy::resolve::resolve(
         &[ip],
         &[Arc::new(crate::policy::crd::InferencePolicy {
             metadata: meta("passthrough"),
@@ -1350,7 +1350,7 @@ fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> a
         pool_id,
     );
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::store::resolve(
+    store.publish(Arc::new(crate::policy::resolve::resolve(
         &[ip],
         &[pol],
         &[ws],

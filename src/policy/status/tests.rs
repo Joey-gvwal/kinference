@@ -1,7 +1,7 @@
 use super::*;
 use crate::policy::compile::CompiledPolicy;
 use crate::policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
-use crate::policy::store::{Unresolved, UnresolvedReason};
+use crate::policy::resolve::{Unresolved, UnresolvedReason};
 
 fn dest(name: &str, aliases: &[(&str, &str)]) -> ResolvedWorkerSet {
     ResolvedWorkerSet {
@@ -85,7 +85,7 @@ fn resolved(dests: Vec<ResolvedWorkerSet>, unresolved: Vec<Unresolved>) -> Resol
         dangling_policy: None,
         destinations: dests
             .into_iter()
-            .map(crate::policy::store::ResolvedDestination::Local)
+            .map(crate::policy::resolve::ResolvedDestination::Local)
             .collect(),
         unresolved,
         parents: vec![ParentRef {
@@ -1206,7 +1206,7 @@ fn an_unchanged_policy_produces_an_identical_status() {
 #[test]
 fn a_refused_provider_reports_the_reason_and_the_fix() {
     let s = rejected_provider_status(
-        crate::policy::store::UnresolvedReason::UnsupportedApiFormat,
+        crate::policy::resolve::UnresolvedReason::UnsupportedApiFormat,
         None,
     );
     let accepted = &s.conditions[0];
@@ -1244,7 +1244,7 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
 
 #[test]
 fn every_refusal_reason_gets_its_own_message() {
-    use crate::policy::store::UnresolvedReason as R;
+    use crate::policy::resolve::UnresolvedReason as R;
     let msgs: Vec<String> = [
         R::UnsupportedApiFormat,
         R::Incomplete,

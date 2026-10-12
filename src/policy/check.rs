@@ -22,7 +22,7 @@
 //!
 //! **Warnings** are the name checks of [`super::lint`], against the pools the
 //! policy is attached to, when those pools and their destinations are among the
-//! inputs. Resolved through the server's own [`super::store::resolve`], so the
+//! inputs. Resolved through the server's own [`super::resolve::resolve`], so the
 //! CLI cannot disagree with a running kinference about what a name means. A
 //! policy can serve several pools, and a name one of them lacks may be right
 //! for another: a warning is about the pairing, not the policy.
@@ -38,7 +38,7 @@ use super::crd::{
     BackendType, InferencePolicy, InferencePolicySpec, InferencePool, InferenceProvider,
     InferenceWorkerSet, ReferenceGrant,
 };
-use super::store::{PoolIndex, ResolvedPool};
+use super::resolve::{PoolIndex, ResolvedPool};
 use super::warning::{PolicyWarning, did_you_mean};
 
 /// One input: a file, or standard input.
@@ -646,7 +646,7 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
             }))
         })
         .collect();
-    let index = super::store::resolve(
+    let index = super::resolve::resolve(
         &pools,
         &policy_objects,
         &worker_sets,

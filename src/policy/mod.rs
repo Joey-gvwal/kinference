@@ -58,13 +58,15 @@
 //!   `pii-unknown` and `complexity-unknown`, everything else gets a real
 //!   verdict. See that module's own header for the keyword table.
 //! - `engine` — candidate generation, exclusion, selection.
-//! - `store` — the reflectors and the resolved snapshot.
+//! - `resolve` — the CRDs → the resolved snapshot, as a pure function. What
+//!   `kinfctl check` shares with the server.
+//! - `store` — the reflectors that feed `resolve`, and the published snapshot.
 //! - `services` — the `Service` watch. Nothing in pool or policy resolution
 //!   reads a Service; it is there for the things that must name one to a THIRD
 //!   party, where the front-door port number is needed and only the Service
 //!   carries it. See that module's header.
 //! - `rejection` — why a worker set produced no pool, the verdict
-//!   `worker_sets` reaches and `store` reports.
+//!   `worker_sets` reaches and `resolve` reports.
 //! - `worker_sets` — `InferenceWorkerSet` → `PoolSpec`, plus the watch that
 //!   reconciles them and the store of the ones that were rejected. Lives here
 //!   rather than at the crate root because its input is a CRD type and its
@@ -88,6 +90,7 @@ pub mod lint;
 pub mod predicate;
 pub mod provider_health;
 pub mod rejection;
+pub mod resolve;
 pub mod services;
 pub mod status;
 pub mod store;

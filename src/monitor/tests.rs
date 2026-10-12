@@ -219,8 +219,8 @@ fn empty_model_list_is_noop() {
 // reached. A request for `qwen-simple` 404'd while the worker set's own
 // status listed it.
 
-fn ws(aliases: &[(&str, &str)]) -> crate::policy::store::ResolvedWorkerSet {
-    crate::policy::store::ResolvedWorkerSet {
+fn ws(aliases: &[(&str, &str)]) -> crate::policy::resolve::ResolvedWorkerSet {
+    crate::policy::resolve::ResolvedWorkerSet {
         name: "set-a".into(),
         namespace: "default".into(),
         labels: std::collections::BTreeMap::new(),
@@ -309,8 +309,8 @@ fn aliases_on_a_later_destination_are_found() {
 fn resolved_provider(
     name: &str,
     models: &[(&str, &str, Option<u32>)],
-) -> crate::policy::store::ResolvedProvider {
-    crate::policy::store::ResolvedProvider {
+) -> crate::policy::resolve::ResolvedProvider {
+    crate::policy::resolve::ResolvedProvider {
         uid: None,
         name: name.into(),
         namespace: "default".into(),
@@ -616,7 +616,7 @@ fn policy_fleet_with(
         "spec": spec
     }));
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::store::resolve(
+    store.publish(Arc::new(crate::policy::resolve::resolve(
         &[pool],
         &[policy],
         &worker_sets,

@@ -1,8 +1,8 @@
 //! Why an `InferenceWorkerSet` produced no pool.
 //!
-//! `worker_sets::desired_pools` produces these; `store` projects them into the
+//! `worker_sets::desired_pools` produces these; `resolve` projects them into the
 //! reasons status reports. Kept apart from `worker_sets` because that module
-//! also holds the watch, and resolving names (`store::resolve`, `kinfctl
+//! also holds the watch, and resolving names (`resolve::resolve`, `kinfctl
 //! check`) needs only the verdict, not the watcher.
 
 use super::PoolKey;

@@ -306,7 +306,7 @@ fn log_winner(
 /// defaulted latency of zero would win every ranking.
 fn provider_candidates_for(
     health: &crate::policy::provider_health::ProviderHealthStore,
-    prov: &crate::policy::store::ResolvedProvider,
+    prov: &crate::policy::resolve::ResolvedProvider,
     canonical_model: &str,
 ) -> Vec<crate::policy::engine::Candidate> {
     let provider = crate::policy::engine::ObjectKey::new(&prov.namespace, &prov.name);
@@ -601,7 +601,7 @@ impl KinferenceService {
         let pref = pool_ref?;
         let snapshot = store.snapshot();
         let resolved = snapshot.lookup(&pref.namespace, &pref.name)?;
-        let local: Vec<&crate::policy::store::ResolvedWorkerSet> =
+        let local: Vec<&crate::policy::resolve::ResolvedWorkerSet> =
             resolved.local_destinations().collect();
         first_served_upstream(&local, canonical, |m| !self.resolve_pools(m).is_empty())
     }
@@ -805,7 +805,7 @@ pub(crate) enum Input {
 /// becoming candidates. Pinned by
 /// `several_upstreams_take_the_first_that_is_served`.
 pub(crate) fn first_served_upstream(
-    destinations: &[&crate::policy::store::ResolvedWorkerSet],
+    destinations: &[&crate::policy::resolve::ResolvedWorkerSet],
     canonical: &str,
     is_served: impl Fn(&str) -> bool,
 ) -> Option<String> {
