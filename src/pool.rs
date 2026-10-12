@@ -45,9 +45,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{PickerConfig, PoolKey, PoolSpec, PredictorConfig, TokenizeMode};
+use crate::config::{PickerConfig, PoolSpec, PredictorConfig, TokenizeMode};
 use crate::inflight_prefixes::InflightPrefixes;
 use crate::inflight_registry::InflightRegistry;
+use crate::policy::PoolKey;
 use crate::workers::WorkerRegistry;
 
 /// Opaque, process-unique handle to a pool. The readable name is [`Pool::name`].

@@ -626,7 +626,7 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
         .iter()
         .filter_map(|w| {
             Some((
-                crate::config::PoolKey::namespaced(&w.namespace()?, w.name_any()),
+                super::PoolKey::namespaced(&w.namespace()?, w.name_any()),
                 crate::pool::PoolId::next(),
             ))
         })

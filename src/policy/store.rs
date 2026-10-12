@@ -654,7 +654,7 @@ impl PolicyStore {
 ///   than captured at startup, which closes a race where policy resolved a
 ///   worker set to a pool the manager had not created yet — or, worse, to one
 ///   it had already retired.
-pub type PoolIndex = BTreeMap<crate::config::PoolKey, PoolId>;
+pub type PoolIndex = BTreeMap<super::PoolKey, PoolId>;
 
 /// Build the identity index from a live pool snapshot.
 pub fn pool_index(pools: &crate::pool::PoolMap) -> PoolIndex {
@@ -663,7 +663,7 @@ pub fn pool_index(pools: &crate::pool::PoolMap) -> PoolIndex {
 
 /// Why each worker set that produced no pool was refused, as recorded by
 /// `worker_sets::desired_pools` — the only place that knows.
-pub type RejectionIndex = BTreeMap<crate::config::PoolKey, UnresolvedReason>;
+pub type RejectionIndex = BTreeMap<super::PoolKey, UnresolvedReason>;
 
 /// Project the resolver's rejections into the reasons status reports.
 pub fn rejection_index(rejections: &[super::worker_sets::Rejection]) -> RejectionIndex {
@@ -1078,7 +1078,7 @@ fn bind(
     rejections: &RejectionIndex,
 ) -> Result<ResolvedWorkerSet, UnresolvedReason> {
     let namespace = ws.namespace().unwrap_or_default();
-    let key = crate::config::PoolKey::namespaced(&namespace, ws.name_any());
+    let key = super::PoolKey::namespaced(&namespace, ws.name_any());
     let pool_id = *pools_by_key.get(&key).ok_or_else(|| {
         rejections
             .get(&key)

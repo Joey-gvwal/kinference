@@ -109,6 +109,43 @@ impl PoolRef {
     }
 }
 
+/// A worker set's stable identity, as opposed to the runtime-assigned `PoolId`.
+/// This is what reconciles match on.
+///
+/// `namespace` is `None` for TOML worker sets. It is part of the key so
+/// same-named sets in different namespaces don't merge into one pool.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PoolKey {
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+impl PoolKey {
+    pub fn local(name: impl Into<String>) -> Self {
+        Self {
+            namespace: None,
+            name: name.into(),
+        }
+    }
+
+    #[allow(dead_code)] // the Kubernetes path constructs these
+    pub fn namespaced(namespace: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            namespace: Some(namespace.into()),
+            name: name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for PoolKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.namespace {
+            Some(ns) => write!(f, "{ns}/{}", self.name),
+            None => write!(f, "{}", self.name),
+        }
+    }
+}
+
 /// Request attributes the CALLER resolved, lifted off the wire.
 ///
 /// kinference does not parse HTTP. It has no view of which header carries a tenant

@@ -36,10 +36,10 @@ use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::runtime::{WatchStreamExt, reflector};
 use tokio_util::sync::CancellationToken;
 
+use super::PoolKey;
 use super::crd::{InferenceWorkerSet, IntOrString, ModelDiscoveryMode};
 use crate::config::{
-    DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PoolKey, PoolSpec, PortRef, PortRefs,
-    ProfileConfig,
+    DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PoolSpec, PortRef, PortRefs, ProfileConfig,
 };
 
 /// Why a worker set could not be materialized.

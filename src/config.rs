@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::policy::PoolKey;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 // Unknown top-level keys are a startup error, so a mistyped or renamed key
@@ -329,43 +331,6 @@ pub struct WorkerSetConfig {
     pub render_url: Option<String>,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
-}
-
-/// A worker set's stable identity, as opposed to the runtime-assigned `PoolId`.
-/// This is what reconciles match on.
-///
-/// `namespace` is `None` for TOML worker sets. It is part of the key so
-/// same-named sets in different namespaces don't merge into one pool.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PoolKey {
-    pub namespace: Option<String>,
-    pub name: String,
-}
-
-impl PoolKey {
-    pub fn local(name: impl Into<String>) -> Self {
-        Self {
-            namespace: None,
-            name: name.into(),
-        }
-    }
-
-    #[allow(dead_code)] // the Kubernetes path constructs these
-    pub fn namespaced(namespace: impl Into<String>, name: impl Into<String>) -> Self {
-        Self {
-            namespace: Some(namespace.into()),
-            name: name.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for PoolKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.namespace {
-            Some(ns) => write!(f, "{ns}/{}", self.name),
-            None => write!(f, "{}", self.name),
-        }
-    }
 }
 
 /// A worker set with its profile resolved: everything needed to build a

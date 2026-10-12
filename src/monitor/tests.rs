@@ -570,7 +570,7 @@ fn policy_fleet_with(
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
         let mut spec = crate::config::test_spec(name, 16);
-        spec.key = crate::config::PoolKey::namespaced("default", *name);
+        spec.key = crate::policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(
             PoolId::next(),
@@ -581,7 +581,7 @@ fn policy_fleet_with(
             id += 1;
             p.registry.register(id, offline_worker(model, addr));
         }
-        bound.insert(crate::config::PoolKey::namespaced("default", *name), p.id);
+        bound.insert(crate::policy::PoolKey::namespaced("default", *name), p.id);
         worker_sets.push(cr::<crate::policy::crd::InferenceWorkerSet>(
             serde_json::json!({
                 "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceWorkerSet",

@@ -219,7 +219,7 @@ fn pools() -> PoolIndex {
     .enumerate()
     .map(|(i, name)| {
         (
-            crate::config::PoolKey::namespaced("infra", name),
+            crate::policy::PoolKey::namespaced("infra", name),
             PoolId::from_raw(i as u64),
         )
     })
@@ -247,7 +247,7 @@ fn seeding_a_reflector_store_feeds_resolve() {
     assert_eq!(p.destinations.len(), 1);
     assert_eq!(
         local(p, 0).pool_id,
-        pools()[&crate::config::PoolKey::namespaced("infra", "workers-h100")],
+        pools()[&crate::policy::PoolKey::namespaced("infra", "workers-h100")],
         "the destination resolves to the pool the set became"
     );
 }
@@ -780,7 +780,7 @@ fn unsupported_destination_kind_is_reported() {
 #[test]
 fn a_pool_in_another_namespace_does_not_claim_this_worker_set() {
     let elsewhere: PoolIndex = [(
-        crate::config::PoolKey::namespaced("other", "workers-h100"),
+        crate::policy::PoolKey::namespaced("other", "workers-h100"),
         PoolId::from_raw(0),
     )]
     .into_iter()
@@ -816,13 +816,13 @@ fn an_unresolved_destination_reports_the_resolvers_reason() {
     ];
     let rejections = rejection_index(&[
         Rejection {
-            key: crate::config::PoolKey::namespaced("infra", "workers-h100"),
+            key: crate::policy::PoolKey::namespaced("infra", "workers-h100"),
             reason: RejectReason::UnknownProfile {
                 defined: vec!["h100".into()],
             },
         },
         Rejection {
-            key: crate::config::PoolKey::namespaced("infra", "workers-a100"),
+            key: crate::policy::PoolKey::namespaced("infra", "workers-a100"),
             reason: RejectReason::MissingKvBlockSize,
         },
     ]);

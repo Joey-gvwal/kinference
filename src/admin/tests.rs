@@ -481,7 +481,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
 
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
-        crate::config::PoolKey {
+        crate::policy::PoolKey {
             namespace: Some("default".into()),
             name: "gemma-4-12b".into(),
         },
@@ -607,7 +607,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
 
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
-        crate::config::PoolKey {
+        crate::policy::PoolKey {
             namespace: Some("default".into()),
             name: "qwen-2-5-32b".into(),
         },
@@ -750,7 +750,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
     let mut by_key = std::collections::BTreeMap::new();
     for (name, id) in [("big-blocks", big_id), ("small-blocks", small_id)] {
         by_key.insert(
-            crate::config::PoolKey {
+            crate::policy::PoolKey {
                 namespace: Some("default".into()),
                 name: name.into(),
             },
@@ -1346,7 +1346,7 @@ fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> a
     pools.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![live])));
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
-        crate::config::PoolKey::namespaced("default", "gemma-4-12b"),
+        crate::policy::PoolKey::namespaced("default", "gemma-4-12b"),
         pool_id,
     );
     let store = crate::policy::store::PolicyStore::new();

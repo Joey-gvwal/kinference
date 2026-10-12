@@ -45,7 +45,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{PoolKey, PoolSpec};
+use crate::config::PoolSpec;
+use crate::policy::PoolKey;
 use crate::pool::{Pool, PoolId, PoolMap, PoolRegistry};
 
 /// Side effects the manager cannot perform itself, because they belong to
