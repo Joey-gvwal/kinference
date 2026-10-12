@@ -58,7 +58,7 @@ tokenizers:
 service:
   type: ClusterIP
   grpcPort: 50051
-  dashboardPort: 9001
+  adminPort: 9001
 
 rbac:
   create: true
@@ -88,25 +88,6 @@ extension:
   # Interactive (default when empty) | Batch | Deferrable.
   qos: ""
 
-# HTTPRoute exposing the dashboard through a Gateway API gateway, at
-# `/kinference/dashboard`. Opt-in: it needs the Gateway API CRDs, and it needs
-# a Gateway to attach to, so `parentRef.name` is required once enabled.
-httpRoute:
-  enabled: false
-  parentRef:
-    # The Gateway's name. Required when enabled.
-    name: ""
-    # Defaults to the release namespace. A Gateway elsewhere must allow the
-    # attachment from this namespace.
-    namespace: ""
-    # Pin to one listener by name; "" attaches to every compatible listener.
-    sectionName: ""
-  # PathPrefix match for the dashboard.
-  path: /kinference/dashboard
-  # Restrict the route to these hostnames; [] matches all of the Gateway's.
-  hostnames: []
-  extraPathPrefixes: ["/assets", "/api"]
-
 # The config file the container reads (--config /etc/kinference/config.toml),
 # verbatim. This default is a worked example;
 # override the whole block for your fleet (e.g. --set-file config=my.toml).
@@ -129,10 +110,10 @@ config: |
   admin_listen = "0.0.0.0:9001"
   metrics_poll_ms = 1000
   models_refresh_secs = 30
-  # Dashboard display budget only — NOT a routing cap. Each slot preallocates
-  # ~480 KB of history, and the dashboard is a demo surface. Prometheus'
-  # kinference_workers covers the whole fleet regardless of this number.
-  dashboard_max_workers = 16
+  # Telemetry budget for /api/snapshot only — NOT a routing cap. Each slot
+  # preallocates ~480 KB of history. Prometheus' kinference_workers covers the
+  # whole fleet regardless of this number.
+  telemetry_max_workers = 16
   # observation_ttl_secs = 600   # in-flight bookkeeping TTL; raise above the
                                   # worst-case full (non-streaming) response time.
 

@@ -33,7 +33,6 @@ lint: check-fmt clippy lint-chart
 test-unit:
     cargo test
 
-# Requires the committed `dashboard/dist` bundle — `src/dashboard.rs` embeds it at compile time (rust-embed)
 [group('build')]
 image:
     docker build --build-arg KINFERENCE_VERSION={{KINFERENCE_VERSION}} -t {{IMAGE}} .

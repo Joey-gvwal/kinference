@@ -718,21 +718,21 @@ fn build_info_reports_the_version_at_construction() {
 
 /// Telemetry-slot headroom and refusals are exported.
 #[test]
-fn dashboard_slots_are_exported_as_headroom_and_refusals() {
+fn telemetry_slots_are_exported_as_headroom_and_refusals() {
     let m = PromMetrics::new();
-    m.set_dashboard_slots(250, 256);
-    m.record_dashboard_slots_denied(3);
+    m.set_telemetry_slots(250, 256);
+    m.record_telemetry_slots_denied(3);
     let out = m.render();
-    assert_line(&out, "kinference_dashboard_slots_used 250");
-    assert_line(&out, "kinference_dashboard_slots_capacity 256");
-    assert_line(&out, "kinference_dashboard_slots_denied_total 3");
+    assert_line(&out, "kinference_telemetry_slots_used 250");
+    assert_line(&out, "kinference_telemetry_slots_capacity 256");
+    assert_line(&out, "kinference_telemetry_slots_denied_total 3");
 
     // Occupancy is a gauge (it falls when workers leave); refusals accumulate.
-    m.set_dashboard_slots(10, 256);
-    m.record_dashboard_slots_denied(1);
+    m.set_telemetry_slots(10, 256);
+    m.record_telemetry_slots_denied(1);
     let out = m.render();
-    assert_line(&out, "kinference_dashboard_slots_used 10");
-    assert_line(&out, "kinference_dashboard_slots_denied_total 4");
+    assert_line(&out, "kinference_telemetry_slots_used 10");
+    assert_line(&out, "kinference_telemetry_slots_denied_total 4");
 }
 
 /// Engine-measured cached prompt tokens accumulate per tenant.

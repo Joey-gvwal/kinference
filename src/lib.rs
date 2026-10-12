@@ -10,9 +10,9 @@
 //! only public surface, which is what lets the server's internals stay
 //! `pub(crate)`-free without either binary reaching past what it needs.
 
+mod admin;
 mod body_store;
 mod config;
-mod dashboard;
 mod discovery;
 mod eviction;
 mod grpc;

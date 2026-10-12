@@ -1,24 +1,22 @@
-//! In-process live dashboard HTTP server — the admin listener.
+//! The admin HTTP listener.
 //!
-//! Serves the bundled SPA (embedded from `dashboard/dist`); the JSON API
-//! under `/api` — `GET /api/snapshot`, the telemetry snapshot the frontend
-//! polls, and the read-only policy API (`GET /api/policy/context`,
-//! `POST /api/policy/simulate`, see [`policy_api`]); `GET /metrics`; and
-//! `GET /readyz`, used by the K8s readinessProbe. Only started when
-//! `admin_listen` is configured — deployments that disable the dashboard also
-//! lose the readiness probe, so leave it enabled in production.
+//! Serves `GET /readyz`, used by the K8s readinessProbe; `GET /metrics`; and
+//! the JSON API under `/api` — `GET /api/snapshot`, the telemetry snapshot,
+//! and the read-only policy API (`GET /api/policy/context`,
+//! `POST /api/policy/simulate`, see [`policy_api`]). Only started when
+//! `admin_listen` is configured — a deployment that leaves it unset also loses
+//! the readiness probe, so set it in production.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{FromRef, Path, State},
+    extract::{FromRef, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use rust_embed::RustEmbed;
 use tokio_util::sync::CancellationToken;
 
 use crate::metrics::MetricsRegistry;
@@ -27,10 +25,6 @@ use crate::prom::PromMetrics;
 use crate::telemetry::Telemetry;
 
 mod policy_api;
-
-#[derive(RustEmbed)]
-#[folder = "dashboard/dist"]
-struct Assets;
 
 /// State threaded through every axum route via `FromRef`. Holds the
 /// Arcs the handlers below need (telemetry for `/api/snapshot`, the pool
@@ -92,12 +86,10 @@ impl FromRef<AppState> for Arc<PromMetrics> {
 
 /// Every route on the admin listener.
 ///
-/// Everything under `/api` answers in JSON, failures included. Without the
-/// two fallbacks below, an unknown `/api/...` GET fell through to `/*path` and
-/// got the SPA's `index.html` with a 200 — a typo'd endpoint read as a
-/// successful response that would not parse — and a wrong method got axum's
-/// empty 405. Callers here are increasingly programs, and a program should
-/// never have to sniff a content type to learn it called the wrong URL.
+/// Everything answers in JSON, failures included: an unknown path is a JSON
+/// 404 naming the real endpoints, and a wrong method a JSON 405. Callers here
+/// are programs, and a program should never have to sniff a content type to
+/// learn it called the wrong URL.
 fn router(state: AppState) -> Router {
     let get_only = || async { policy_api::method_not_allowed("GET, HEAD") };
     Router::new()
@@ -115,8 +107,6 @@ fn router(state: AppState) -> Router {
         .route("/api/*rest", any(policy_api::not_found))
         .route("/metrics", get(metrics))
         .route("/readyz", get(readyz))
-        .route("/", get(|| async { serve_asset("index.html") }))
-        .route("/*path", get(asset))
         // Whatever the routes above cannot match. Not only truly unknown
         // paths: matchit does not backtrack from a static prefix into a
         // catch-all, so `/api/policy/context/` — a trailing slash — matched
@@ -130,15 +120,10 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// The router-wide fallback: JSON for anything under `/api`, the SPA for the
-/// rest — the same split the routes themselves make.
+/// The router-wide fallback: a JSON 404 naming the real endpoints, for any
+/// path the routes above do not match.
 async fn fallback(uri: axum::http::Uri) -> Response {
-    let path = uri.path();
-    if path == "/api" || path.starts_with("/api/") {
-        policy_api::not_found(uri).await.into_response()
-    } else {
-        serve_asset(path.trim_start_matches('/'))
-    }
+    policy_api::not_found(uri).await.into_response()
 }
 
 pub async fn serve(
@@ -232,38 +217,6 @@ async fn readyz(State(st): State<ReadyzState>) -> Response {
         format!("ready\nworker sets: {pools_n}, with ready endpoints: {ready}\n"),
     )
         .into_response()
-}
-
-async fn asset(Path(path): Path<String>) -> Response {
-    serve_asset(&path)
-}
-
-/// Serve an embedded asset by path. Falls back to `index.html` for unknown
-/// non-asset routes (SPA client-side routing), and 404s only if assets aren't
-/// embedded at all (dist missing at build time).
-fn serve_asset(path: &str) -> Response {
-    let p = path.trim_start_matches('/');
-    let p = if p.is_empty() { "index.html" } else { p };
-    if let Some(content) = Assets::get(p) {
-        let mime = mime_guess::from_path(p).first_or_octet_stream();
-        return (
-            [(header::CONTENT_TYPE, mime.as_ref())],
-            content.data.into_owned(),
-        )
-            .into_response();
-    }
-    match Assets::get("index.html") {
-        Some(content) => (
-            [(header::CONTENT_TYPE, "text/html")],
-            content.data.into_owned(),
-        )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            "dashboard assets not embedded; run `cd dashboard && npm run build`",
-        )
-            .into_response(),
-    }
 }
 
 #[cfg(test)]

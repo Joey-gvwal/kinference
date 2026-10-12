@@ -20,7 +20,7 @@ fn meta(worker_id_num: u64, pool: &str) -> WorkerMeta {
 /// derived from the pod UID), so two worker sets selecting one pod register
 /// the same id twice. The second registration used to pop another slot and
 /// overwrite `idx_of`, orphaning the first — repeat that and the fleet
-/// stops growing at `dashboard_max_workers` with nothing in the logs to explain it.
+/// stops growing at `telemetry_max_workers` with nothing in the logs to explain it.
 #[test]
 fn a_duplicate_registration_is_refused_and_leaks_no_slot() {
     let t = telemetry(4);
@@ -170,7 +170,7 @@ fn a_released_slot_is_reusable() {
 /// serving traffic. Before the split, a fleet larger than the pool reported
 /// only as many workers as the dashboard could draw.
 #[test]
-fn worker_health_is_independent_of_the_dashboard_slot_pool() {
+fn worker_health_is_independent_of_the_telemetry_slot_pool() {
     let t = telemetry(2); // room to display two...
     let pool = crate::pool::test_pool("p");
     for i in 1..=5u64 {
