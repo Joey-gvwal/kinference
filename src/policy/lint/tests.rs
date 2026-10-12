@@ -1,8 +1,8 @@
 use super::*;
-use crate::config::PoolKey;
+use crate::policy::PoolId;
+use crate::policy::PoolKey;
 use crate::policy::crd::{InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet};
-use crate::policy::store::{PoolIndex, resolve};
-use crate::pool::PoolId;
+use crate::policy::resolve::{PoolIndex, resolve};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ fn policy(spec: serde_json::Value) -> Arc<InferencePolicy> {
     }))
 }
 
-/// Resolve through the real `store::resolve`, binding every worker set as if
+/// Resolve through the real `resolve::resolve`, binding every worker set as if
 /// discovery had found it — the same thing `kinfctl` does offline.
 fn check(
     spec: serde_json::Value,

@@ -58,11 +58,15 @@
 //!   `pii-unknown` and `complexity-unknown`, everything else gets a real
 //!   verdict. See that module's own header for the keyword table.
 //! - `engine` — candidate generation, exclusion, selection.
-//! - `store` — the reflectors and the resolved snapshot.
+//! - `resolve` — the CRDs → the resolved snapshot, as a pure function. What
+//!   `kinfctl check` shares with the server.
+//! - `store` — the reflectors that feed `resolve`, and the published snapshot.
 //! - `services` — the `Service` watch. Nothing in pool or policy resolution
 //!   reads a Service; it is there for the things that must name one to a THIRD
 //!   party, where the front-door port number is needed and only the Service
 //!   carries it. See that module's header.
+//! - `rejection` — why a worker set produced no pool, the verdict
+//!   `worker_sets` reaches and `resolve` reports.
 //! - `worker_sets` — `InferenceWorkerSet` → `PoolSpec`, plus the watch that
 //!   reconciles them and the store of the ones that were rejected. Lives here
 //!   rather than at the crate root because its input is a CRD type and its
@@ -85,11 +89,15 @@ pub mod explain;
 pub mod lint;
 pub mod predicate;
 pub mod provider_health;
+pub mod rejection;
+pub mod resolve;
 pub mod services;
 pub mod status;
 pub mod store;
 pub mod warning;
 pub mod worker_sets;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The pool a request named, lifted off the wire so `crate::monitor` stays
 /// proto-agnostic (it references no generated type today, and this keeps it
@@ -106,6 +114,94 @@ pub struct PoolRef {
 impl PoolRef {
     pub fn label(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
+    }
+}
+
+/// The pseudo-model string that means "kinference, you choose the model."
+/// A request whose `model` is exactly this is resolved to a concrete
+/// model by the monitor's `choose_model_for_auto` before pool +
+/// endpoint selection. No worker ever serves this name.
+pub(crate) const AUTO_MODEL: &str = "auto";
+
+/// Opaque, process-unique handle to a pool. The readable name is `pool::Pool::name`.
+///
+/// **Not an index, and never reused.** It used to be a positional index into a
+/// `Vec<Arc<Pool>>` — fine while the pool set was fixed at startup, and a
+/// silent-corruption engine once pools come and go. A recycled slot would
+/// decrement the wrong pool's inflight counter, route a model to an unrelated
+/// worker set, and publish one pool's endpoint counts into another's CRD status,
+/// all without an error. Ids that merely *shifted* (from compacting the vec)
+/// would mis-target every live observation at once.
+///
+/// The field is **private** on purpose: it makes the compiler enumerate every
+/// site that used to index by it, instead of leaving that to a grep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PoolId(u64);
+
+impl PoolId {
+    /// Mint a fresh id. Monotonic and never recycled, so a stale id resolves to
+    /// `None` rather than to somebody else's pool.
+    pub fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        PoolId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// A placeholder for candidates no real pool scored — a policy simulation
+    /// evaluates hypothetical candidates that belong to no pool. `next()` starts
+    /// at 1, so this is never minted and never registered: looking it up
+    /// resolves to nothing, which is exactly right for a candidate that exists
+    /// only in a simulation.
+    pub const UNSCORED: PoolId = PoolId(0);
+
+    /// Construct a specific id. Test-only — production ids come from
+    /// [`PoolId::next`], and a public raw constructor would reintroduce exactly
+    /// the aliasing this type exists to prevent.
+    #[cfg(test)]
+    pub fn from_raw(n: u64) -> Self {
+        PoolId(n)
+    }
+}
+
+impl std::fmt::Display for PoolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pool#{}", self.0)
+    }
+}
+
+/// A worker set's stable identity, as opposed to the runtime-assigned `PoolId`.
+/// This is what reconciles match on.
+///
+/// `namespace` is `None` for TOML worker sets. It is part of the key so
+/// same-named sets in different namespaces don't merge into one pool.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PoolKey {
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+impl PoolKey {
+    pub fn local(name: impl Into<String>) -> Self {
+        Self {
+            namespace: None,
+            name: name.into(),
+        }
+    }
+
+    #[allow(dead_code)] // the Kubernetes path constructs these
+    pub fn namespaced(namespace: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            namespace: Some(namespace.into()),
+            name: name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for PoolKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.namespace {
+            Some(ns) => write!(f, "{ns}/{}", self.name),
+            None => write!(f, "{}", self.name),
+        }
     }
 }
 

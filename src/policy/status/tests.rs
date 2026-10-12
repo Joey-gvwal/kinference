@@ -1,7 +1,7 @@
 use super::*;
 use crate::policy::compile::CompiledPolicy;
 use crate::policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
-use crate::policy::store::{Unresolved, UnresolvedReason};
+use crate::policy::resolve::{Unresolved, UnresolvedReason};
 
 fn dest(name: &str, aliases: &[(&str, &str)]) -> ResolvedWorkerSet {
     ResolvedWorkerSet {
@@ -85,7 +85,7 @@ fn resolved(dests: Vec<ResolvedWorkerSet>, unresolved: Vec<Unresolved>) -> Resol
         dangling_policy: None,
         destinations: dests
             .into_iter()
-            .map(crate::policy::store::ResolvedDestination::Local)
+            .map(crate::policy::resolve::ResolvedDestination::Local)
             .collect(),
         unresolved,
         parents: vec![ParentRef {
@@ -132,7 +132,7 @@ fn no_condition_message_has_a_double_space() {
     );
     collect(
         &rejected_worker_set_status(
-            &crate::policy::worker_sets::RejectReason::MissingKvBlockSize,
+            &crate::policy::rejection::RejectReason::MissingKvBlockSize,
             &[],
             None,
         )
@@ -201,7 +201,7 @@ fn state_tokens_compose_across_the_kinds() {
     // set has no endpoints by construction, and `NotReady` too would read as
     // a second, separate problem.
     let broken = rejected_worker_set_status(
-        &crate::policy::worker_sets::RejectReason::MissingKvBlockSize,
+        &crate::policy::rejection::RejectReason::MissingKvBlockSize,
         &[],
         None,
     );
@@ -394,7 +394,7 @@ fn an_unbound_worker_set_reports_the_reason_it_did_not_bind() {
 /// an operator now has to go fix.
 #[test]
 fn a_rejected_worker_set_still_reports_who_named_it() {
-    let reason = crate::policy::worker_sets::RejectReason::MissingKvBlockSize;
+    let reason = crate::policy::rejection::RejectReason::MissingKvBlockSize;
     let s = rejected_worker_set_status(&reason, &["chat".to_string()], None);
     assert_eq!(s.referenced_by, vec!["chat".to_string()]);
     assert_eq!(cond(&s, "Accepted").status, "False");
@@ -415,7 +415,7 @@ fn unreferenced_status_is_stable_across_reconciles() {
 
 #[test]
 fn a_rejected_worker_set_reports_why_and_clears_its_counts() {
-    let reason = crate::policy::worker_sets::RejectReason::UnknownProfile {
+    let reason = crate::policy::rejection::RejectReason::UnknownProfile {
         defined: vec!["h100".into(), "a100".into()],
     };
     let st = rejected_worker_set_status(&reason, &[], None);
@@ -444,7 +444,7 @@ fn a_rejected_worker_set_reports_why_and_clears_its_counts() {
 /// broken worker set rewrites its status every tick.
 #[test]
 fn a_persistent_rejection_does_not_rewrite_its_transition_time() {
-    let reason = crate::policy::worker_sets::RejectReason::MissingKvBlockSize;
+    let reason = crate::policy::rejection::RejectReason::MissingKvBlockSize;
     let first = rejected_worker_set_status(&reason, &[], None);
     let second = rejected_worker_set_status(&reason, &[], Some(&first));
     assert_eq!(
@@ -1206,7 +1206,7 @@ fn an_unchanged_policy_produces_an_identical_status() {
 #[test]
 fn a_refused_provider_reports_the_reason_and_the_fix() {
     let s = rejected_provider_status(
-        crate::policy::store::UnresolvedReason::UnsupportedApiFormat,
+        crate::policy::resolve::UnresolvedReason::UnsupportedApiFormat,
         None,
     );
     let accepted = &s.conditions[0];
@@ -1244,7 +1244,7 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
 
 #[test]
 fn every_refusal_reason_gets_its_own_message() {
-    use crate::policy::store::UnresolvedReason as R;
+    use crate::policy::resolve::UnresolvedReason as R;
     let msgs: Vec<String> = [
         R::UnsupportedApiFormat,
         R::Incomplete,

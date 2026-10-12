@@ -219,12 +219,12 @@ fn empty_model_list_is_noop() {
 // reached. A request for `qwen-simple` 404'd while the worker set's own
 // status listed it.
 
-fn ws(aliases: &[(&str, &str)]) -> crate::policy::store::ResolvedWorkerSet {
-    crate::policy::store::ResolvedWorkerSet {
+fn ws(aliases: &[(&str, &str)]) -> crate::policy::resolve::ResolvedWorkerSet {
+    crate::policy::resolve::ResolvedWorkerSet {
         name: "set-a".into(),
         namespace: "default".into(),
         labels: std::collections::BTreeMap::new(),
-        pool_id: crate::pool::PoolId::from_raw(0),
+        pool_id: crate::policy::PoolId::from_raw(0),
         service_name: "svc".into(),
         service_port: None,
         kv_events_declared: false,
@@ -309,8 +309,8 @@ fn aliases_on_a_later_destination_are_found() {
 fn resolved_provider(
     name: &str,
     models: &[(&str, &str, Option<u32>)],
-) -> crate::policy::store::ResolvedProvider {
-    crate::policy::store::ResolvedProvider {
+) -> crate::policy::resolve::ResolvedProvider {
+    crate::policy::resolve::ResolvedProvider {
         uid: None,
         name: name.into(),
         namespace: "default".into(),
@@ -570,7 +570,7 @@ fn policy_fleet_with(
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
         let mut spec = crate::config::test_spec(name, 16);
-        spec.key = crate::config::PoolKey::namespaced("default", *name);
+        spec.key = crate::policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(
             PoolId::next(),
@@ -581,7 +581,7 @@ fn policy_fleet_with(
             id += 1;
             p.registry.register(id, offline_worker(model, addr));
         }
-        bound.insert(crate::config::PoolKey::namespaced("default", *name), p.id);
+        bound.insert(crate::policy::PoolKey::namespaced("default", *name), p.id);
         worker_sets.push(cr::<crate::policy::crd::InferenceWorkerSet>(
             serde_json::json!({
                 "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceWorkerSet",
@@ -616,7 +616,7 @@ fn policy_fleet_with(
         "spec": spec
     }));
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::store::resolve(
+    store.publish(Arc::new(crate::policy::resolve::resolve(
         &[pool],
         &[policy],
         &worker_sets,

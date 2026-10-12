@@ -27,7 +27,7 @@ use k8s_openapi::api::core::v1::{Service, ServicePort};
 use kube::ResourceExt;
 
 use super::crd::IntOrString;
-use super::store::ObjKey;
+use super::resolve::ObjKey;
 
 /// Every `Service` in scope, keyed by identity.
 ///
@@ -47,7 +47,7 @@ pub struct ServiceIndex {
 
 /// Why a port reference did not resolve to a number.
 ///
-/// Separate from [`super::store::UnresolvedReason`] because these are facts
+/// Separate from [`super::resolve::UnresolvedReason`] because these are facts
 /// about a Service, not about a destination, and every one of them is a
 /// different fix: `NotListed` is wait, `ServiceNotFound` is a typo in
 /// `serviceRef.name`, `UnknownPortName` is a typo in `serviceRef.port`, and
@@ -86,7 +86,7 @@ pub enum UnresolvedPort {
 
 impl UnresolvedPort {
     /// Stable string for status conditions and logs, in the same style as
-    /// [`super::store::UnresolvedReason::as_str`].
+    /// [`super::resolve::UnresolvedReason::as_str`].
     pub fn as_str(&self) -> &'static str {
         match self {
             UnresolvedPort::NotListed => "NotListed",

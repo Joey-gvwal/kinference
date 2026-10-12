@@ -45,8 +45,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{PoolKey, PoolSpec};
-use crate::pool::{Pool, PoolId, PoolMap, PoolRegistry};
+use crate::config::PoolSpec;
+use crate::policy::PoolId;
+use crate::policy::PoolKey;
+use crate::pool::{Pool, PoolMap, PoolRegistry};
 
 /// Side effects the manager cannot perform itself, because they belong to
 /// subsystems it must not depend on (discovery, telemetry, the coordinator

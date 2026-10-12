@@ -5,7 +5,7 @@
 //! attached to — so they run where those are known: on the server, for the
 //! pools whose `policyRef` names the policy, and in `kinfctl check`, for pools
 //! among its inputs. Both pass `ResolvedPool`s built by the same
-//! [`super::store::resolve`], so the CLI cannot disagree with the cluster about
+//! [`super::resolve::resolve`], so the CLI cannot disagree with the cluster about
 //! what a name refers to.
 //!
 //! Only DECLARED names are consulted — object names, labels, worker-set
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::crd::{BackendType, InferencePolicySpec};
 use super::predicate::{AttrKind, Matcher};
-use super::store::{ResolvedDestination, ResolvedPool};
+use super::resolve::{ResolvedDestination, ResolvedPool};
 use super::warning::{PolicyWarning, WarningCode, did_you_mean};
 
 /// The result of checking one policy's names against a set of pools.
@@ -369,7 +369,7 @@ impl Checker<'_, '_> {
     }
 
     fn model(&mut self, name: &str, path: &str, rule: &str) {
-        if name == crate::monitor::AUTO_MODEL {
+        if name == super::AUTO_MODEL {
             self.out.push(PolicyWarning::new(
                 WarningCode::UnknownModel,
                 path,

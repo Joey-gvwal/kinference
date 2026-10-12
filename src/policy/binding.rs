@@ -74,11 +74,11 @@ use super::crd::{
     BackendBinding, BackendBindingSpec, BindingBackendRef, BindingClaim, BindingObjectReference,
     InferencePool,
 };
-use super::services::{ServiceIndex, UnresolvedPort};
-use super::store::{
-    GATEWAY_BACKEND_GROUP, GATEWAY_BACKEND_KIND, POLICY_GROUP, PolicyStore, ResolvedDestination,
-    ResolvedPool,
+use super::resolve::{
+    GATEWAY_BACKEND_GROUP, GATEWAY_BACKEND_KIND, POLICY_GROUP, ResolvedDestination, ResolvedPool,
 };
+use super::services::{ServiceIndex, UnresolvedPort};
+use super::store::PolicyStore;
 
 /// Server-side-apply field manager. Every field this writer sets is owned by
 /// this name, so a field it STOPS setting is removed on the next apply — which

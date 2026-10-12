@@ -395,7 +395,7 @@ impl KinferenceService {
         &self,
         group: &ScoredGroup,
         group_idx: usize,
-        dest: &crate::policy::store::ResolvedWorkerSet,
+        dest: &crate::policy::resolve::ResolvedWorkerSet,
         canonical_model: &str,
     ) -> Vec<crate::policy::engine::Candidate> {
         let now = Instant::now();

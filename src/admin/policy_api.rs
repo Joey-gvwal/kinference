@@ -46,13 +46,15 @@ use tokio::sync::Semaphore;
 
 use crate::metrics::MetricsRegistry;
 use crate::picker::{self, WorkerScore};
+use crate::policy::PoolId;
 use crate::policy::classify;
 use crate::policy::crd::{OnEmpty, Unmatched};
 use crate::policy::engine::{Candidate, CandidateTarget, ObjectKey};
 use crate::policy::explain::{self, Explanation, RuleStep};
 use crate::policy::predicate::{CandidateAttrs, QOS_VALUES, RequestAttrs};
-use crate::policy::store::{PolicyIndex, PolicyStore, ResolvedPool};
-use crate::pool::{PoolId, PoolRegistry};
+use crate::policy::resolve::{PolicyIndex, ResolvedPool};
+use crate::policy::store::PolicyStore;
+use crate::pool::PoolRegistry;
 
 // ── limits ───────────────────────────────────────────────────────────────────
 
@@ -482,7 +484,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
         .destinations
         .iter()
         .map(|d| match d {
-            crate::policy::store::ResolvedDestination::Local(w) => {
+            crate::policy::resolve::ResolvedDestination::Local(w) => {
                 let mut models: Vec<&str> = w
                     .aliases
                     .iter()
@@ -503,7 +505,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                     "declaredModels": models,
                 })
             }
-            crate::policy::store::ResolvedDestination::Provider(p) => {
+            crate::policy::resolve::ResolvedDestination::Provider(p) => {
                 let mut models: Vec<&str> = p
                     .models
                     .iter()
@@ -533,7 +535,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
 /// The policy a pool names, as `{name, resolved}` — or `null` when it names
 /// none and serves every request as asked.
 fn policy_ref_json(pool: &ResolvedPool) -> Value {
-    use crate::policy::store::DanglingPolicy;
+    use crate::policy::resolve::DanglingPolicy;
     match &pool.dangling_policy {
         Some(DanglingPolicy::NotFound { name }) => {
             json!({"name": name, "resolved": false, "problem": "NotFound"})
@@ -985,7 +987,7 @@ fn model_attr_set(
     if requested.is_empty() {
         return Vec::new();
     }
-    let refs: Vec<&crate::policy::store::ResolvedWorkerSet> = pool
+    let refs: Vec<&crate::policy::resolve::ResolvedWorkerSet> = pool
         .map(|p| p.local_destinations().collect())
         .unwrap_or_default();
 

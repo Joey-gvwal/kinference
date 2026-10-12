@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Engine, WorkerConfig};
-use crate::pool::PoolId;
+use crate::policy::PoolId;
 
 // `Engine` is no longer used to dispatch metric-name lookups (we probe both
 // vLLM- and SGLang-prefixed names on every scrape). It IS still used as a
