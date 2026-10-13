@@ -1,19 +1,6 @@
-//! Wait-time predictor + top-K-with-tie-extension endpoint picker.
+//! Wait-time predictor and top-K-with-tie-extension endpoint picker.
 //!
-//! Originally ported from
-//! `/Users/william/devel/gw-pc/examples/plugins/llm_prefix_selector/src/plugin.rs`
-//! (the gw-pc `llm-prefix-selector` WASM plugin); the algorithm has
-//! since diverged — kinference adds a dedicated `decode_contention_ms`
-//! term (driven by `forward_pass_ms`) and dropped the older
-//! discount-floor/ceiling lerp in favor of a strict
-//! `(1 - progress)` shape. The top-K / tie-extension / cache-
-//! replication logic is unchanged from the original port.
-//!
-//! Why preserve the algorithm exactly: divergent picks across the two
-//! paths would be confusing in incident review and would make A/B
-//! comparison across deployments
-//! impossible. Any future tuning should land here and in the plugin
-//! together.
+//! Pure arithmetic, no I/O.
 
 use std::fmt::Write;
 use std::time::Instant;
@@ -21,21 +8,8 @@ use std::time::Instant;
 use crate::config::{PickerConfig, PredictorConfig};
 use crate::inflight_prefixes::InflightSummary;
 
-/// Worker-score row produced by `monitor::scoring`. Pre-Pick/Observe
-/// refactor this was a proto-generated message (the `Score` RPC
-/// returned `repeated WorkerScore`); now it's a plain Rust struct
-/// since no caller needs it over the wire — the gRPC interface returns
-/// `chosen_endpoint` and that's it.
-///
-/// It lives HERE rather than in `monitor` because every operation on it is a
-/// function in this module — `predicted_wait_ms`, `compute_queue_cost`,
-/// `pick_endpoint`, `format_score_table`, `PickResult`. Defining it beside
-/// them is what lets this module, which does pure arithmetic and no I/O, stop
-/// depending on the request-path service that happens to fill it in.
-///
-/// The shape is a hand copy of the fields `metrics::MetricsSample` exposes;
-/// see `monitor::scoring::worker_score`, which is the one place that
-/// projection happens.
+/// One worker's inputs to the picker, projected from `metrics::MetricsSample`
+/// by `monitor::scoring::worker_score`.
 #[derive(Debug, Clone)]
 pub struct WorkerScore {
     pub name: String,
@@ -56,23 +30,17 @@ pub struct WorkerScore {
 pub struct WaitPrediction {
     pub base_ms: f32,
     pub q_ms: f32,
-    /// The effective per-entry queue rate used to derive `q_ms`.
-    /// Diagnostic only — lets the log surface whether queue cost came
-    /// from the configured baseline or the cold-saturation fallback.
+    /// The effective per-entry queue rate used to derive `q_ms`. Diagnostic
+    /// only: shows whether the cold-saturation fallback applied.
     pub q_rate_ms_per_entry: f32,
     pub prefill_ms: f32,
     pub cache_ms: f32,
-    /// U-shaped latency penalty driven by `WorkerScore.queue_running`
-    /// (vLLM's `num_requests_running`). Captures the "scheduler-tick
-    /// danger zone" where a worker has enough decode load to contend
-    /// for GPU but not enough to absorb new prefills into a running
-    /// batch — empirically peaks at qr=2. See [`q_running_penalty_ms`].
+    /// U-shaped penalty over the worker's running request count. See
+    /// [`q_running_penalty_ms`].
     pub q_running_ms: f32,
     /// Flat per-active-decode cost: `(q_running + q_inflight) ×
-    /// forward_pass_ms`. Models the marginal cost to the new request
-    /// of joining a batch with N decodes in progress — separate from
-    /// any prefill-quadratic contribution. Inert when
-    /// `PredictorConfig.forward_pass_ms == 0`.
+    /// forward_pass_ms`, the cost of joining a batch with N decodes in
+    /// progress. Inert when `forward_pass_ms == 0`.
     pub decode_contention_ms: f32,
 }
 
@@ -97,12 +65,8 @@ impl WaitPrediction {
 /// cost: each uncached query attends to every token in the prompt,
 /// so scales with prompt length).
 ///
-/// Used in three places — keep these in sync if the formula changes:
-/// 1. `predicted_wait_ms`: our new request's own prefill cost.
-/// 2. `compute_queue_cost`: estimated_prefill_ms for each inflight,
-///    using the inflight's own `total_at_dispatch`. Drives progress
-///    calculation and per-position contention contribution.
-/// 3. `inflight_discount`: same as above (consumed inside the helper).
+/// Used for the new request's prefill in `predicted_wait_ms`, and for each
+/// inflight's (with its own `total_at_dispatch`) in `compute_queue_cost`.
 pub fn prefill_ms_for(predictor: &PredictorConfig, uncached: u32, total: u32) -> f32 {
     let u = uncached as f32;
     let t = total as f32;
@@ -116,7 +80,7 @@ pub fn prefill_ms_for(predictor: &PredictorConfig, uncached: u32, total: u32) ->
 ///
 /// `per_dispatch` is the per-dispatch overlap count `|P_new ∩ Pᵢ|`,
 /// in dispatch order (oldest first). `kv_match` is the radix-tree
-/// match count `|P_new ∩ KV|` — the current snapshot. `alpha` is
+/// match count `|P_new ∩ KV|`, the current snapshot. `alpha` is
 /// the eviction-decay factor: each layer "one request older" gets
 /// multiplied by an additional `alpha`.
 ///
@@ -142,9 +106,8 @@ pub fn prefill_ms_for(predictor: &PredictorConfig, uncached: u32, total: u32) ->
 /// Limit behavior:
 /// - `α = 1` (no eviction): each layer contributes its incremental
 ///   prefix beyond all newer layers, so the sum equals the longest
-///   matched prefix across all sources — i.e.
-///   `max(o₀, o₁, …, o_k, kv_match)`. Matches the "100% retention →
-///   union of all cached prefixes" intuition.
+///   matched prefix across all sources, i.e.
+///   `max(o₀, o₁, …, o_k, kv_match)`.
 /// - `α = 0`: only the L₀ term survives, so the sum collapses to
 ///   the most-recent dispatch's overlap (or `kv_match` if there are
 ///   no pending dispatches).
@@ -153,11 +116,8 @@ pub fn prefill_ms_for(predictor: &PredictorConfig, uncached: u32, total: u32) ->
 ///   newest. Older layers progressively discounted. Sum is
 ///   monotonic in α (raising α never decreases overlap).
 pub fn compute_layered_overlap(per_dispatch: &[f32], kv_match: f32, alpha: f32) -> f32 {
-    // Iterate newest-first so the freshest dispatch is L₀ (weight
-    // α⁰ = 1). `cum_max` is Mᵢ — the longest covered prefix from
-    // strictly newer layers; a layer can only add blocks beyond
-    // that, never debit (hence the `.max(0.0)` clamp on each
-    // incremental term).
+    // Newest-first, so the freshest dispatch is L₀ (weight 1). `cum_max`
+    // is Mᵢ.
     let mut total = 0.0_f32;
     let mut cum_max = 0.0_f32;
     let mut weight = 1.0_f32;
@@ -208,40 +168,32 @@ pub fn scale_per_dispatch_by_progress(
         .collect()
 }
 
-/// Predicted wait (ms) for sending this prompt to worker `w`. Sum of
-/// four components:
+/// Predicted wait (ms) for sending this prompt to worker `w`; see
+/// [`WaitPrediction`] for the terms:
 ///
-///   base_ms    = constant per-request intercept
-///   q_ms       = time-progressed inflight cost + unknown-queue cost
-///   prefill_ms = prefill_ms_for(uncached_blocks, total_blocks)
-///                = a × u + c × u × t  (see `prefill_ms_for`)
-///   cache_ms   = cache_pressure_penalty_ms * kv_cache_usage
+///   base_ms              = constant per-request intercept
+///   q_ms                 = time-progressed inflight cost + unknown-queue cost
+///   prefill_ms           = prefill_ms_for(uncached_blocks, total_blocks)
+///   cache_ms             = cache_pressure_penalty_ms * kv_cache_usage
+///   q_running_ms         = q_running_penalty_ms(...)
+///   decode_contention_ms = effective_qr * forward_pass_ms
 ///
-/// Queue cost — see `compute_queue_cost` for the detail — is the sum of
-/// two contributions:
+/// Queue cost (see `compute_queue_cost`) is the sum of:
 ///
-/// - **Remaining-prefill inflight cost**: each in-flight dispatch we
-///   have on the worker contributes
+/// - Remaining-prefill inflight cost: each in-flight dispatch we have on the
+///   worker contributes
 ///   `(1 - progress) × prefill_ms_for(uncached_at_dispatch, total_at_dispatch)`,
-///   i.e. the fraction of its prefill work still in the future.
-///   Progress is `elapsed / estimated_prefill`, clamped to [0, 1].
-///   At progress=1 the dispatch has finished prefilling and contributes
-///   0 here — its decode-time cost is modeled by the separate
-///   `decode_contention_ms` term in `predicted_wait_ms`. Inflights at
-///   positions > N (`cfg.inflight_concurrent_capacity`) haven't been
-///   admitted yet and contribute the full prefill cost regardless of
-///   elapsed time.
+///   with progress `elapsed / estimated_prefill` clamped to [0, 1]. Inflights
+///   past position N (`inflight_concurrent_capacity`) haven't been admitted,
+///   so contribute their full prefill cost.
 ///
-/// - **Unknown-queue cost**: queue entries vLLM reports as waiting
+/// - Unknown-queue cost: queue entries vLLM reports as waiting
 ///   that we have no inflight-dispatch record for
 ///   (`max(0, queue_waiting - inflight_count)`) at
 ///   `q_rate_ms_per_entry`. Cold-saturation can promote that rate to
 ///   `cfg.saturated_cold_ms_per_entry`.
 ///
-/// `now` is the score-time clock reading, passed in for testability —
-/// production callers grab `Instant::now()` once at the top of the
-/// pick critical section so every worker's discount is computed
-/// against the same time anchor.
+/// `now` is passed in so every worker is scored against the same instant.
 ///
 /// `total_blocks == 0` (metric unavailable, or prompt smaller than one
 /// block) treats uncached_blocks as 0 rather than producing NaN.
@@ -258,20 +210,12 @@ pub fn predicted_wait_ms(
 
     let cache_ms = predictor.cache_pressure_penalty_ms * w.kv_cache_usage;
 
-    // Shadow inflight count = picks we've made on this worker that
-    // haven't yet shown up in the engine's scraped metrics. Fold
-    // those into the U-shape lookup so a worker we just dispatched
-    // to doesn't look stale-clean at qr=0 — see comment on
+    // Picks on this worker not yet visible in scraped metrics; see
     // `q_running_penalty_ms`.
     let q_inflight = inflight_summaries.len() as u32;
     let q_running_ms = q_running_penalty_ms(w.queue_running, q_inflight, predictor);
 
-    // Flat per-active-decode contention cost. Independent of prefill
-    // quadratic — captures the marginal forward-pass cost the new
-    // request pays once admitted to a batch with N decodes in flight.
-    // Uses `effective_qr = q_running + q_inflight` (same as the
-    // U-shape penalty) to include just-dispatched requests the
-    // engine hasn't yet surfaced in the scraped metric.
+    // Includes just-dispatched requests, like the U-shape penalty.
     let effective_qr = w.queue_running.saturating_add(q_inflight) as f32;
     let decode_contention_ms = effective_qr * predictor.forward_pass_ms;
 
@@ -286,50 +230,22 @@ pub fn predicted_wait_ms(
     }
 }
 
-/// U-shaped latency penalty driven by the worker's *effective*
-/// in-decode request count — vLLM's scraped `num_requests_running`
-/// PLUS our own shadow inflight count (picks we've dispatched but
-/// the engine hasn't yet reflected in metrics).
+/// U-shaped latency penalty over the worker's effective running count:
+/// vLLM's scraped `num_requests_running` plus our picks the engine hasn't
+/// reflected yet. Without the latter, concurrent picks within one metrics
+/// refresh would all see an idle worker and pile onto it.
 ///
-/// Why fold both signals: the engine's metric refreshes every ~50ms.
-/// In that window the picker can route to a worker that *looks*
-/// qr=0 because the engine hasn't yet acknowledged a recent dispatch.
-/// Two concurrent picks see qr=0 inside the same refresh interval
-/// and both target the same "clean" worker, creating self-induced
-/// contention that the next refresh would have prevented. Treating
-/// `effective_qr = qr + q_inflight` closes that staleness window —
-/// a worker we just shipped a request to is no longer a qr=0 target.
-///
-/// Empirically, on a cache-poor concurrent workload the probability
-/// of a new prefill landing in a slow-mode TTFT (>3s vs ~1.6s
-/// median) follows a U-shape in `effective_qr`:
-///
-/// - **effective_qr = 0**: ~7% slow-mode rate. Worker is idle, prefill
-///   runs alone, no GPU contention.
-/// - **effective_qr = 1-2**: ~20% slow-mode rate. Worker is decoding
-///   1-2 requests — enough to compete for GPU bandwidth but not
-///   enough to fold the new prefill into the running batch's forward
-///   pass. This is the "contention zone."
-/// - **effective_qr = 3-4**: ~18% slow-mode rate. Starting to recover.
-/// - **effective_qr ≥ 5**: ~12% slow-mode rate. Worker's GPU is hot
-///   enough that the new prefill can ride along in the existing
-///   batch's forward pass for a near-free first token.
-///
-/// We model the *expected* TTFT cost of landing in the contention
-/// zone as a piecewise-linear tent: ramps from 0 at `effective_qr=0`
-/// to `peak` at `peak_qr`, then declines back to 0 at `falloff_qr`.
-/// At or beyond `falloff_qr` the term is 0 (ride-along regime).
-///
-/// Setting `peak <= 0.0` disables the term entirely.
+/// With one or two running requests, a new prefill contends for the GPU but
+/// can't join the running batch; at five or more it rides along nearly free.
+/// Modeled as a tent: 0 at `effective_qr = 0`, `peak` at `peak_qr`, back to 0
+/// at `falloff_qr` and beyond. `peak <= 0.0` disables it.
 fn q_running_penalty_ms(qr: u32, q_inflight: u32, predictor: &PredictorConfig) -> f32 {
     let peak = predictor.q_running_penalty_peak_ms;
     let effective_qr = qr.saturating_add(q_inflight);
     if peak <= 0.0 || effective_qr == 0 {
         return 0.0;
     }
-    // Guard against degenerate config: peak_qr must be >= 1 (else
-    // the rising-edge denominator is 0); falloff must be > peak_qr
-    // (else the falling-edge denominator is 0 or negative).
+    // Keep both denominators positive: peak_qr >= 1, falloff > peak_qr.
     let peak_qr = predictor.q_running_penalty_peak_qr.max(1) as f32;
     let falloff = predictor
         .q_running_penalty_falloff_qr
@@ -347,11 +263,8 @@ fn q_running_penalty_ms(qr: u32, q_inflight: u32, predictor: &PredictorConfig) -
     }
 }
 
-/// All the intermediate values in the queue-cost calculation. Used
-/// both inside `predicted_wait_ms` (to drive the `q_ms` term) and at
-/// trace logging sites (to surface the constituent pieces so operators
-/// can see exactly how the per-position discount works out per
-/// worker).
+/// The intermediate values of the queue-cost calculation, for
+/// `predicted_wait_ms` and for logging and the observation CSV.
 #[derive(Debug, Clone)]
 pub struct QueueCostBreakdown {
     /// Per-entry queue rate after the cold-saturation check. Equals
@@ -360,57 +273,35 @@ pub struct QueueCostBreakdown {
     /// completion history AND looks cache-saturated AND has waiting
     /// queue depth.
     pub q_rate_ms_per_entry: f32,
-    /// `q_rate_ms_per_entry * w.queue_waiting`. Diagnostic only — the
-    /// legacy "every queue entry costs the same" reading, retained in
-    /// the CSV for offline replay.
+    /// `q_rate_ms_per_entry * w.queue_waiting`. Diagnostic only, kept in
+    /// the CSV.
     pub q_ms_constant: f32,
-    /// `Σ position_contribs[i].contrib_ms + unknown_q_count * q_rate`.
-    /// This IS the q_ms that goes into the predictor; the field name
-    /// is kept for backward-compat with the trace log + CSV.
+    /// Inflight position costs plus `unknown_q_count * q_rate`. Same as
+    /// `q_ms`; named to match the CSV column.
     pub q_ms_workload: f32,
-    /// q_ms used by the predictor. Equal to `q_ms_workload` in the
-    /// current model; the separate field is retained so future model
-    /// revisions can distinguish "model output" from "model
-    /// internals" without changing the field shape.
+    /// q_ms used by the predictor.
     pub q_ms: f32,
-    /// Total uncached blocks summed across our inflight dispatches.
-    /// CSV preserves this for offline analysis.
+    /// Total uncached blocks across our inflight dispatches, for the CSV.
     pub inflight_workload_blocks: u32,
 }
 
-/// Time-progressed discount for one inflight slot.
+/// `(progress, discount)` for one inflight slot, where `discount` is the
+/// fraction of its prefill cost still in the future (1 at progress 0, 0 once
+/// prefill is done; decode cost is `decode_contention_ms`).
 ///
-/// `discount` represents the fraction of this inflight's prefill cost
-/// of this inflight's prefill that's still in the future.
-///
-/// At `progress=0` (just admitted, no prefill done) → discount = 1.0
-/// (full prefill cost ahead). At `progress=1` (prefill complete,
-/// now decoding) → discount = 0.0 (no remaining prefill cost; the
-/// per-decode contention is modeled separately by the
-/// `decode_contention_ms` term in `predicted_wait_ms`).
-///
-/// `position` is 1-indexed in the oldest-first ordering. Positions
-/// beyond `n` (batch capacity) haven't been admitted yet → their
-/// elapsed time reflects queueing wait, not prefill progress, so they
-/// get the full prefill cost ahead (discount = 1.0).
-///
-/// `estimated_prefill_ms = 0` (warm-hit inflight with nothing to
-/// prefill) → discount = 0.0 immediately: no prefill work to contend
-/// over.
+/// `position` is 1-indexed, oldest first. Positions beyond `n` (batch
+/// capacity) haven't been admitted, so their elapsed time is queueing, not
+/// progress: discount 1. With nothing to prefill, discount is 0.
 fn inflight_discount(
     position: u32,
     n: u32,
     elapsed_ms: f32,
     estimated_prefill_ms: f32,
 ) -> (f32, f32) {
-    // Position cap. Position > N means this inflight hasn't been
-    // admitted to the batch yet; its elapsed time is queueing wait,
-    // not progress → full prefill cost ahead.
     if position > n {
         return (0.0, 1.0);
     }
     if estimated_prefill_ms <= 0.0 {
-        // No prefill work to wait through → discount = 0 (nothing left).
         return (1.0, 0.0);
     }
     let progress = (elapsed_ms / estimated_prefill_ms).clamp(0.0, 1.0);
@@ -430,8 +321,8 @@ pub fn compute_queue_cost(
         && w.queue_waiting > 0
         && predictor.saturated_cold_ms_per_entry > q_rate_ms_per_entry
     {
-        // No completion history AND cache says we're stuck AND there's
-        // actually a queue to drain — cold-saturation fallback applies.
+        // Cold-saturation fallback: no completions, a saturated cache, and
+        // a queue.
         q_rate_ms_per_entry = predictor.saturated_cold_ms_per_entry;
     }
 
@@ -445,13 +336,9 @@ pub fn compute_queue_cost(
         .min(u32::MAX as u64) as u32;
     let unknown_q_count = w.queue_waiting.saturating_sub(inflight_count);
 
-    // When `queue_waiting > 0` the batch is at capacity (or vLLM is
-    // otherwise declining admission), so every inflight is treated
-    // as past-capacity (full prefill cost ahead, regardless of
-    // elapsed time).
+    // A nonzero queue means the batch is at capacity, so treat every
+    // inflight as not yet admitted.
     let capacity = if w.queue_waiting > 0 {
-        // Effective N=0: every position is > N → everyone treated
-        // as queued behind, full prefill cost ahead.
         0
     } else {
         predictor.inflight_concurrent_capacity
@@ -460,10 +347,7 @@ pub fn compute_queue_cost(
     let mut position_cost_ms = 0.0_f32;
     for (idx, summary) in inflight_summaries.iter().enumerate() {
         let position = (idx as u32).saturating_add(1);
-        // Estimate this inflight's prefill cost using ITS own
-        // `total_at_dispatch` (not our new request's total_blocks).
-        // Quadratic formula: attention cost scales with the inflight's
-        // own prompt length, not ours.
+        // Uses the inflight's own prompt length, not ours.
         let estimated_prefill_ms = prefill_ms_for(
             predictor,
             summary.uncached_at_dispatch,
@@ -475,8 +359,6 @@ pub fn compute_queue_cost(
             .unwrap_or(0.0);
         let (_progress, discount) =
             inflight_discount(position, capacity, elapsed_ms, estimated_prefill_ms);
-        // Contribution = discount × estimated_prefill_ms. (Same units
-        // as the queue cost we're summing into.)
         position_cost_ms += discount * estimated_prefill_ms;
     }
 
@@ -493,30 +375,20 @@ pub fn compute_queue_cost(
     }
 }
 
-/// Outcome of a pick. `Some(idx)` is the chosen index into the input
-/// slice; `None` means there were no scoreable workers (empty input).
-///
-/// `inflight` is a parallel slice (same length, same order as
-/// `scores`) of per-worker in-flight pick counts. It is used SOLELY
-/// as a tie-breaker within the top-K pool: workers tied on predicted
-/// wait but with lower in-flight counts win over those with higher
-/// counts. Inflight does not enter the predicted-wait calculation
-/// itself. Pass a slice of zeros when in-flight tracking is disabled
-/// — the tie-break will be a no-op and behavior matches the legacy
-/// picker.
-/// Outcome of a successful pick. `worker` is the chosen
-/// `WorkerScore`; `replication_fired` is `true` when the cache-
-/// replication override swapped the picker's normal pick for a
-/// cold-idle alternative (see [`cache_replication_override`]).
-/// Captured in the CSV so offline analysis can separate baseline
-/// picks from replication-driven ones — and so the analyze script
-/// can compute "what fraction of picks fired replication, and were
-/// those picks systematically worse?".
+/// Outcome of a successful pick. `replication_fired` is true when the
+/// cache-replication override replaced the normal pick (see
+/// [`cache_replication_override`]); recorded in the CSV.
 pub struct PickResult<'a> {
     pub worker: &'a WorkerScore,
     pub replication_fired: bool,
 }
 
+/// Pick a worker, or `None` when `scores` is empty.
+///
+/// `inflight`, `inflight_workload` and `kv_blocks_per_worker` are parallel to
+/// `scores`. `inflight` (per-worker in-flight pick counts) is used only as a
+/// tie-breaker within the top-K pool; pass zeros when in-flight tracking is
+/// disabled.
 pub fn pick_endpoint<'a>(
     scores: &'a [WorkerScore],
     predictor: &PredictorConfig,
@@ -540,11 +412,8 @@ pub fn pick_endpoint<'a>(
         "inflight_workload must be parallel to scores"
     );
 
-    // (index, total predicted wait_ms) for each worker. Unlike the WASM
-    // plugin we don't have a separate "candidate" set from the gateway
-    // to join against — every WorkerScore we receive is a candidate by
-    // construction (it's already filtered to workers serving the
-    // requested model via `WorkerRegistry::workers_for_model`).
+    // (index, predicted wait_ms). Every worker here already serves the
+    // requested model.
     let mut scored: Vec<(usize, f32)> = scores
         .iter()
         .enumerate()
@@ -556,22 +425,10 @@ pub fn pick_endpoint<'a>(
         })
         .collect();
 
-    // Top-K random anti-dogpiling. Sort by predicted wait ascending,
-    // form a pool of the best `effective_k` candidates, then uniform
-    // random pick within the pool.
-    //
-    // Critical: the pool extends past `effective_k` to include any
-    // candidates **tied at the K-th cutoff**. Without that, a cold
-    // fleet (all workers with identical zero-stats and no prefix
-    // match) would have bit-identical predicted waits across all N
-    // candidates — `sort_by` is stable, so position 0 would always be
-    // the first endpoint, and K=1 would pile every request there.
-    // Extending the pool through ties recovers the "ties at min get
-    // uniform random pick" behavior as a degenerate case of top-K.
-    //
-    // partial_cmp + unwrap_or(Equal) protects against NaN (which would
-    // sort to the end and never be picked unless every candidate is
-    // NaN — degenerate but graceful).
+    // Top-K random, against dogpiling: sort by predicted wait, take the best
+    // `effective_k` plus anything tied at the cutoff, and pick uniformly.
+    // Without the tie extension, a cold fleet with identical predictions
+    // would send every request to the first worker.
     scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let n = scored.len();
     let effective_k = std::cmp::max(
@@ -580,12 +437,8 @@ pub fn pick_endpoint<'a>(
     )
     .max(1)
     .min(n);
-    // Cutoff: the larger of (a) the K-th best predicted_ms (for the
-    // top-K + tie-extension semantics) and (b) the best predicted_ms
-    // plus `tie_tolerance_ms` (for soft equality — workers within
-    // the tolerance band are eligible for the inflight tie-break
-    // even if not strictly tied). With tie_tolerance_ms == 0 this
-    // reduces to the pre-tolerance behavior.
+    // Cutoff: the larger of the K-th best predicted_ms and the best plus
+    // `tie_tolerance_ms`.
     let cutoff_wait = scored[effective_k - 1]
         .1
         .max(scored[0].1 + picker.tie_tolerance_ms);
@@ -595,14 +448,8 @@ pub fn pick_endpoint<'a>(
         .unwrap_or(n);
     let pool = &scored[..pool_end];
 
-    // In-flight tie-break: among workers in the pool (all within the
-    // top-K-with-ties of predicted wait), prefer those with the lowest
-    // current in-flight count. This breaks burst dogpile streaks
-    // without ever changing the picker's predicted-wait preference —
-    // a worker with better predicted_ms always beats one with worse
-    // predicted_ms, regardless of inflight. When all `inflight` values
-    // are zero (in-flight tracking disabled), this filter is a no-op
-    // and behavior matches the legacy picker.
+    // Within the pool, prefer the lowest in-flight count, to break up
+    // bursts. A no-op when in-flight tracking is disabled.
     let min_inflight_in_pool = pool.iter().map(|(i, _)| inflight[*i]).min().unwrap_or(0);
     let eligible: Vec<(usize, f32)> = pool
         .iter()
@@ -610,9 +457,7 @@ pub fn pick_endpoint<'a>(
         .copied()
         .collect();
 
-    // Uniform random pick within the eligible set. With one eligible
-    // candidate it IS the pick (argmin after tie-break); with more,
-    // it's a single modulo over a fresh 64-bit random.
+    // Uniform random pick within the eligible set.
     let chosen_idx = if eligible.len() == 1 {
         eligible[0].0
     } else {
@@ -632,17 +477,9 @@ pub fn pick_endpoint<'a>(
         }
     };
 
-    // Cache-replication override. If the picker just chose a
-    // committed-warm worker but the fleet's warm count is below the
-    // replication target, see whether there's a cold-idle alternative
-    // that costs only a little more — and if so, pay that small cost
-    // to seed cache on a second worker. See `cache_replication_override`
-    // for the full rationale.
     let final_idx =
         cache_replication_override(scores, picker, kv_blocks_per_worker, chosen_idx, &scored);
-    // `inflight_workload` and `now` are reserved for potential future
-    // tie-break extensions inside the override; presently the helper
-    // re-reads predicted_ms from the already-computed `scored` slice.
+    // A no-op: both are already used above.
     let _ = (inflight_workload, now);
 
     Some(PickResult {
@@ -660,28 +497,22 @@ pub fn pick_endpoint<'a>(
 /// The override fires only when *all* of:
 /// 1. `cfg.replication_threshold_pct > 0` and
 ///    `cfg.replication_warm_target > 1` (feature enabled).
-/// 2. The picker's chosen worker is *committed-warm* — its raw
+/// 2. The picker's chosen worker is committed-warm: its raw
 ///    radix-tree match (`kv_blocks`) covers at least the fraction
 ///    of `total_blocks` configured by
 ///    `cfg.replication_warm_threshold_fraction`.
 /// 3. Fewer than `cfg.replication_warm_target` workers are
 ///    committed-warm in the current snapshot.
 /// 4. There's at least one candidate that's neither committed-warm
-///    (raw `kv_blocks` below the threshold) nor *about to be warm*
-///    (post-cache-credit `matched_blocks` below the threshold) —
-///    using both signals avoids replicating to a worker that already
-///    has an in-flight prefill of the same prefix.
+///    (raw `kv_blocks` below the threshold) nor about to be warm
+///    (post-cache-credit `matched_blocks` below the threshold), so we
+///    don't replicate to a worker already prefilling the same prefix.
 /// 5. The cheapest such candidate's predicted total is within
 ///    `best_ms * (1 + cfg.replication_threshold_pct/100)` of the
-///    originally-picked worker's predicted total — i.e. the
-///    candidate is no more than X% slower than the best pick. The
-///    percentage formulation auto-adapts to prompt size: a 10%
-///    threshold accepts ~35ms hit on a 350ms full-cache-hit and a
-///    ~300ms hit on a 3000ms cold prefill.
+///    originally-picked worker's predicted total. A percentage, so it
+///    scales with prompt size.
 ///
-/// When any condition fails, returns `chosen_idx` unchanged. When
-/// the swap fires, emits a structured INFO log so operators can
-/// grep for replication redirects.
+/// Otherwise returns `chosen_idx` unchanged. A swap is logged at INFO.
 fn cache_replication_override(
     scores: &[WorkerScore],
     picker: &PickerConfig,
@@ -716,9 +547,8 @@ fn cache_replication_override(
         // Already replicated enough.
         return chosen_idx;
     }
-    // `scored` is parallel to `scores` by index but already has the
-    // predicted_ms we computed up top; reuse it instead of re-running
-    // the predictor. Build a quick index→predicted_ms lookup.
+    // Reuse the predictions from `scored` rather than re-running the
+    // predictor.
     let predicted_of = |idx: usize| -> f32 {
         scored
             .iter()
@@ -726,11 +556,7 @@ fn cache_replication_override(
             .map(|(_, p)| *p)
             .unwrap_or(f32::INFINITY)
     };
-    // Candidates: not committed-warm (raw radix-tree match below
-    // threshold) AND not already-warming-up (post-credit
-    // `matched_blocks` also below threshold). Using both signals
-    // avoids replicating to a worker whose in-flight prefill will
-    // soon commit the same prefix.
+    // Candidates: neither committed-warm nor warming up (condition 4).
     let cheapest_candidate = scores
         .iter()
         .enumerate()
@@ -742,11 +568,7 @@ fn cache_replication_override(
     };
     let best_ms = predicted_of(chosen_idx);
     let extra_cost = cand_ms - best_ms;
-    // Threshold scales with the best-pick's cost so a single value
-    // covers small and large prompts uniformly. `replication_threshold_pct`
-    // is in percentage points (`10` → 10%), so divide by 100 here.
-    // Guard against degenerate best_ms <= 0 (shouldn't happen, but
-    // cheap defense).
+    // `replication_threshold_pct` is in percentage points.
     let max_extra = best_ms.max(0.0) * (picker.replication_threshold_pct / 100.0);
     if extra_cost > max_extra {
         return chosen_idx;
@@ -770,22 +592,13 @@ fn cache_replication_override(
     cand_idx
 }
 
-/// Render a debug-level table of every scored worker with the
-/// wait-time predictor's per-component breakdown. One row per worker,
-/// sorted by `name` alphabetically so consecutive log lines line up
-/// across requests (same worker in the same row position every time).
-/// `chosen_endpoint` highlights which worker actually got picked with
-/// an asterisk in the leading column — useful when top-K randomness
-/// has spread the pick off the argmin.
+/// Render a debug-level table of every scored worker with the predictor's
+/// per-term breakdown. Rows are sorted by `name` so consecutive tables line
+/// up; the `chosen_endpoint` row is marked with `*`. A leading `weights:`
+/// line shows the configuration shared by all rows.
 ///
-/// Leading "weights:" line shows the configuration knobs that are
-/// constant across all rows: `expected_overlap_alpha`,
-/// `inflight_concurrent_capacity`, `forward_pass_ms` from
-/// `[predictor]`, plus `inflight_tracking` and `tie_tolerance_ms`
-/// from `[picker]`. That keeps the per-row columns purely data.
-///
-/// Column overview:
-/// - `expect_ms` = base + q + prefill + cache (the predicted TTFT)
+/// Columns:
+/// - `expect_ms` = the predicted TTFT, the sum of the `_ms` columns
 /// - `overlap/total` shows the layered expected-overlap value the
 ///   picker scored on; `kv_blocks` shows the raw radix-tree match for
 ///   comparison. At α=1 with no inflight overlap they're identical.
@@ -794,10 +607,8 @@ fn cache_replication_override(
 ///   `q_workload` is the sum of uncached blocks across our inflight
 ///   dispatches (the workload model's input).
 ///
-/// In-flight is **not** in the predicted-wait calculation — it's
-/// used only as a tie-breaker in `pick_endpoint`. The column is here
-/// for transparency: when two rows tie on `expect_ms`, the operator
-/// can see which one wins via lower `q_inflight`.
+/// `q_inflight` only breaks ties in `pick_endpoint`; it isn't part of
+/// `expect_ms`.
 #[allow(clippy::too_many_arguments)]
 pub fn format_score_table(
     scores: &[WorkerScore],
@@ -829,10 +640,7 @@ pub fn format_score_table(
         "inflight_workload must be parallel to scores"
     );
 
-    // Sort references by `name` alphabetically. Stable order across
-    // requests keeps the table readable when comparing consecutive
-    // picks. Carry the parallel inflight + kv_blocks + workload
-    // values alongside.
+    // Sort by `name`, carrying the parallel values along.
     let mut sorted: Vec<(&WorkerScore, WaitPrediction, u32, u32, u32)> = scores
         .iter()
         .enumerate()
@@ -855,8 +663,6 @@ pub fn format_score_table(
     sorted.sort_by(|a, b| a.0.name.cmp(&b.0.name));
 
     let mut out = String::with_capacity(256 + scores.len() * 200);
-    // Configuration knobs that affect every row — kept on a dedicated
-    // line above the table so the rows themselves stay purely data.
     let _ = writeln!(
         out,
         "weights: expected_overlap_alpha={}  inflight_concurrent_capacity={}  forward_pass_ms={}  inflight_tracking={}  tie_tolerance_ms={}",
