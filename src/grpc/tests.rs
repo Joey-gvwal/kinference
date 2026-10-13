@@ -8,8 +8,8 @@ fn chunk(bytes: &[u8]) -> Result<BodyChunk, Status> {
 }
 
 fn store() -> Arc<crate::body_store::BodyStore> {
-    // 1 MiB server-wide, 1 KiB per request — small caps make the budget
-    // paths cheap to hit.
+    // 1 MiB server-wide, 1 KiB per request, so the budget paths are cheap to
+    // hit.
     crate::body_store::shared(1024 * 1024, 1024, Duration::from_secs(60))
 }
 
@@ -79,10 +79,8 @@ async fn declared_length_matching_is_accepted() {
 
 #[tokio::test]
 async fn early_half_close_is_caught_by_declared_length() {
-    // THE case this check exists for: the caller cleanly half-closes after
-    // sending only part of the body. No transport signal distinguishes this
-    // from a complete body, so without the declared length we'd forward a
-    // truncated request upstream.
+    // The caller cleanly half-closes after sending only part of the body,
+    // which only the declared length can catch.
     let s = store();
     let mut r = s.reservation();
     let mut stream = futures::stream::iter(vec![chunk(br#"{"model":"a","mess"#)]);
@@ -131,9 +129,8 @@ async fn length_mismatch_leaks_no_bytes() {
 async fn accumulate_times_out_on_an_idle_stream() {
     let s = store();
     let mut r = s.reservation();
-    // A stream that yields one chunk then never completes: exactly the
-    // "went idle mid-upload" case the idle budget exists for. Box::pin to
-    // satisfy the `Unpin` bound (`stream::once` over an async block isn't).
+    // A stream that yields one chunk then never completes. Box::pin for the
+    // `Unpin` bound.
     let mut stream =
         Box::pin(futures::stream::iter(vec![chunk(b"first")]).chain(futures::stream::pending()));
     let failure = accumulate_body(&mut stream, &mut r, Duration::from_millis(20), None)
@@ -155,9 +152,8 @@ async fn abandoned_accumulate_leaks_no_bytes() {
     assert_eq!(s.stats().1, 0, "a failed push must release its bytes");
 }
 
-/// The wire spells "leave the path alone" as the empty string, so a provider
-/// that declares no path must not send one; anything else would make a mixed
-/// pool rewrite requests the client already addressed correctly.
+/// A provider that declares no path sends the empty string, meaning "leave
+/// the path alone".
 #[test]
 fn a_provider_destination_carries_the_path_and_empty_means_unchanged() {
     let pick = |path: Option<&str>| crate::monitor::ProviderPick {

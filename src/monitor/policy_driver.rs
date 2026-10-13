@@ -1,43 +1,31 @@
-//! The CRD policy driver — running `InferencePolicy` for a request that named
-//! an `InferencePool`, and turning the result into candidates.
+//! The CRD policy driver: running `InferencePolicy` for a request that named
+//! an `InferencePool`.
 //!
-//! This is the seam between `crate::policy` (which resolves and compiles the
-//! CRDs, and knows nothing about a request) and the request path (which knows
-//! nothing about CRDs). `policy_select` is where a compiled policy meets a
-//! live snapshot of pools, worker sets and providers; `candidates_for`
-//! flattens the group it chose into per-endpoint candidates.
-//!
-//! Ranking happens here WITHOUT holding any pool lock, and that is load-bearing
-//! rather than incidental — see `policy_select`'s own docs for why taking two
-//! pool locks in ranking order would deadlock.
+//! `policy_select` applies a compiled policy to a live snapshot of pools,
+//! worker sets and providers; `candidates_for` flattens a scored group into
+//! per-endpoint candidates. Ranking holds no pool lock; see `policy_select`.
 
 use super::*;
 
 impl KinferenceService {
-    /// Run the CRD policy engine for a request that named an `InferencePool`,
-    /// returning the group and endpoint it chose.
+    /// Run the CRD policy engine for a request that named an `InferencePool`.
     ///
-    /// Candidates may span WORKER SETS, and each worker set is a different
-    /// kinference pool with its own `pick_lock`. Two requests taking two pool locks
-    /// in opposite orders would deadlock, so ranking happens here, lock-free,
-    /// and only the winner's group takes a lock (to commit). The consequence is
-    /// bounded and worth naming: a policy ranks on a snapshot that can be up to
-    /// one concurrent pick stale. Inflight bookkeeping is still exact, because
-    /// the commit bumps it under the lock.
+    /// Candidates may span pools, each with its own `pick_lock`, so ranking is
+    /// lock-free (taking two locks in opposite orders would deadlock) and only
+    /// the winner's pool is locked, to commit. The ranking may be one
+    /// concurrent pick stale; inflight bookkeeping is still exact.
     ///
-    /// `Ok(selection)` always names a group; `selection.endpoint` is `None`
-    /// when the policy had no opinion and the normal picker should choose —
-    /// the deliberate response to a pool kinference has never seen, since refusing
-    /// traffic over an operator's missing CRD is worse than routing on load.
+    /// `PolicySelection::Picker` means the policy had no opinion, e.g. for a
+    /// pool kinference doesn't know, and the normal picker chooses (fail
+    /// open).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn policy_select(
         &self,
         pref: &crate::policy::PoolRef,
         store: &Arc<crate::policy::store::PolicyStore>,
         primary: Option<ScoredGroup>,
-        // The name the request resolved to. Passed explicitly rather than read
-        // off `primary`, which may not exist: a model only a provider serves has
-        // no scored group to take it from.
+        // Passed explicitly, since `primary` may not exist (a provider-only
+        // model).
         requested_model: &str,
         spare: Option<(Vec<serde_json::Value>, ChatExtras, Vec<u8>)>,
         attrs: crate::policy::predicate::RequestAttrs,
@@ -47,11 +35,8 @@ impl KinferenceService {
 
         let snapshot = store.snapshot();
         let Some(resolved) = snapshot.lookup(&pref.namespace, &pref.name) else {
-            // Both branches fail open — a request is served either way — but
-            // they are different operational facts and must not share a log
-            // line. Before the first list completes, EVERY pool looks unknown,
-            // so treating the two alike buries a real misconfiguration under a
-            // burst of startup noise.
+            // Both fail open, but are logged differently: before the first list
+            // completes, every pool looks unknown.
             if snapshot.listed() {
                 tracing::warn!(
                     req = %req_label,
@@ -70,9 +55,8 @@ impl KinferenceService {
             return Ok(PolicySelection::Picker { group: primary });
         };
 
-        // Opaque revision: only equality is meaningful, so we can tell that we
-        // differ but not whether we are behind. Advisory per the proto — record
-        // it and proceed on cache rather than pay an API round-trip per pick.
+        // Opaque revision: we can tell we differ, not who is behind. Advisory,
+        // so record it and proceed.
         if !pref.resource_version.is_empty() && pref.resource_version != resolved.resource_version {
             self.prom.record_policy_revision_mismatch();
             tracing::debug!(
@@ -85,8 +69,7 @@ impl KinferenceService {
         }
 
         let model = requested_model.to_string();
-        // The pool is a hard outer bound. If it lists nothing kinference can route
-        // to, no rule can rescue it.
+        // Rules can't reach beyond the pool's destinations.
         if resolved.destinations.is_empty() {
             self.prom.record_policy_decision("no_destinations");
             return Err(PickAndRecordOutcome::PolicyRejected {
@@ -101,16 +84,10 @@ impl KinferenceService {
         let policy = resolved.policy.clone();
         let rules = engine::matching_rules(&policy, &attrs);
         let any_rule_matched = !rules.is_empty();
-        // Rules first, then the implicit unmatched route — `None` marks the
-        // latter so traces read `<unmatched>`.
-        //
-        // The unmatched route closes the plan whether no rule matched or every
-        // matching rule fell through, and either way it gets the same
-        // generation pass as a rule: it considers what `unmatched` says — the
-        // requested model, on local destinations — and scores sets no earlier
-        // rule reached. A separate fall-through tail used to reuse whatever
-        // groups earlier rules had scored instead, including groups for OTHER
-        // models, so a request could be served a model it never asked for.
+        // Matching rules, then the implicit unmatched route (`None`, traced as
+        // `<unmatched>`). The unmatched route gets its own candidate generation
+        // (the requested model, local destinations only), so it can't serve a
+        // model an earlier rule scored.
         let mut plan: Vec<(Option<String>, crate::policy::compile::CompiledRoute)> = rules
             .iter()
             .map(|r| (Some(r.name.clone()), r.route.clone()))
@@ -118,9 +95,7 @@ impl KinferenceService {
         match engine::unmatched_route(&policy) {
             Ok(route) => plan.push((None, route)),
             Err(_) if !any_rule_matched => {
-                // `unmatched: Reject` — the setting that exists so an
-                // exhaustive rule set cannot silently admit an unlisted
-                // tenant.
+                // `unmatched: Reject`.
                 tracing::info!(
                     req = %req_label,
                     pool = %pref.label(),
@@ -137,18 +112,13 @@ impl KinferenceService {
             Err(_) => {}
         }
 
-        // Groups scored so far, keyed by (pool, model), so a model reachable on
-        // several destinations is tokenized once. Empty when nothing local
-        // serves the requested model — a rule can still reach a provider, or
-        // name a model another worker set does serve, and both are scored
-        // lazily below.
+        // Groups scored so far, by (pool, model). Others are scored lazily
+        // below.
         let mut scored: Vec<ScoredGroup> = primary.into_iter().collect();
 
         for (rule_name, route) in &plan {
-            // `attrs.model`, not `model`: the former is the whole set the
-            // request answers to, the latter only the upstream it resolved to.
-            // Scoring the resolved name alone is what made a provider serving
-            // its own build of the same model unreachable.
+            // `attrs.model` is every name the request answers to, so providers
+            // spelling the model differently are reached.
             let targets = engine::models_to_score(route, &attrs.model);
             let mut candidates: Vec<engine::Candidate> = Vec::new();
 
@@ -160,9 +130,8 @@ impl KinferenceService {
                     {
                         continue;
                     }
-                    // A provider needs no scoring, no tokenization and no index
-                    // query — there is nothing to scrape. Its candidates come
-                    // straight off the declared model table.
+                    // Providers need no scoring; candidates come from the
+                    // declared model table.
                     let dest = match dest.as_local() {
                         Some(local) => local,
                         None => {
@@ -175,9 +144,8 @@ impl KinferenceService {
                             continue;
                         }
                     };
-                    // Aliases: a canonical name can map to several upstream
-                    // models, and each is its own candidate — that is how
-                    // "interchangeable" becomes a routing choice.
+                    // A canonical name can map to several upstream models, each
+                    // its own candidate.
                     for upstream in dest.upstreams_for(&target.model) {
                         let idx = match scored
                             .iter()
@@ -195,14 +163,8 @@ impl KinferenceService {
                                     // is active.
                                     continue;
                                 };
-                                // Tokenization belongs to the MODEL, not the
-                                // pool — same tokenizer, same chat template. So
-                                // if we already tokenized this model for another
-                                // worker set, reuse the tokens and let this call
-                                // do only the per-pool work (block hashing at
-                                // this pool's block_size, and the index query).
-                                // Otherwise a policy spanning N worker sets would
-                                // pay N render round-trips for one prompt.
+                                // Reuse tokens if this model was already
+                                // tokenized for another pool.
                                 let cached = scored
                                     .iter()
                                     .find(|g| g.model == upstream && !g.side.tokens.is_empty())
@@ -253,22 +215,11 @@ impl KinferenceService {
                 }
             }
 
-            // The cross-group comparison, which the score table structurally
-            // cannot show: that table is bound to ONE (pool, model) group,
-            // because its per-endpoint columns — prefix overlap, kv_blocks —
-            // only mean anything within one pool's radix tree. Without this,
-            // a candidate eliminated by an `exclude` rule is named in the trace
-            // while one that merely LOST on predictedTTFT vanishes, which is the
-            // more common outcome and the one you cannot reconstruct.
-            //
-            // One line per candidate, sorted best-first and capped: endpoints ×
-            // models can be dozens on a real fleet, and this is the per-request
-            // debug path. `rank` and `n` make a truncated list obvious rather
-            // than looking like the whole candidate set.
+            // Log the cross-group ranking, which the per-group score table
+            // can't show. One line per candidate, best first, capped; `rank` and
+            // `n` show when the list is truncated.
             if tracing::enabled!(tracing::Level::DEBUG) {
-                // Local candidates sort by their prediction; provider candidates
-                // have none, so they sort last and are labelled as such rather
-                // than being given a number that would read as a measurement.
+                // Providers have no prediction, so they sort last.
                 let sort_key = |c: &engine::Candidate| match &c.target {
                     engine::CandidateTarget::Local {
                         predicted_ttft_ms, ..
@@ -382,10 +333,8 @@ impl KinferenceService {
 
     /// Build one candidate per endpoint in a scored group.
     ///
-    /// `group_idx` rides on `Candidate::score_idx` so the winner can be mapped
-    /// straight back to the group whose scores and prefix hashes the critical
-    /// section must commit with — those are per-pool, so committing against the
-    /// wrong group's would record bogus prefix state.
+    /// `group_idx` rides on `Candidate::score_idx` so the winner maps back to
+    /// the group the critical section must commit with.
     fn candidates_for(
         &self,
         group: &ScoredGroup,
@@ -396,10 +345,7 @@ impl KinferenceService {
         let now = Instant::now();
         let ready_endpoints = group.pool.registry.len() as i64;
         let labels = Arc::new(dest.labels.clone());
-        // Effective context window per ENDPOINT, not per pool: a rollout that
-        // changes --max-model-len leaves endpoints disagreeing, and admission
-        // must use the individual endpoint's value so long requests stop
-        // landing on reconfigured ones rather than failing there.
+        // Per endpoint, since endpoints may disagree mid-rollout.
         let context_by_endpoint: HashMap<String, u32> = group
             .pool
             .registry
@@ -416,18 +362,9 @@ impl KinferenceService {
                 Some((entry.score_addr, window))
             })
             .collect();
-        // The two SATURATION signals, per endpoint, as windowed means.
-        //
-        // Not taken from `WorkerScore`: that carries the instantaneous
-        // `queue_waiting` the picker needs to predict the TTFT of a dispatch
-        // happening right now, and no KV field at all. Admission asks a
-        // different question — "is this endpoint under SUSTAINED pressure" —
-        // and a threshold on the instantaneous gauge answers it wrongly,
-        // because `num_requests_waiting` spikes for seconds and clears.
-        //
-        // Only endpoints that have been scraped: `latest` would hand back an
-        // all-zero sample for the rest, which reads as an idle worker and lets
-        // a `drop` on either signal pass a worker nothing is known about.
+        // The two saturation signals per endpoint, as windowed means rather
+        // than `WorkerScore`'s instantaneous queue, which spikes and clears.
+        // Only scraped endpoints; the rest would read as all-zero (idle).
         let saturation_by_endpoint: HashMap<String, (f64, f64)> = group
             .pool
             .registry
@@ -456,11 +393,8 @@ impl KinferenceService {
                 let predicted =
                     crate::picker::predicted_wait_ms(s, &group.pool.predictor, &summaries, now)
                         .total_ms();
-                // Recorded for EVERY candidate, which is what makes the
-                // distribution the right basis for a `predictedTTFT`
-                // threshold: that threshold is applied to every candidate too.
-                // Recording only the winner would bias the p95 low, because
-                // the winner won by being fast.
+                // Recorded for every candidate, as a `predictedTTFT` threshold
+                // applies to every candidate; winners only would bias it low.
                 self.prom
                     .record_predicted_ttft(&s.endpoint, &group.model, predicted as f64);
                 let hit_ratio = if s.total_blocks > 0 {
@@ -483,11 +417,8 @@ impl KinferenceService {
                         context_window: context_by_endpoint.get(&s.endpoint).map(|v| *v as i64),
                         predicted_ttft_ms: Some(predicted as f64),
                         prefix_cache_hit_ratio: Some(hit_ratio),
-                        // Absent rather than zero when the endpoint has not
-                        // been scraped: a predicate over an absent signal does
-                        // not match, whereas a fabricated 0.0 would read as
-                        // "idle" and let a `drop` rule pass a worker it knows
-                        // nothing about.
+                        // Absent, not zero, when the endpoint has not been
+                        // scraped.
                         queued_prompts: saturation_by_endpoint.get(&s.endpoint).map(|(q, _)| *q),
                         kv_cache_usage: saturation_by_endpoint.get(&s.endpoint).map(|(_, k)| *k),
                         model_name: Some(canonical_model.to_string()),
@@ -496,8 +427,7 @@ impl KinferenceService {
                             crate::policy::crd::BackendType::Local.as_str().to_string(),
                         ),
                         backend_ready_endpoints: Some(ready_endpoints),
-                        // Provider-scoped, so absent here — and absent means
-                        // "does not match", never a stand-in value.
+                        // Provider-only.
                         backend_observed_ttft_ms: None,
                         backend_budget_exhausted: None,
                     },

@@ -1,20 +1,12 @@
-//! Provider feedback — what the caller reports back about an off-cluster
+//! Provider feedback: what the caller reports back about an off-cluster
 //! destination.
 //!
-//! kinference never talks to a provider itself: it hands the caller a
-//! `ProviderTarget` and the caller does the request. So everything this module
-//! records arrives over the feedback RPCs, and it is the ONLY way kinference learns
-//! whether a provider worked. That is why the pick side and the report side
-//! live together here — `record_provider_pick` writes the labels that
-//! `record_provider_first_token` later reads back.
+//! kinference never talks to a provider; the caller does, and reports back
+//! over the feedback RPCs. `record_provider_pick` writes the labels that the
+//! report handlers read back.
 //!
-//! Split out of the policy driver rather than filed with it because it is also
-//! where the one proto dependency in `monitor` sits: `record_provider_abort`
-//! names `crate::proto::abort_request::Reason` directly, which contradicts the
-//! invariant stated in `crate::policy` (that `monitor` stays proto-agnostic).
-//! Quarantining it in one small file makes that checkable by inspection
-//! instead of buried in a 2,900-line module. See the note on
-//! `record_provider_abort`.
+//! `record_provider_abort` is `monitor`'s one direct dependency on the proto
+//! types, kept in this small file.
 
 use std::time::Instant;
 
@@ -23,23 +15,13 @@ use super::{KinferenceService, ProviderPick, Qos};
 impl KinferenceService {
     /// Stash what a provider pick needs for its feedback to land.
     ///
-    /// Only the labels map, which is deliberate: `PendingObservation` is a CSV
-    /// row assembled from per-endpoint scoring state, and a provider has none of
-    /// it. Nothing pool-scoped is touched here at all — no inflight count, no
-    /// prefix insert — because there is no pool.
+    /// Only the labels map: there is no `PendingObservation` (built from
+    /// per-endpoint scoring state) and nothing pool-scoped for a provider.
     ///
-    /// `qos`, `tenant` and `streaming` are passed in rather than read off
-    /// `pick`: [`ProviderPick`] describes the DESTINATION, and all three
-    /// describe the request. Threading them keeps an off-cluster pick's metrics
-    /// labelled the same way a local one's are — previously `qos` was hardcoded
-    /// here, so every provider request reported `qos="interactive"` whatever
-    /// the caller actually sent.
-    ///
-    /// `streaming` is the one with teeth: without it
-    /// [`Self::record_provider_first_token`] cannot tell a real TTFT from a
-    /// non-streaming response's total latency, and a local pick's
-    /// `PendingObservation` — which is where that flag normally lives — does
-    /// not exist for a provider.
+    /// `qos`, `tenant` and `streaming` describe the request, not the
+    /// [`ProviderPick`]. `streaming` lets
+    /// [`Self::record_provider_first_token`] tell a real TTFT from a
+    /// non-streaming response's total latency.
     pub(super) fn record_provider_pick(
         &self,
         response_id: u64,
@@ -51,11 +33,7 @@ impl KinferenceService {
         self.request_labels.insert(
             response_id,
             crate::observations::RequestMeta {
-                // The provider row's `name`: what the body was rewritten to
-                // say, as a local pick reports the model its body names. So
-                // `model` means the same on both paths, and one alias served
-                // both ways is two models — which it is. The name the client
-                // asked for stays in `canonical_model`, for logs.
+                // The model the body names, as for a local pick.
                 model: pick.upstream_model.clone(),
                 qos,
                 tenant: tenant.to_string(),
@@ -69,17 +47,11 @@ impl KinferenceService {
     /// Fold a first-token report into a provider's health, when the pick went
     /// off-cluster.
     ///
-    /// `upstream_status` is what makes this worth doing: kinference cannot tell a
-    /// working vendor from a revoked API key on its own, and a 401 here is the
-    /// single most likely first-day failure — a Secret whose key name does not
-    /// match what the `GatewayBackend` asked for. Without reading it, that
-    /// presents as every request failing while every object kinference can see reads
-    /// healthy.
-    /// Returns whether this `response_id` was a known PROVIDER pick, so the
-    /// caller's `acknowledged` can be true for one. A provider pick holds no
-    /// `PendingObservation` — there is no pool, so nothing pool-scoped to
-    /// release — and without this the reply would say the id was unknown, which
-    /// reads to a well-behaved caller as "you sent a stale id".
+    /// `upstream_status` is how kinference learns about failures like a revoked
+    /// API key, which it can't see otherwise.
+    ///
+    /// Returns whether `response_id` was a known provider pick, so the reply
+    /// can acknowledge it despite there being no `PendingObservation`.
     pub(crate) fn record_provider_first_token(
         &self,
         response_id: u64,
@@ -92,9 +64,7 @@ impl KinferenceService {
         let (provider, model) = (labels.provider, labels.model);
         use crate::policy::provider_health::FailureKind;
         let failure = match upstream_status {
-            // No response at all. The proto says to treat this as
-            // Abort(NOT_DISPATCHED), and for a provider that means the far end
-            // never answered.
+            // No response at all.
             0 => Some((FailureKind::Upstream, "no response".to_string())),
             401 | 403 => Some((
                 FailureKind::Unauthorized,
@@ -108,23 +78,13 @@ impl KinferenceService {
             None if labels.streaming => {
                 self.provider_health
                     .record_success(&provider, observed_ttft_ms as f32);
-                // The same sample the router ranks on, published. Success only:
-                // a 401 or a 5xx carries a time-to-ERROR, and folding that into
-                // a latency distribution would make a failing vendor look fast.
+                // Success only: a failure's time is time-to-error.
                 self.prom
                     .record_provider_ttft(&provider.label(), &model, observed_ttft_ms);
             }
             None => {
-                // Non-streaming: the caller's first byte arrived at completion,
-                // so `observed_ttft_ms` is total latency, not a TTFT. It is
-                // excluded from BOTH the ranking samples and the histogram —
-                // that p95 is what `EstimatedTTFT` sorts on and what
-                // `backend.observedTTFTP95` compares against, so admitting it
-                // would cost the provider picks it should win.
-                //
-                // The recovery half still applies: the request worked, so the
-                // failure streak clears. The end-to-end figure is not lost —
-                // `kinference_request_duration_ms` covers provider picks.
+                // Non-streaming: `observed_ttft_ms` is total latency, so record
+                // the success without a sample.
                 self.provider_health.record_success_untimed(&provider);
             }
         }
@@ -133,11 +93,8 @@ impl KinferenceService {
 
     /// Fold an `Abort` into provider health, when the pick went off-cluster.
     ///
-    /// `NOT_DISPATCHED` and `PULL_FAILED` are NOT failures of the provider —
-    /// the first is the caller changing its mind, the second is kinference's own body
-    /// stream breaking. Counting either would suppress a working destination
-    /// because a client hung up, which is why the proto grew reason codes that
-    /// distinguish them.
+    /// `NOT_DISPATCHED` (the caller changed its mind) and `PULL_FAILED`
+    /// (kinference's body stream broke) are not provider failures.
     pub(crate) fn record_provider_abort(
         &self,
         response_id: u64,
@@ -160,9 +117,7 @@ impl KinferenceService {
 
     /// Record a failure and log the moment a provider stops being dispatched to.
     ///
-    /// Logged on the TRANSITION only. One line per failed request would bury the
-    /// state change in the noise it caused, and the state change is the thing an
-    /// operator needs to see.
+    /// Logged on the transition only.
     pub(crate) fn note_provider_failure(
         &self,
         provider: &crate::policy::engine::ObjectKey,
