@@ -17,11 +17,8 @@ fn render(
     )
 }
 
-/// Same as `render` but lets the caller supply the special-token
-/// map (e.g. `{"bos_token": "<bos>"}`). Templates that emit
-/// `{{- bos_token -}}` and friends silently render empty without
-/// this binding — equivalent to dropping the leading special
-/// token from the encoded prefix.
+/// Same as `render`, with a special-token map (e.g.
+/// `{"bos_token": "<bos>"}`).
 fn render_with_tokens(
     template: &str,
     messages: &[serde_json::Value],
@@ -40,9 +37,7 @@ fn render_with_tokens(
 
 #[test]
 fn render_template_with_strftime_now_returns_today() {
-    // Llama 3.1/3.2/3.3 instruct templates emit a date line via
-    // this Jinja global. minijinja doesn't ship it; we register
-    // it ourselves and back it with chrono::Utc::now().
+    // Llama 3.1+ templates emit a date line via this global.
     let got = render("{{ strftime_now('%Y') }}", &[], &[], true)
         .expect("strftime_now should render without error");
     let expected_year = chrono::Utc::now().format("%Y").to_string();
@@ -55,11 +50,10 @@ fn render_template_with_strftime_now_returns_today() {
 #[test]
 fn render_template_with_tools_includes_tool_block() {
     let tmpl = "{% if tools %}HAS_TOOLS{% else %}NO_TOOLS{% endif %}";
-    // Empty tools → `null` in the Jinja context → falsy. Matches
-    // transformers' behavior of passing `None`.
+    // Empty tools render as `null`, which is falsy.
     let no_tools = render(tmpl, &[], &[], true).expect("empty tools renders");
     assert_eq!(no_tools, "NO_TOOLS");
-    // One tool dict → truthy → tool block emitted.
+    // One tool dict is truthy, so the tool block is emitted.
     let with_tools = render(
         tmpl,
         &[],
@@ -72,10 +66,8 @@ fn render_template_with_tools_includes_tool_block() {
 
 #[test]
 fn render_template_with_loop_controls_parses() {
-    // `{% break %}` / `{% continue %}` require minijinja's
-    // `loop_controls` feature. Mistral / some Hermes templates
-    // use these; without the feature, the template fails at
-    // parse time.
+    // `{% break %}` / `{% continue %}` need minijinja's `loop_controls`
+    // feature; Mistral and some Hermes templates use them.
     let tmpl = "{% for m in messages %}\
                     {% if loop.first %}{% continue %}{% endif %}\
                     X\
@@ -87,9 +79,8 @@ fn render_template_with_loop_controls_parses() {
 
 #[test]
 fn render_template_with_tojson_filter_renders() {
-    // The `tojson` filter requires minijinja's `json` feature.
-    // Llama 3.2 vision and others use it to dump `tools` into
-    // the rendered prompt as JSON.
+    // `tojson` needs minijinja's `json` feature; Llama 3.2 vision and
+    // others use it for `tools`.
     let tools = vec![serde_json::json!({"name": "foo"})];
     let got =
         render("{{ tools | tojson }}", &[], &tools, true).expect("tojson filter should be on");
@@ -109,26 +100,17 @@ fn render_template_respects_add_generation_prompt_false() {
     assert_eq!(off, "A");
 }
 
-/// Smoke: the Gemma 3/4 chat template lives in a sibling
-/// `chat_template.jinja` (not embedded in `tokenizer_config.json`
-/// — that's the loader-side fix we still need to land). The
-/// template itself uses macros, namespaces, `is mapping`/`is
-/// string`/`is sequence` tests, `dictsort`, `.get()`, and
-/// `loop.index0` — verify our minijinja env can render it against
-/// a synthetic chat-completions body without erroring.
+/// Smoke: the Gemma 4 chat template (macros, namespaces, `is mapping` /
+/// `is string` / `is sequence`, `dictsort`, `.get()`, `loop.index0`) renders
+/// without error.
 ///
-/// Fixture pulled from
-/// `https://huggingface.co/google/gemma-4-12B-it/resolve/main/chat_template.jinja`
-/// (committed verbatim so the test doesn't need network).
+/// Fixture committed verbatim from
+/// `https://huggingface.co/google/gemma-4-12B-it/resolve/main/chat_template.jinja`.
 #[test]
 fn render_gemma4_template_against_minimal_chat() {
     let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
     let messages = vec![serde_json::json!({"role": "user", "content": "Hello, world!"})];
-    // Bind the special tokens the way the registry would in
-    // production — Gemma 4's template emits `{{- bos_token -}}`
-    // at the start, plus references to other model-specific
-    // tokens deeper in. Without these bindings the output is
-    // missing the leading `<bos>` literal.
+    // Bind the special tokens as the registry would.
     let mut tokens = HashMap::new();
     tokens.insert("bos_token".to_string(), "<bos>".to_string());
     tokens.insert("eos_token".to_string(), "<eos>".to_string());
@@ -142,16 +124,12 @@ fn render_gemma4_template_against_minimal_chat() {
         &tokens,
     )
     .expect("Gemma 4 chat template should render without errors");
-    // Sanity-check that the template actually emitted *something*
-    // structured — Gemma's template wraps each turn in role-
-    // delimiting tags, so the user message text must appear.
+    // The user message text must appear.
     assert!(
         rendered.contains("Hello, world!"),
         "rendered output should contain the user message text; got: {rendered}"
     );
-    // And the bound bos_token must show up at the very start —
-    // matches the leading `<bos>` (token 2) that vLLM's /render
-    // produces.
+    // And the bound bos_token comes first, as in vLLM's /render.
     assert!(
         rendered.starts_with("<bos>"),
         "rendered output must start with bos_token; got: {}",
@@ -159,15 +137,8 @@ fn render_gemma4_template_against_minimal_chat() {
     );
 }
 
-/// Regression: Gemma 3/4's chat template emits `{{- bos_token -}}`
-/// at the start of the rendered prompt. Without the special-token
-/// binding, that reference renders empty and the encoded prefix
-/// silently drops the leading `<bos>` (token 2 in Gemma's
-/// vocabulary). vLLM's `/render` injects bos_token via
-/// transformers' apply_chat_template, so a compare-mode run shows
-/// 100% divergence on every Gemma request (extra leading 2 on the
-/// HTTP side, nothing on the local side). Cover both halves: empty
-/// binding -> no `<bos>`; bound `bos_token` -> `<bos>` at index 0.
+/// `{{- bos_token -}}` renders empty without a binding, and as `<bos>` at
+/// index 0 with one.
 #[test]
 fn render_binds_special_tokens_into_context() {
     let tmpl = "{{- bos_token -}}HELLO";
@@ -205,8 +176,7 @@ fn extract_special_tokens_pulls_string_and_dict_shapes() {
     assert!(!m.contains_key("tokenizer_class"));
     assert!(!m.contains_key("some_other_field"));
 
-    // Llama 3.2 / newer-style: each `*_token` is a dict with a
-    // `content` field. The map should still extract `content`.
+    // Llama 3.2 style: each `*_token` is a dict with a `content` field.
     let l = serde_json::json!({
         "bos_token": {
             "content": "<|begin_of_text|>",
@@ -225,17 +195,12 @@ fn extract_special_tokens_pulls_string_and_dict_shapes() {
     assert_eq!(m.get("eos_token").map(String::as_str), Some("<|eot_id|>"));
 }
 
-/// Mount-path fallback: when `tokenizer_config.json` lacks a
-/// `chat_template` field (Gemma 3/4 convention), the loader must
-/// pick up the template from a sibling `chat_template.jinja`. The
-/// Hub-path equivalent is harder to unit-test without network; the
-/// happy path of `read_chat_template_from_config` is the bit most
-/// likely to regress, so cover that here.
+/// Mount path: when `tokenizer_config.json` has no `chat_template` field,
+/// the template comes from a sibling `chat_template.jinja`.
 #[test]
 fn read_chat_template_falls_back_to_sibling_jinja_file() {
     let dir = tempfile::tempdir().expect("tempdir");
-    // tokenizer_config.json present but no `chat_template` field
-    // (mirrors the actual Gemma 4 file we curled earlier).
+    // tokenizer_config.json without a `chat_template` field, like Gemma 4's.
     std::fs::write(
         dir.path().join("tokenizer_config.json"),
         r#"{"bos_token": "<bos>", "eos_token": "<eos>"}"#,
@@ -269,8 +234,7 @@ fn read_chat_template_falls_back_to_sibling_jinja_file() {
 #[test]
 fn read_chat_template_prefers_inline_over_sibling() {
     let dir = tempfile::tempdir().expect("tempdir");
-    // Both sources present — inline should win (older models that
-    // ALSO have a sibling file, e.g. during a partial migration).
+    // Both sources present: inline wins.
     std::fs::write(
         dir.path().join("tokenizer_config.json"),
         r#"{"chat_template": "INLINE"}"#,
@@ -308,25 +272,9 @@ fn read_chat_template_returns_none_when_neither_source_has_template() {
     );
 }
 
-/// Same fixture, exercised against richer chat-completions shapes
-/// (system + multi-turn + tools). Catches template branches that
-/// the minimal single-user-message smoke wouldn't hit: the tools
-/// preamble (with `format_function_declaration` / `format_parameters`
-/// macros), the assistant tool-call rendering, and multi-turn
-/// message loop.
-/// Golden render: byte-exact output for the canonical Gemma 4
-/// chat-completions shapes. Captured once by running
-/// `render_chat_template` against the committed fixture template
-/// with `bos_token = "<bos>"`, `eos_token = "<eos>"` bound. Any
-/// future drift in the render path — special-token binding,
-/// whitespace handling, Jinja-feature flags, the template fixture
-/// itself — will flip these to a mismatch.
-///
-/// These don't compare against vLLM's `/render` directly (that
-/// would need network or a recorded fixture and we're already
-/// covered there by compare-mode in production). They lock the
-/// in-process render so the BOS regression specifically can't
-/// silently come back without a test failing.
+/// Golden render: byte-exact output for canonical Gemma 4 chat-completions
+/// shapes, captured from `render_chat_template` with `bos_token` and
+/// `eos_token` bound. Any drift in the render path or fixture fails these.
 #[test]
 fn render_gemma4_golden_minimal() {
     let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
@@ -371,25 +319,16 @@ fn render_gemma4_golden_multi_turn_with_system() {
         &tokens,
     )
     .unwrap();
-    // Note the trailing `' '` after "Be concise." — matches
-    // vLLM's `_preprocess_chat` normalizing string content to the
-    // multimodal `[{"type":"text","text":...}]` form, which sends
-    // the template down the sequence branch (line 191 in the
-    // Gemma 4 template) where each item gets `| trim + ' '`.
-    // The previous golden lacked this space and was actually
-    // capturing the broken behavior that diverged from vLLM.
+    // The trailing `' '` after "Be concise." comes from the template's
+    // sequence branch (`| trim + ' '`), taken because content is
+    // normalized to parts as vLLM does.
     let want = "<bos><|turn>system\nBe concise. <turn|>\n<|turn>user\nQ1<turn|>\n<|turn>model\nA1<turn|>\n<|turn>user\nQ2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>";
     assert_eq!(got, want, "multi-turn-with-system render drift");
 }
 
 #[test]
 fn normalize_message_content_wraps_string_into_text_part() {
-    // String content → wrapped into multi-part list, matching
-    // vLLM's `_preprocess_chat` canonicalization. Templates that
-    // branch `is string` vs `is sequence` (e.g. Gemma 4's
-    // system block at line 191 of its chat_template.jinja, which
-    // appends `+ ' '` only in the sequence branch) will diverge
-    // from vLLM without this normalization.
+    // String content is wrapped into a parts list, as vLLM does.
     let msg = serde_json::json!({"role": "system", "content": "Be concise."});
     let got = normalize_message_content(&msg);
     let want = serde_json::json!({
@@ -401,9 +340,7 @@ fn normalize_message_content_wraps_string_into_text_part() {
 
 #[test]
 fn normalize_message_content_leaves_already_multipart_unchanged() {
-    // If `content` is already a list (multimodal /
-    // content-parts payload from an OpenAI-style client), pass
-    // through untouched.
+    // Already a parts list: unchanged.
     let msg = serde_json::json!({
         "role": "user",
         "content": [{"type": "text", "text": "hi"}, {"type": "image"}],
@@ -414,11 +351,8 @@ fn normalize_message_content_leaves_already_multipart_unchanged() {
 
 #[test]
 fn normalize_message_content_leaves_missing_content_unchanged() {
-    // Some legitimate messages omit `content` entirely (e.g.
-    // assistant turns with only `tool_calls`). Don't synthesize
-    // an empty text part — leave the absence intact so the
-    // template's `{% if message['content'] %}` guards still fire
-    // as expected.
+    // Messages may omit `content` (e.g. assistant turns with only
+    // `tool_calls`); leave it absent so template guards still work.
     let msg = serde_json::json!({
         "role": "assistant",
         "tool_calls": [{"id": "x", "function": {"name": "f"}}],
@@ -448,21 +382,11 @@ fn render_gemma4_golden_add_generation_prompt_false() {
     assert_eq!(got, want, "AGP=false render drift");
 }
 
-/// Contract: when a template emits its own special tokens (e.g.
-/// `{{- bos_token -}}` at the start, role markers throughout), the
-/// encode step MUST pass `add_special_tokens = false`. Otherwise
-/// the tokenizer's `PostProcessor` may prepend its own BOS and the
-/// final token sequence has BOS twice. transformers'
-/// `apply_chat_template` defaults to `add_special_tokens=False`
-/// for exactly this reason.
+/// Encoding a rendered template must use `add_special_tokens = false`, or the
+/// tokenizer's post-processor adds a second BOS.
 ///
-/// We can't load Gemma's tokenizer from disk in this test (gated,
-/// ~MB-sized) so we build a synthetic tokenizer from an inline
-/// JSON spec: WordLevel vocab + a `TemplateProcessing`
-/// post-processor that prepends `<bos>` (id 99). Encoding the same
-/// text with the two flag values must differ by exactly that
-/// sentinel id — and our production tokenize path is documented
-/// to take the `false` branch.
+/// Uses a synthetic tokenizer (WordLevel vocab, a post-processor that
+/// prepends `<bos>` as id 99) since Gemma's is gated.
 #[test]
 fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
     // Minimal tokenizer.json: WordLevel on whitespace, a
@@ -501,8 +425,7 @@ fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
         }"#;
     let tok: Tokenizer = spec.parse().expect("parse synthetic tokenizer spec");
 
-    // Rendered text already includes the literal <bos> (mimics
-    // what a chat-template render produces).
+    // Rendered text already includes the literal <bos>.
     let rendered = "<bos> hello world";
 
     let with_true = tok.encode(rendered, true).expect("encode true");
@@ -510,9 +433,7 @@ fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
 
     let true_ids = with_true.get_ids();
     let false_ids = with_false.get_ids();
-    // With our chosen contract (false), the leading id is the
-    // literal <bos> from the rendered text. It appears exactly
-    // once.
+    // With `false`, <bos> appears exactly once.
     assert_eq!(
         false_ids.first().copied(),
         Some(99),
@@ -523,9 +444,7 @@ fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
         1,
         "false-branch must contain <bos> exactly once; got {false_ids:?}"
     );
-    // The wrong contract (true) would invoke the post-processor,
-    // which prepends another <bos>. That's the regression this
-    // test pins against.
+    // With `true`, the post-processor prepends another.
     assert!(
         true_ids.len() > false_ids.len(),
         "true-branch should be strictly longer (post-processor added something); \
@@ -539,6 +458,9 @@ fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
     );
 }
 
+/// The Gemma 4 fixture against system, multi-turn and tools shapes, which
+/// exercise the tools preamble macros, assistant tool calls and the
+/// multi-turn loop.
 #[test]
 fn render_gemma4_template_against_multi_turn_with_tools() {
     let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
@@ -585,14 +507,9 @@ fn render_gemma4_template_against_multi_turn_with_tools() {
     );
 }
 
-/// Diagnostic probe: render two consecutive turns of the same
-/// conversation (c0t0 and c0t1 from `prompt-output.json`) and find
-/// the first byte at which they differ. If the conversation grows
-/// strictly by appending new messages, the rendered strings must
-/// share a long common prefix — anything else means the chat
-/// template is non-deterministic (or our render path is) and
-/// prefix-cache reuse can't work across turns. Prints the
-/// divergence point + surrounding context to stderr.
+/// Diagnostic probe: render two consecutive turns of one conversation and
+/// print where they first differ. Appending messages should keep a long
+/// common prefix, or prefix-cache reuse can't work across turns.
 ///
 /// Marked #[ignore] so it doesn't run on every test invocation;
 /// invoke with: `cargo test --release render_diff_across_turns -- --ignored --nocapture`
@@ -604,7 +521,7 @@ fn render_diff_across_turns() {
     tokens.insert("bos_token".to_string(), "<bos>".to_string());
     tokens.insert("eos_token".to_string(), "<eos>".to_string());
 
-    // The exact c0t0 / c0t1 messages from prompt-output.json.
+    // Two consecutive turns of a captured conversation.
     let c0t0 = vec![
         serde_json::json!({"role":"system","content":"amplitude node moment subscribe not embedding and config"}),
         serde_json::json!({"role":"user","content":"today test actor output with async broker read"}),
