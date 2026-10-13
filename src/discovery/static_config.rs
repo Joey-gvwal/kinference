@@ -1,6 +1,6 @@
-//! `StaticDiscovery` — wraps the TOML-loaded `Config.workers` list. Emits
-//! one `Added` per worker at startup, then waits on `cancel`. Workers
-//! never disappear in static mode.
+//! `StaticDiscovery`: emits one `Added` per worker from a worker set's
+//! `workers_file`, then waits on `cancel`. Workers never disappear in static
+//! mode.
 
 use std::sync::Arc;
 
@@ -25,10 +25,7 @@ impl StaticDiscovery {
 impl Discovery for StaticDiscovery {
     async fn run(self: Arc<Self>, tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
         for w in &self.workers {
-            // `send` would block if the channel is full; we expect the
-            // coordinator to consume promptly at startup, and the channel
-            // is sized for >= 64 backlog, so this is fine. If the receiver
-            // hangs up early, log + bail.
+            // The coordinator drains promptly at startup.
             if tx.send(WorkerChange::Added(w.clone())).await.is_err() {
                 tracing::warn!("discovery: receiver dropped before all static workers were Added");
                 return;
@@ -38,10 +35,7 @@ impl Discovery for StaticDiscovery {
             workers = self.workers.len(),
             "StaticDiscovery: all configured workers Added; waiting on shutdown"
         );
-        // Nothing more to do; static membership never changes. Park until
-        // cancellation so the spawned task stays alive (some Tokio versions
-        // print a warning for tasks that return immediately while held in
-        // a JoinHandle).
+        // Static membership never changes; park until cancellation.
         cancel.cancelled().await;
         tracing::debug!("StaticDiscovery: cancellation received, exiting");
     }

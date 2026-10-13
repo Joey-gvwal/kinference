@@ -8,20 +8,12 @@
 //! - no Prometheus `/metrics` scrapes (so no `MetricsRegistry`);
 //! - no per-request HTTP `/tokenize` call.
 //!
-//! Body buffering IS real: the mock owns its own [`crate::body_store::BodyStore`]
-//! and implements the same push → pick → pull lifecycle, so a client integrating
-//! against mock mode exercises the true wire contract (ids, single-shot pull,
-//! `body_total_bytes`, abort idempotency). Only the routing decision is
-//! synthetic: `Pick` parses the body just enough to extract `model`, looks up
-//! the workers serving it, and chooses one by hashing `(model, body)`. Same
-//! input → same chosen worker across runs and machines. The report RPCs always
-//! acknowledge — there's no pending-observation table to clear in mock mode.
-//!
-//! Pre-Pick/Observe migration this file also drove a deterministic
-//! `Score()` response with hashed-in load metrics; that's gone now.
-//! With `Pick()` the caller dispatches based on the returned endpoint
-//! alone, so per-worker telemetry is no longer load-bearing for mock
-//! behavior.
+//! Body buffering is real: the mock owns its own
+//! [`crate::body_store::BodyStore`] with the same push, pick, pull lifecycle,
+//! so clients exercise the true wire contract. Only routing is synthetic:
+//! `Pick` extracts `model` and chooses among the workers serving it by hashing
+//! `(model, body)`, deterministically across runs and machines. The report
+//! RPCs always acknowledge.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,8 +45,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 pub struct MockKinferenceService {
     registry: Arc<WorkerRegistry>,
-    /// Mock mode gets its own body store — same type, same semantics as real
-    /// mode, so the push/pull contract is genuinely exercised.
+    /// The same body store type as real mode.
     body_store: Arc<BodyStore>,
 }
 
@@ -88,8 +79,7 @@ impl MockKinferenceService {
     }
 }
 
-/// Minimal body parse — only the `model` field is needed for the
-/// mock's pick logic.
+/// Minimal body parse: only `model` is needed.
 #[derive(serde::Deserialize, Default)]
 struct ChatBody {
     #[serde(default)]
@@ -104,9 +94,8 @@ impl Picker for MockKinferenceService {
         &self,
         request: Request<Streaming<BodyChunk>>,
     ) -> Result<Response<PushBodyResponse>, Status> {
-        // Honor `kinference-declared-length` exactly as the real service does — both
-        // the early over-budget rejection and the received-vs-declared check —
-        // so a client integrating against mock mode sees the same contract.
+        // Honor `kinference-declared-length` as the real service does: early
+        // over-budget rejection and the received-vs-declared check.
         let declared = request
             .metadata()
             .get(crate::grpc::MD_DECLARED_LENGTH)
@@ -155,10 +144,8 @@ impl Picker for MockKinferenceService {
                 requested_model: String::new(),
             }));
         }
-        // "auto" pseudo-model: pick a concrete model (placeholder: random
-        // among known models), mirroring the real KinferenceService path. When we
-        // resolve it, `force_model` drives the same body rewrite the real
-        // service does, so a mock-backed caller never forwards "auto".
+        // "auto" pseudo-model: pick a concrete model as the real service does,
+        // and rewrite the body so "auto" is never forwarded.
         let mut force_model: Option<String> = None;
         if model == crate::policy::AUTO_MODEL {
             let candidates: Vec<String> = self
@@ -198,9 +185,7 @@ impl Picker for MockKinferenceService {
                 requested_model: model,
             }));
         }
-        // Deterministic chosen-worker selection: hash (model, pushed body) and
-        // index into the sorted-by-id worker list. Same input always
-        // returns the same endpoint across runs and machines.
+        // Hash (model, pushed body) into the worker list sorted by id.
         let mut buf = Vec::with_capacity(model.len() + pushed.len() + 1);
         buf.extend_from_slice(model.as_bytes());
         buf.push(0);
@@ -208,8 +193,8 @@ impl Picker for MockKinferenceService {
         let h = fnv1a(&buf);
         let chosen = &workers[(h as usize) % workers.len()];
         let response_id = self.mint_response_id();
-        // Mirror the real service's Pick-time body rewrite, then retain the
-        // outbound body for PullBody — reusing the pushed Arc when unchanged.
+        // Same Pick-time body rewrite as the real service; reuse the pushed
+        // body when unchanged.
         let outbound = {
             let mut obj: serde_json::Value =
                 serde_json::from_slice(&pushed).unwrap_or(serde_json::Value::Null);
@@ -224,8 +209,7 @@ impl Picker for MockKinferenceService {
         handle.commit(response_id, outbound);
         Ok(Response::new(PickResponse {
             outcome: PickOutcome::Ok as i32,
-            // The mock serves from its own static registry and has no notion of
-            // an off-cluster destination, so this arm is always local.
+            // The mock has no providers.
             destination: Some(crate::proto::pick_response::Destination::Local(
                 crate::proto::LocalTarget { endpoint },
             )),
@@ -275,8 +259,7 @@ impl Picker for MockKinferenceService {
         &self,
         _request: Request<ReportFirstTokenRequest>,
     ) -> Result<Response<ReportFirstTokenResponse>, Status> {
-        // Mock holds no pending-observation state — every report is
-        // treated as acknowledging a known-but-stateless pick.
+        // No pending-observation state; every report is acknowledged.
         Ok(Response::new(ReportFirstTokenResponse {
             acknowledged: true,
         }))

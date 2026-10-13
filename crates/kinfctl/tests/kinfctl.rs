@@ -1,10 +1,8 @@
 //! `kinfctl` end to end: the real binary, real files, real exit statuses.
 //!
-//! The checks themselves are unit-tested in `kinference-policy`'s
-//! `check/tests.rs`. What only a test of the binary can catch is the contract a script or an agent
-//! relies on: which inputs it reads, what goes to stdout versus stderr, and
-//! that the exit status alone separates "clean", "findings" and "could not
-//! check".
+//! The checks are unit-tested in `kinference-policy`'s `check/tests.rs`. These
+//! cover the contract scripts rely on: which inputs are read, stdout versus
+//! stderr, and the exit statuses for "clean", "findings" and "could not check".
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -528,8 +526,8 @@ fn live_objects_on_stdin_are_checked_beside_a_draft() {
     );
 }
 
-/// Input that cannot be checked is exit 2 with the reason on stderr — never
-/// confusable with a clean check, and never mixed into the report on stdout.
+/// Input that cannot be checked is exit 2 with the reason on stderr, never
+/// mixed into the report on stdout.
 #[test]
 fn unusable_input_exits_2_with_the_reason_on_stderr() {
     let demo = Demo::new();

@@ -1,35 +1,22 @@
-//! HTTP surface for the policy explorer — and for any program that wants the
-//! same answers: `GET /api/policy/context` and `POST /api/policy/simulate`.
+//! The policy API: `GET /api/policy/context` and `POST /api/policy/simulate`.
 //!
-//! Three guarantees, each load-bearing because this listener is plaintext and
-//! unauthenticated (see the crate README) and is called by agents as well as
-//! by the dashboard:
+//! The listener is plaintext and unauthenticated, so:
 //!
-//! - **Read-only.** Both handlers evaluate against an immutable snapshot and
-//!   change nothing: no metric, no counter, no cache, no id allocation. The
-//!   guarantee is structural — [`PolicyApiState`] holds only snapshot readers
-//!   — and a router-level test renders `/metrics` before and after a burst of
-//!   calls and requires the two to be identical.
-//! - **Bounded.** Request bodies are capped, list sizes are capped, `runs` is
-//!   capped, and simulation runs on the blocking pool behind a small semaphore
-//!   — never on the async runtime that serves gRPC `Pick`. A flood of
-//!   simulations gets `429 Busy`, not a slower router.
-//! - **JSON, always.** Every response under `/api` is JSON, errors included,
-//!   in one envelope: `{"error": {"code", "message", "field"?}}`. An unknown
-//!   path is a JSON 404 listing the real ones; a wrong method is a JSON 405. Unknown request fields are rejected
-//!   by name, so a typo cannot be silently ignored.
+//! - Read-only. Both handlers evaluate against an immutable snapshot and change
+//!   nothing (no metric, counter, cache or id allocation). [`PolicyApiState`]
+//!   holds only snapshot readers, and `the_policy_api_changes_no_metric`
+//!   checks `/metrics` is unchanged by a burst of calls.
+//! - Bounded. Bodies, lists and `runs` are capped, and simulation runs on the
+//!   blocking pool behind a small semaphore, never on the runtime serving
+//!   `Pick`. Excess simulations get `429 Busy`.
+//! - JSON, always, errors included, in one envelope:
+//!   `{"error": {"code", "message", "field"?}}`. Unknown request fields are
+//!   rejected by name.
 //!
-//! The decision itself comes from [`crate::policy::explain`]; this module
-//! seeds candidates from live state, applies the caller's overrides, and
-//! projects the result to JSON.
-//!
-//! # Why a hand-written projection
-//!
-//! Nothing in `policy::` derives `Serialize` for its engine types — not
-//! `Trace`, `Candidate`, `CompiledRoute` or any of it. Adding derives would
-//! widen those types' public contract for a dashboard feature.
-//! Projecting by hand is the precedent, and it
-//! is also where API naming belongs rather than leaking Rust field names.
+//! The decision comes from [`crate::policy::explain`]; this module seeds
+//! candidates from live state, applies the caller's overrides, and projects
+//! the result to JSON by hand, so API naming doesn't leak Rust field names and
+//! the engine types needn't derive `Serialize`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -58,25 +45,20 @@ use crate::pool::PoolRegistry;
 
 // ── limits ───────────────────────────────────────────────────────────────────
 
-/// Largest request body any `/api` route accepts. A policy simulation is a few
-/// kilobytes; this leaves two orders of magnitude of headroom and still keeps
-/// one request from pinning megabytes.
+/// Largest request body any `/api` route accepts; a simulation is a few
+/// kilobytes.
 pub(super) const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_CANDIDATES: usize = 256;
 const MAX_MODELS: usize = 32;
 const MAX_TAGS: usize = 64;
 const MAX_RUNS: u32 = 500;
-/// Token counts past this are not a prompt anyone sends, and bounding them is
-/// what keeps the block arithmetic in [`predict`] from overflowing.
+/// Bounds token counts so the block arithmetic in [`predict`] can't overflow.
 const MAX_TOKENS: i64 = 10_000_000;
 /// Simulations that may run at once. Each is CPU-bound for up to `MAX_RUNS`
-/// evaluations; more than a handful in parallel is a client fanning out, and
-/// it should be told to slow down rather than allowed to occupy the blocking
-/// pool.
+/// evaluations.
 const SIM_CONCURRENCY: usize = 4;
 
-/// The endpoints that exist, for the 404 body — an agent that guessed a path
-/// learns the real ones from the error instead of from documentation.
+/// The endpoints that exist, for the 404 body.
 const ENDPOINTS: &[(&str, &str)] = &[
     ("GET", "/api/policy/context"),
     ("POST", "/api/policy/simulate"),
@@ -125,10 +107,8 @@ impl ApiError {
         }
     }
 
-    /// axum's JSON rejections are plain text with a status of their own
-    /// choosing; fold them into the envelope. A body that is not JSON, or not
-    /// the right shape, or carries a field this API does not have, is the
-    /// caller's to fix, so all of those are `InvalidRequest`.
+    /// Fold axum's plain-text JSON rejections into the envelope, all as
+    /// `InvalidRequest`.
     fn from_rejection(rej: JsonRejection) -> Self {
         let message = rej.body_text();
         match rej.status() {
@@ -213,14 +193,11 @@ pub(super) fn method_not_allowed(allow: &'static str) -> ApiError {
 
 // ── state ────────────────────────────────────────────────────────────────────
 
-/// What both handlers need. One extractor because axum allows a handler a
-/// single `State` — the same reason `ReadyzState` exists.
+/// What both handlers need, as one `State` extractor.
 ///
-/// **Snapshot readers only.** No `PromMetrics`, no body store,
-/// no inflight registry, no HTTP or kube client. That absence is what makes
-/// "read-only" a property of the types rather than a promise, and the metrics
-/// test in `dashboard/tests.rs` is what notices if someone adds one. The
-/// semaphore is not state about the fleet; it bounds this API's own load.
+/// Snapshot readers only: no `PromMetrics`, body store, inflight registry, or
+/// HTTP or kube client, which makes the API read-only by construction. The
+/// semaphore only bounds this API's own load.
 #[derive(Clone)]
 pub(super) struct PolicyApiState {
     pub(super) policy: Option<Arc<PolicyStore>>,
@@ -250,13 +227,8 @@ impl FromRef<super::AppState> for PolicyApiState {
     }
 }
 
-/// Three distinguishable states, mirroring `readyz` rather than flattening the
-/// last two into an empty list.
-///
-/// `disabled` and `not listed` call for opposite reactions — one is a config
-/// choice, the other resolves on its own within a second or two — and an empty
-/// array cannot say which. `readyz` already draws this distinction; a bare `[]`
-/// here would undo it.
+/// The snapshot, or why there is none: policy disabled, or not listed yet.
+/// These are reported distinctly rather than as an empty list.
 fn snapshot_or_reason(st: &PolicyApiState) -> Result<Arc<PolicyIndex>, ApiError> {
     let Some(store) = st.policy.as_ref() else {
         return Err(ApiError::new(
@@ -308,9 +280,7 @@ fn on_empty_str(o: OnEmpty) -> &'static str {
 /// A candidate as the caller sees it: live values, editable, and postable back
 /// to `simulate` verbatim as one of its `candidates`.
 ///
-/// A struct rather than eight positional arguments — two adjacent `&str` model
-/// names and two adjacent `Option<i64>` would swap silently, and the compiler
-/// would not care.
+/// A struct rather than positional arguments, several of which share a type.
 struct Seed<'a> {
     pool_key: &'a str,
     name: &'a str,
@@ -318,9 +288,7 @@ struct Seed<'a> {
     canonical: &'a str,
     upstream: &'a str,
     endpoint: Option<&'a str>,
-    /// The windowed MEAN, not the instantaneous depth — the value a policy
-    /// actually thresholds, so "reset to live" seeds a number the operator can
-    /// calibrate against.
+    /// The windowed mean, which is what a policy thresholds.
     queued: Option<f64>,
     kv_cache_usage: Option<f64>,
     context_window: Option<i64>,
@@ -342,16 +310,12 @@ fn seed_json(s: Seed<'_>) -> Value {
 
 /// Live candidate seeds for one pool, sorted.
 ///
-/// Deliberately NOT the driver's candidate generation, which is async and needs
-/// the tokenizer and the radix index. These are the cheap, structural facts —
-/// which destinations exist, which endpoints are behind a local one, and their
-/// current queue depth. `predictedTTFT` is computed at simulate time, because
-/// it depends on the prompt size the caller supplies.
+/// Not the driver's candidate generation, which needs the tokenizer and the
+/// radix index: just which destinations exist, their endpoints, and current
+/// queue depth. `predictedTTFT` is computed at simulate time.
 ///
-/// SORTED, by pool, backend, canonical model, upstream model and endpoint.
-/// Registry iteration order differs per process, and the explorer defaults its
-/// model field to the first seed — so unsorted, the default changed between
-/// replicas and between restarts, and a caller diffing two responses saw noise.
+/// Sorted by pool, backend, canonical model, upstream model and endpoint, so
+/// responses are stable across processes.
 fn seeds_for_pool(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
     let key = format!("{}/{}", pool.namespace, pool.name);
     let mut out = Vec::new();
@@ -368,18 +332,14 @@ fn seeds_for_pool(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                         Some(e) => e,
                         None => continue,
                     };
-                    // `None` until the first scrape — reported as null rather
-                    // than as the zeros `latest` would give, which read as an
-                    // idle worker. Production treats it the same way.
+                    // `None` until the first scrape, rather than zeros that
+                    // would read as idle.
                     let s = st.metrics.sample(id);
                     let models = st.metrics.models(id);
-                    // One seed per served model: a policy chooses model AND
-                    // place in one pass, so a worker serving two models is two
-                    // candidates — same as the driver produces.
+                    // One seed per served model, as the driver produces.
                     let served: Vec<(String, Option<i64>)> = if models.models.is_empty() {
-                        // No `/v1/models` refresh yet: fall back to whatever the
-                        // registry knows, so a cold worker still appears rather
-                        // than silently missing from the candidate table.
+                        // No `/v1/models` refresh yet: fall back to what the
+                        // registry knows, so a cold worker still appears.
                         entry
                             .current_models
                             .iter()
@@ -397,20 +357,9 @@ fn seeds_for_pool(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                         if upstream.is_empty() {
                             continue;
                         }
-                        // ALIASES. The driver iterates canonical-first —
-                        // `models_to_score` yields the client-facing names a
-                        // rule asked for, and `upstreams_for` maps each to the
-                        // upstream models a set serves. Seeding upstream-first
-                        // means the canonical name is never learned, so a
-                        // `consider: {models: {names: [gemma-4]}}` sees only
-                        // `google/gemma-4-12B-it` and admits nothing — the
-                        // policy looks broken when the seed is.
-                        //
-                        // `aliases_for` is the forward direction of that table,
-                        // and the upstream name stays routable under itself
-                        // (aliases ADD names, they are not a whitelist), so the
-                        // row is its own candidate plus one per alias — exactly
-                        // the provider shape below.
+                        // One candidate per client-facing name, as the driver
+                        // produces: the upstream itself plus one per alias, so
+                        // a `consider` naming an alias admits it.
                         for canonical in
                             std::iter::once(upstream.clone()).chain(ws.aliases_for(&upstream))
                         {
@@ -437,9 +386,7 @@ fn seeds_for_pool(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                     let Some(upstream) = m.name.as_deref() else {
                         continue;
                     };
-                    // The row's own name is routable under itself, and each
-                    // alias is another client-facing name for the same wire
-                    // string — so one row can be several candidates.
+                    // The row's own name plus each alias.
                     for canonical in
                         std::iter::once(upstream).chain(m.aliases.iter().map(|a| a.as_str()))
                     {
@@ -475,7 +422,7 @@ fn seeds_for_pool(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
 
 /// The pool's destinations as declared, with what an author needs to write a
 /// policy against them: the name a policy uses, the class, the labels a
-/// selector matches, the models declared, and — for a local set — the KV block
+/// selector matches, the models declared, and, for a local set, the KV block
 /// size `matchedBlocks` is counted in.
 fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
     let map = st.pools.snapshot();
@@ -531,8 +478,8 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
     out
 }
 
-/// The policy a pool names, as `{name, resolved}` — or `null` when it names
-/// none and serves every request as asked.
+/// The policy a pool names, as `{name, resolved}`, or `null` when it names
+/// none.
 fn policy_ref_json(pool: &ResolvedPool) -> Value {
     use crate::policy::resolve::DanglingPolicy;
     match &pool.dangling_policy {
@@ -547,7 +494,7 @@ fn policy_ref_json(pool: &ResolvedPool) -> Value {
     }
 }
 
-/// `GET /api/policy/context` — everything a caller needs to write a simulation:
+/// `GET /api/policy/context`: everything a caller needs to write a simulation:
 /// every policy with its findings, every pool with its destinations and live
 /// candidates, and the closed vocabularies (`qos`, `tags`).
 pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
@@ -566,42 +513,34 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
                 "namespace": p.namespace,
                 "name": p.name,
                 "key": format!("{}/{}", p.namespace, p.name),
-                // EMPTY means nothing routes through it. The store computes
-                // this forward, so it is not inferred by scanning pools.
+                // False means nothing routes through it.
                 "attached": !p.referenced_by.is_empty(),
                 "referencedBy": p.referenced_by,
-                // The kubectl column, for people; the booleans, for programs.
+                // The kubectl `state` column.
                 "state": status.state,
                 "inForce": !p.referenced_by.is_empty(),
                 "hasWarnings": !warnings.is_empty(),
-                // Compile warnings and name warnings — the full list, never
-                // truncated the way `status.warnings` has to be. Compilation is
-                // infallible, so a policy WITH warnings still routes; this is
-                // the "look at me" signal, not absence from the list.
+                // Compile and name warnings, untruncated, unlike
+                // `status.warnings`. A policy with warnings still routes.
                 "warnings": warnings,
                 "unmatched": unmatched_str(p.policy.unmatched),
                 "rules": p.policy.rules.iter().enumerate().map(|(i, r)| json!({
                     "index": i,
                     "name": r.name,
-                    // How many entries `matches` has — not how many requests
-                    // matched. Zero means the rule is a catch-all.
+                    // Entries in `matches`, not requests matched. Zero means
+                    // a catch-all.
                     "matchEntries": r.matches.len(),
                     "requiresClassifiers": r.requires_classifiers,
                     "onEmpty": on_empty_str(r.route.on_empty),
                 })).collect::<Vec<_>>(),
                 "nondeterminism": explain::nondeterminism(&p.policy),
-                // The spec AS APPLIED, not a re-rendering of the compiled form.
-                // `InferencePolicySpec` is `camelCase` with
-                // `skip_serializing_if` on its optionals, so this is already
-                // the shape the operator wrote — no null noise to strip.
+                // The spec as applied, not the compiled form.
                 "spec": serde_json::to_value(p.spec.as_ref()).unwrap_or(Value::Null),
             })
         })
         .collect();
 
-    // Sorted, because `PolicyIndex::pools()` iterates a `HashMap` — so without
-    // this the list, and therefore which pool the form defaults to, changes
-    // between page loads and between processes.
+    // Sorted, since `PolicyIndex::pools()` iterates a `HashMap`.
     let mut by_key: Vec<&Arc<ResolvedPool>> = snap.pools().collect();
     by_key.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
     let pools: Vec<Value> = by_key
@@ -617,8 +556,7 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
         })
         .collect();
 
-    // From the classifier registry, so the tag picker cannot drift from what
-    // the classifiers can actually emit.
+    // From the classifier registry, so the list matches what can be emitted.
     let mut tags: Vec<&str> = classify::CLASSIFIERS
         .iter()
         .flat_map(|c| c.emits.iter().copied())
@@ -639,10 +577,9 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
 
 /// One candidate the caller wants in the simulation, with its overrides.
 ///
-/// `deny_unknown_fields`: a misspelled override (`queuedPrompt`) used to be
-/// dropped without a word and the simulation ran on the live value, which is
-/// the most misleading thing an explorer can do. Every field a `context` seed
-/// carries is accepted, so seeds can be posted back unchanged.
+/// `deny_unknown_fields`, so a misspelled override is rejected rather than
+/// ignored. Every field a `context` seed carries is accepted, so seeds can be
+/// posted back unchanged.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct CandidateOverride {
@@ -658,8 +595,7 @@ pub(super) struct CandidateOverride {
     upstream_model: Option<String>,
     #[serde(default)]
     endpoint: Option<String>,
-    /// Mean queued prompts over the window — fractional. `0.3` is "a brief
-    /// spike"; `4` is "sustained".
+    /// Mean queued prompts over the window, so fractional.
     #[serde(default)]
     queued_prompts: Option<f64>,
     /// Mean KV-cache utilization, 0.0..1.0.
@@ -842,8 +778,8 @@ impl SimRequest {
 enum PredictionSource {
     /// The real predictor, with this candidate's own worker set's model.
     Predictor,
-    /// The real predictor, with ANOTHER set's model — the candidate names no
-    /// set in the pool.
+    /// The real predictor, with another set's model, since the candidate
+    /// names no set in the pool.
     Borrowed,
     /// The caller supplied `predictedTtftMs`.
     Override,
@@ -866,7 +802,7 @@ impl PredictionSource {
 }
 
 /// What the predictor said about one candidate, and the block arithmetic
-/// behind it — which `prefixCacheHitRatio` is derived from.
+/// `prefixCacheHitRatio` is derived from.
 struct Prediction {
     ms: Option<f64>,
     source: PredictionSource,
@@ -887,14 +823,11 @@ impl Prediction {
     }
 }
 
-/// THE single candidate constructor.
+/// The single candidate constructor.
 ///
-/// `predicted_ttft_ms` lives in two places — `target` as f32 (which
-/// `objective_ms` ranks on) and `attrs` as f64 (which `drop:` predicates read).
-/// They are independent fields, so building a candidate anywhere else would let
-/// the explorer rank on one number while showing another. Same for
-/// `observed_ttft_ms`, and for `backend_type`, which must agree with the
-/// `target` variant because tier filtering uses one and predicates the other.
+/// `predicted_ttft_ms`, `observed_ttft_ms` and the backend type each live in
+/// both `target` (for ranking and tier filtering) and `attrs` (for
+/// predicates); building candidates in one place keeps them agreeing.
 fn build_candidate(
     o: &CandidateOverride,
     p: &Prediction,
@@ -908,8 +841,8 @@ fn build_candidate(
         .unwrap_or_else(|| o.canonical_model.clone());
     let is_local = o.backend_type == "Local";
     let ttft = p.ms.or(o.predicted_ttft_ms);
-    // As production derives it (`policy_driver`): matched over total blocks,
-    // and 0.0 — not absent — when the prompt spans no blocks.
+    // As `policy_driver` derives it: matched over total blocks, and 0.0 (not
+    // absent) when the prompt spans no blocks.
     let hit_ratio = o.prefix_cache_hit_ratio.or(match p.blocks {
         Some((total, matched)) if total > 0 => Some(matched as f64 / total as f64),
         Some(_) => Some(0.0),
@@ -930,8 +863,7 @@ fn build_candidate(
         CandidateTarget::Provider {
             provider: ObjectKey::new("default", &o.backend_name),
             backend_ref: ObjectKey::new("default", &o.backend_name),
-            // Nothing ranks on the dispatch path, and the explorer simulates a
-            // decision rather than making one, so there is no path to carry.
+            // Nothing is dispatched.
             path: None,
             observed_ttft_ms: o.observed_ttft_p95_ms.map(|v| v as f32),
         }
@@ -966,18 +898,8 @@ fn build_candidate(
 
 /// Every name a request for `requested` answers to.
 ///
-/// `RequestAttrs::model` is a SET, not the string the client typed: by the
-/// time a predicate runs, an alias has already been rewritten to a concrete
-/// upstream, so the attrs carry the upstream PLUS every client-facing alias
-/// declared for it. That is what makes `matches: {model: qwen-2.5}` fire for a
-/// request naming `qwen-simple` — both are aliases of the same upstream model —
-/// and what keeps `matches` agreeing with `route.consider[].models.names[]`,
-/// which resolves through the same table.
-///
-/// Sending only the typed name would make the explorer under-match relative to
-/// production: a rule that fires in the cluster would read as "did not match"
-/// here. So the resolution happens SERVER-side, off the same tables, rather
-/// than being reimplemented in the browser where it could drift.
+/// As in production, `RequestAttrs::model` is the resolved upstream plus every
+/// client-facing alias declared for it, resolved from the same tables.
 fn model_attr_set(
     st: &PolicyApiState,
     pool: Option<&ResolvedPool>,
@@ -990,11 +912,8 @@ fn model_attr_set(
         .map(|p| p.local_destinations().collect())
         .unwrap_or_default();
 
-    // `resolve_alias`'s ordering rule, shared rather than restated. Its
-    // `is_served` check keeps interchangeable upstream models resolving to the
-    // one that actually exists; falling back to the raw table when NOTHING is
-    // served keeps the explorer usable against a cold or unreachable fleet,
-    // which is the state it is most often opened in.
+    // `resolve_alias`'s ordering rule. When nothing is served, fall back to
+    // the raw table so simulation works against a cold fleet.
     let map = st.pools.snapshot();
     let upstream = crate::monitor::first_served_upstream(&refs, requested, |u| {
         map.iter().any(|p| {
@@ -1007,8 +926,7 @@ fn model_attr_set(
     .or_else(|| crate::monitor::first_served_upstream(&refs, requested, |_| true))
     .unwrap_or_else(|| requested.to_string());
 
-    // Upstream first, then aliases sorted — the order `lifecycle.rs` builds and
-    // traces are read in.
+    // Upstream first, then aliases sorted, as `lifecycle.rs` builds it.
     let mut aliases: Vec<String> = refs
         .iter()
         .flat_map(|d| d.aliases_for(&upstream))
@@ -1021,16 +939,11 @@ fn model_attr_set(
 
 /// Run the real predictor for a hypothetical prompt on one candidate.
 ///
-/// The source is NOT decoration. `CandidateTarget::Local::predicted_ttft_ms`
-/// is a plain f32, so a candidate with no prediction is necessarily ranked as
-/// **0.0 ms** — the fastest possible worker. Under `minimize: PredictedTTFT`
-/// that reads as a working ranking while every candidate is actually tied on a
-/// fabricated zero. The caller echoes the source back so the UI can say so.
+/// The source is reported because a candidate with no prediction is ranked at
+/// 0.0 ms, the fastest possible.
 ///
-/// One known optimism, documented rather than hidden: the predictor is given no
-/// running batch, no decode contention and no KV pressure, because a
-/// hypothetical request has none of the live context those come from. Real
-/// picks under load predict higher.
+/// The predictor is given no running batch, decode contention or KV pressure,
+/// so it is optimistic compared to real picks under load.
 fn predict(
     st: &PolicyApiState,
     pool: Option<&ResolvedPool>,
@@ -1043,21 +956,9 @@ fn predict(
             Some("providers have no per-request prediction"),
         );
     }
-    // Which worker set's predictor, and its live pool — or why there is none.
-    //
-    // THIS CANDIDATE's set, not the pool's first. The predictor's coefficients
-    // come from the set's `[[profile]]` and its `block_size` from the set's
-    // `kvBlockSize`, and both differ per set — gemma publishes 256-token blocks
-    // against one profile, qwen 16 against another. Taking
-    // `local_destinations().next()` predicted every candidate in the pool with
-    // the FIRST set's model, so a fleet of four workers across two sets
-    // returned one identical number for all of them, and `minimize:
-    // PredictedTTFT` had nothing to rank on.
-    //
-    // A synthesized worker belongs to no set. Borrowing a predictor is more
-    // useful than refusing, but the number is then a different set's model, so
-    // the source says which — silently borrowing is how that bug read as
-    // working in the first place.
+    // This candidate's worker set's predictor and live pool, or why there is
+    // none. Coefficients and block size differ per set. A synthesized worker
+    // belongs to no set, so it borrows one, reported as `Borrowed`.
     let map = st.pools.snapshot();
     let found: Result<(Option<String>, Arc<crate::pool::Pool>), &'static str> = match pool {
         None => Err("no pool selected, so no predictor to run; ranked as 0.0 ms"),
@@ -1082,10 +983,8 @@ fn predict(
         }
     };
 
-    // Ceiling division: a partial block still has to be prefilled. This is also
-    // why the form's token count is only ever block-accurate — at real pick time
-    // `inputTokens` is itself `total_blocks * block_size`. `validate` bounds
-    // the token count, so this cannot overflow.
+    // Ceiling division: a partial block still has to be prefilled. `validate`
+    // bounds the token count, so this can't overflow.
     let blocks = found.as_ref().ok().map(|(_, live)| {
         let bs = live.block_size.max(1) as i64;
         let tokens = input_tokens.unwrap_or(0).max(0);
@@ -1093,9 +992,7 @@ fn predict(
         (total, o.matched_blocks.unwrap_or(0).min(total))
     });
 
-    // An explicit override wins whether or not a predictor exists; running it
-    // and discarding the answer would only be misleading work. The block count
-    // still feeds the hit ratio when there is a set to count in.
+    // An explicit override wins. The block count still feeds the hit ratio.
     if o.predicted_ttft_ms.is_some() {
         return Prediction {
             ms: None,
@@ -1116,10 +1013,7 @@ fn predict(
         endpoint: o.endpoint.clone().unwrap_or_default(),
         matched_blocks: matched,
         completion_rate_per_sec: 0.0,
-        // The predictor takes an instantaneous depth, so the windowed mean is
-        // rounded back to one here. That is the honest conversion for a
-        // simulation: the mean IS the caller's estimate of how deep the queue
-        // sits, and `predicted_wait_ms` has no notion of a window.
+        // The predictor takes an instantaneous depth, so round the mean.
         queue_waiting: o.queued_prompts.unwrap_or(0.0).max(0.0).round() as u32,
         queue_running: 0,
         queue_swapped: 0,
@@ -1127,8 +1021,7 @@ fn predict(
         block_size,
         total_blocks,
     };
-    // No inflight summaries: a hypothetical request has no shadow dispatches,
-    // and inventing some would make the number depend on invisible state.
+    // No inflight summaries for a hypothetical request.
     let ms = picker::predicted_wait_ms(&score, &live.predictor, &[], Instant::now()).total_ms();
     match borrowed {
         None => Prediction {
@@ -1226,10 +1119,8 @@ async fn simulate_inner(st: PolicyApiState, req: SimRequest) -> Result<Value, Ap
         }
     }
 
-    // CPU-bound, so off the async runtime that also serves gRPC `Pick`, and
-    // behind a semaphore so a client fanning out cannot occupy the blocking
-    // pool either. `try_acquire`, not `acquire`: queueing requests here would
-    // only move the backlog somewhere less visible.
+    // CPU-bound, so on the blocking pool, behind a semaphore. `try_acquire`,
+    // so excess requests get 429 rather than queueing.
     let permit = st
         .sim_permits
         .clone()
@@ -1259,8 +1150,7 @@ async fn simulate_inner(st: PolicyApiState, req: SimRequest) -> Result<Value, Ap
             format!("simulation failed: {e}"),
         )
     })?;
-    // INFO, once per call: the audit trail of what an agent asked. Context
-    // reads are DEBUG — they are idempotent and polled.
+    // INFO, as an audit trail. Context reads are DEBUG, since they are polled.
     tracing::info!(
         policy = %policy_key,
         pool = pool_key.as_deref().unwrap_or("-"),
@@ -1273,8 +1163,7 @@ async fn simulate_inner(st: PolicyApiState, req: SimRequest) -> Result<Value, Ap
     Ok(body)
 }
 
-/// The simulation proper. Synchronous and pure over its inputs — it reads the
-/// snapshot it is handed and changes nothing.
+/// The simulation proper. Pure over its inputs.
 fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> Value {
     let (ns, name) = split_key(&req.policy).expect("validated");
     let resolved = snap
@@ -1301,16 +1190,14 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
         tag: req.tags.clone(),
     };
 
-    // `evaluate` never dereferences a candidate's pool id; it only has to be
-    // SOME id. A fixed placeholder rather than `PoolId::next()`, which would
-    // advance a process-wide counter on every simulation — small, but this
-    // API's promise is to change nothing at all.
+    // `evaluate` never dereferences the pool id. A fixed placeholder, since
+    // `PoolId::next()` would advance a process-wide counter.
     let sim_pool_id = pool
         .and_then(|p| p.local_destinations().next().map(|ws| ws.pool_id))
         .unwrap_or(PoolId::UNSCORED);
 
-    // `backend.readyEndpoints` the way production counts it: the endpoints of
-    // the worker set — here, the distinct local endpoints the caller gave.
+    // `backend.readyEndpoints`: the distinct local endpoints given per
+    // backend.
     let mut endpoints: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for c in req.candidates.iter().filter(|c| c.backend_type == "Local") {
         endpoints
@@ -1329,8 +1216,8 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
                     .get(o.backend_name.as_str())
                     .map(|e| e.len() as i64)
             });
-            // The destination's labels, as production stamps them, so a
-            // `select` tier that subsets by label sees what it would live.
+            // The destination's labels, for `select` tiers that subset by
+            // label.
             let labels = pool
                 .and_then(|p| p.backend(&o.backend_name))
                 .map(|d| Arc::new(d.labels().clone()))
@@ -1340,9 +1227,8 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
         .collect();
     let candidates: Vec<Candidate> = built.iter().map(|(c, _)| c.clone()).collect();
 
-    // The candidate set as actually evaluated, echoed back. `Trace` carries no
-    // per-candidate attribute snapshot, so without this a caller cannot see WHY
-    // `queuedPrompts > 8` matched — only that it did.
+    // The candidate set as evaluated, since `Trace` carries no per-candidate
+    // attributes.
     let effective: Vec<Value> = built
         .iter()
         .map(|(c, p)| {
@@ -1367,8 +1253,7 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
 
     let first = explain::explain(&policy, &attrs, &candidates);
 
-    // A nondeterministic policy presented as one answer is a trap, so the
-    // caller can ask for a distribution instead.
+    // A nondeterministic policy can be run repeatedly for a distribution.
     let runs = req.runs.unwrap_or(1);
     let histogram = if runs > 1 {
         let mut counts: BTreeMap<String, u32> = BTreeMap::new();
@@ -1394,9 +1279,7 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
     // Compile AND name warnings, as `context` and status report them.
     body["warnings"] = json!(resolved.all_warnings().collect::<Vec<_>>());
     body["effectiveCandidates"] = json!(effective);
-    // What the typed name expanded to. Echoed because the expansion is the
-    // whole reason a `model:` term fires for a name the user did not type, and
-    // an unexplained match is as confusing as an unexplained miss.
+    // What the requested name expanded to, which explains `model:` matches.
     body["resolvedModels"] = json!(attrs.model);
     body["distribution"] = histogram.unwrap_or(Value::Null);
     body

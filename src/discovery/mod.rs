@@ -1,18 +1,15 @@
 //! Worker discovery layer.
 //!
-//! A `Discovery` is the source-of-truth for "which workers are live right
-//! now." It emits `WorkerChange::{Added, Removed}` events on a channel; the
-//! coordinator in `main.rs` reacts by registering/unregistering workers in
-//! the various per-worker state stores and spawning/cancelling their
-//! per-worker tasks.
+//! A `Discovery` is the source of truth for which workers in one worker set
+//! are live. It emits `WorkerChange::{Added, Removed}` events; the coordinator
+//! in `server.rs` registers or unregisters each worker and spawns or cancels
+//! its per-worker tasks.
 //!
 //! Two implementations:
-//! - [`static_config::StaticDiscovery`] wraps the existing
-//!   `Config.workers: Vec<WorkerConfig>`. Emits one Added per worker at
-//!   startup, then waits on `cancel`. Bit-for-bit equivalent to the
-//!   pre-discovery static-config behavior.
-//! - `kubernetes::KubeDiscovery` (Phase D) watches Pods by label selector
-//!   and emits Added/Removed as pods reach/leave Ready.
+//! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
+//!   set's `workers_file`, then waits on `cancel`.
+//! - [`kubernetes::KubeDiscovery`] watches a Service's EndpointSlices and
+//!   emits `Added`/`Removed` as endpoints become or stop being Ready.
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -23,11 +20,9 @@ use crate::config::WorkerConfig;
 pub mod kubernetes;
 pub mod static_config;
 
-/// One discovery event. Sent by a `Discovery` impl, consumed by the
-/// coordinator in `main.rs`.
-// `Added(WorkerConfig)` dwarfs `Removed(u64)`, but discovery events are rare
-// and short-lived, so the size gap costs nothing; boxing the config would
-// churn every constructor and match arm for it.
+/// One discovery event, consumed by the coordinator in `server.rs`.
+// `Added(WorkerConfig)` dwarfs `Removed(u64)`, but discovery events are rare,
+// so boxing isn't worth it.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum WorkerChange {
@@ -36,7 +31,6 @@ pub enum WorkerChange {
     Added(WorkerConfig),
     /// A previously-Added worker is gone. The coordinator should cancel
     /// its per-worker tasks and unregister it from every state store.
-    // Not constructed until Phase D adds `KubeDiscovery`.
     #[allow(dead_code)]
     Removed(u64),
 }
@@ -51,9 +45,8 @@ pub enum WorkerChange {
 ///   leaves the set. Duplicate `Removed` for an unknown worker is
 ///   tolerated (the coordinator drops them).
 /// - `run` MUST exit cleanly when `cancel.cancelled()` fires.
-/// - `run` MAY drop events if the channel is full (sender's responsibility
-///   to back-pressure or coalesce). The default coordinator channel
-///   capacity is 64, which is plenty for typical fleet sizes.
+/// - `run` MAY drop events if the channel is full. The coordinator channel
+///   holds 64.
 #[async_trait]
 pub trait Discovery: Send + Sync + 'static {
     async fn run(
