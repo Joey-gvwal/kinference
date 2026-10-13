@@ -1,42 +1,26 @@
-//! Scoring — turning a pool's live workers into a ranked `ScoreResponse`.
+//! Scoring: turning a pool's live workers into `WorkerScore` rows.
 //!
-//! This is the arithmetic half of a pick: it reads the metrics registry and
-//! the KV index, projects each worker onto a `picker::WorkerScore`, and hands
-//! the result to `crate::picker` to rank. It performs no I/O of its own and
-//! makes no routing decision — `lifecycle` decides what to do with the ranking.
-//!
-//! `degraded_response` is the same path with the prefix-cache trio zeroed, for
-//! when tokenize is unavailable. Both build their scores through
-//! `super::worker_score`, which is the single place that projection happens;
-//! they used to write it out separately, and a field added to one but not the
-//! other was silently zero on the outage path alone.
+//! Reads the metrics registry and the KV index and projects each worker via
+//! `super::worker_score`. Makes no routing decision; `lifecycle` does.
+//! `degraded_response` is the same with the prefix-cache values zeroed.
 
 use super::*;
 
 impl KinferenceService {
-    /// Build a degraded `ScoreResponse` when tokenize is unavailable.
-    /// Live load metadata (queue depth, KV cache usage, served models,
-    /// completion rate, etc.) is populated from `MetricsRegistry` exactly
-    /// as it would be on the success path — only the prefix-cache trio
-    /// (`token_count`, `total_blocks`, `matched_blocks`) is zeroed.
-    /// Callers can still route on load; only the cache-aware part of
-    /// the decision is unavailable.
+    /// Build a degraded `ScoreResponse` when tokenize is unavailable: load
+    /// fields as usual, `total_blocks` and `matched_blocks` zeroed.
     pub(crate) fn degraded_response(&self, workers: &[(u64, WorkerEntry)]) -> ScoreResponse {
         let mut scores = Vec::with_capacity(workers.len());
         for (num, entry) in workers {
             let sample = self.metrics.latest(*num);
-            // The cache trio is zeroed because tokenize is unavailable; the
-            // load fields are as real here as on the success path.
             scores.push(worker_score(entry, &sample, entry.block_size, 0, 0));
         }
         ScoreResponse { scores }
     }
 
-    /// Core scoring engine — the shared body of work that the gRPC
-    /// pick path calls.
+    /// Score one pool's workers for one model.
     ///
-    /// `chat_kwargs` is consumed when `input` is Chat / Messages; it's
-    /// ignored for Raw (no template) and Tokens (no /tokenize call).
+    /// `chat_kwargs` applies to Chat and Messages input only.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn score_workers(
         &self,
@@ -53,16 +37,8 @@ impl KinferenceService {
             hashes_by_block_size: HashMap::new(),
         };
 
-        // 1. Resolve the workers serving this model. Filter to
-        //    workers that have resolved enough state to be picked:
-        //    block_size known + /v1/models scraped + initial event-
-        //    stream sync done. Picking against an unready worker
-        //    computes block hashes at the wrong block_size and
-        //    silently misroutes, triggering the tokenize-divergence
-        //    warning. See `WorkerEntry::is_ready` for the per-signal
-        //    rationale. When NO ready workers serve the model, we
-        //    return `NoWorkers` (transient
-        //    during cold-start until at least one worker readies).
+        // 1. Ready workers serving this model (see `WorkerEntry::is_ready`).
+        //    None means `NoWorkers`, typically during cold start.
         let workers: Vec<_> = pool
             .registry
             .workers_for_model(model)
@@ -73,18 +49,14 @@ impl KinferenceService {
             return (ScoreOutcome::NoWorkers, side);
         }
 
-        // Destructure once: only one of the Chat/Messages arms below
-        // fires per call, so move-by-arm is fine. Raw/Tokens arms
-        // don't consume the extras (no chat template applied).
         let ChatExtras {
             tools,
             tool_choice,
             add_generation_prompt,
         } = chat_extras;
 
-        // 2. Get tokens (pre-supplied, or via /tokenize against the
-        //    worker pool). Tokenize NEVER returns a Status — total
-        //    failures become `Unavailable` and we degrade instead.
+        // 2. Get tokens, pre-supplied or by tokenizing. Total failure
+        //    degrades rather than erroring.
         let token_source: TokenSource = match input {
             Input::Tokens(t) => TokenSource::Direct(t),
             Input::Raw(s) => TokenSource::NeedsTokenize(TokenizeInput::Raw(s)),
@@ -96,10 +68,7 @@ impl KinferenceService {
                 add_generation_prompt,
             }),
             Input::Messages(messages) => {
-                // Already parsed by the caller (`classify_input` for
-                // gRPC) — just hand
-                // it to the chat template path. Avoids a redundant
-                // serialize → reparse round-trip on every request.
+                // Already parsed by the caller.
                 TokenSource::NeedsTokenize(TokenizeInput::Chat {
                     messages,
                     kwargs: chat_kwargs,
@@ -142,10 +111,7 @@ impl KinferenceService {
                 }
             }
         };
-        // Surface the tokens so a caller reaching the same MODEL across several
-        // pools can re-score via `Input::Tokens` instead of re-tokenizing. The
-        // tokenizer and chat template belong to the model; only the hashing and
-        // the index query below are per-pool.
+        // So callers scoring the same model in other pools needn't re-tokenize.
         side.tokens = tokens.clone();
 
         // 3. Group workers by block_size, score each group separately.
@@ -163,11 +129,8 @@ impl KinferenceService {
                 compute_block_hash_for_seq(&tokens, block_size, BlockHashOptions::default());
             let total_blocks = hashes.len() as u32;
 
-            // Snapshot the hashes as u64 for the side-channel before
-            // `find_matches` consumes the LocalBlockHash vec. The pick
-            // path uses this to seed `InflightPrefixes` after pick and
-            // to compute layered expected-overlap inside `pick_lock`;
-            // the gRPC `Score` handler discards it.
+            // Keep the hashes for the pick path before `find_matches` consumes
+            // them.
             let hashes_u64: Vec<u64> = hashes.iter().map(|h| h.0).collect();
 
             tracing::debug!(
@@ -184,12 +147,8 @@ impl KinferenceService {
             let overlap = match pool.indexer.find_matches(hashes).await {
                 Ok(o) => o,
                 Err(e) => {
-                    // Internal indexer failure is rare and the caller can't
-                    // surface a gRPC error cleanly, so degrade and let the
-                    // picker work on load metrics alone. Reported as its OWN
-                    // reason: the tokens were fine, this pool's radix tree
-                    // wasn't, and telling the operator to look at the engine
-                    // would send them to the wrong place.
+                    // Degrade to load-only, reported as a prefix-index (not
+                    // tokenize) failure.
                     tracing::error!(
                         pool = %pool.name,
                         block_size,
@@ -212,13 +171,8 @@ impl KinferenceService {
             for (num, entry) in &group {
                 let sample = self.metrics.latest(*num);
 
-                // Raw radix-tree match count. `WorkerScore.matched_blocks`
-                // is the unlayered kv_match here; the pick path applies
-                // layered expected-overlap later (inside `pick_lock`,
-                // against a consistent `InflightPrefixes` snapshot).
-                // The gRPC `Score` endpoint returns this raw value too
-                // — external scorers (e.g. the gw-pc WASM plugin) do
-                // their own pick logic without our pending tracker.
+                // Raw radix-tree match; the pick path layers in expected
+                // overlap later, inside `pick_lock`.
                 let kv_match = matched.get(num).copied().unwrap_or(0);
 
                 out.insert(
