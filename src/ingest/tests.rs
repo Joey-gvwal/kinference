@@ -10,7 +10,7 @@ fn matching_block_size_is_healthy() {
 
 #[test]
 fn implausible_value_is_a_glitch_never_evicts() {
-    // The reported incident: a misframed event with block_size=1568.
+    // A misframed event with block_size=1568.
     let mut g = BlockSizeGuard::new(16);
     // Even repeated, an out-of-bounds value never trips eviction and
     // never advances the debounce counter.
@@ -42,14 +42,14 @@ fn a_matching_event_resets_the_debounce() {
     g.classify(32);
     g.classify(32);
     assert_eq!(g.classify(16), BlockSizeVerdict::Healthy);
-    // Counter reset — the next mismatch starts over at 1, not 3.
+    // Counter reset: the next mismatch starts over at 1, not 3.
     assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 1 });
 }
 
 #[test]
 fn varied_garbage_never_accumulates_to_eviction() {
     // Distinct plausible mismatching values in a row shouldn't evict:
-    // a real misconfig reports ONE consistent wrong value.
+    // a real misconfig reports one consistent wrong value.
     let mut g = BlockSizeGuard::new(16);
     assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 1 });
     assert_eq!(g.classify(64), BlockSizeVerdict::Pending { consecutive: 1 });
@@ -94,8 +94,6 @@ fn parse_seq_payload_rejects_malformed_seq() {
 /// Cursor state machine: a fresh listener starts at `Initial`;
 /// after applying seq=10, it's `Live(10)`; seq=11 is
 /// `Contiguous`; seq=9 is `Stale`; seq=20 reports a `Gap`.
-/// Direct test of dynamo's `CursorState` integration — the core
-/// invariant of the new design.
 #[test]
 fn cursor_state_transitions_through_initial_live_gap_stale() {
     let mut cursor = CursorState::Initial;
