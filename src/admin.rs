@@ -1,8 +1,7 @@
 //! The admin HTTP listener.
 //!
 //! Serves `GET /readyz`, used by the K8s readinessProbe; `GET /metrics`; and
-//! the JSON API under `/api` — `GET /api/snapshot`, the telemetry snapshot,
-//! and the read-only policy API (`GET /api/policy/context`,
+//! the read-only policy API under `/api` (`GET /api/policy/context`,
 //! `POST /api/policy/simulate`, see [`policy_api`]). Only started when
 //! `admin_listen` is configured — a deployment that leaves it unset also loses
 //! the readiness probe, so set it in production.
@@ -11,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{FromRef, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -22,16 +21,14 @@ use tokio_util::sync::CancellationToken;
 use crate::metrics::MetricsRegistry;
 use crate::pool::PoolRegistry;
 use crate::prom::PromMetrics;
-use crate::telemetry::Telemetry;
 
 mod policy_api;
 
-/// State threaded through every axum route via `FromRef`. Holds the
-/// Arcs the handlers below need (telemetry for `/api/snapshot`, the pool
-/// set and policy store for `/readyz`, Prometheus registry for `/metrics`).
+/// State threaded through every axum route via `FromRef`. Holds the Arcs the
+/// handlers below need: the pool set and policy store for `/readyz`, the
+/// Prometheus registry for `/metrics`.
 #[derive(Clone)]
 struct AppState {
-    telemetry: Arc<Telemetry>,
     /// The live pool set, not a startup snapshot of its registries — so
     /// `/readyz` can report how much of the fleet has resolved, and pools that
     /// appear after the server started still count.
@@ -47,12 +44,6 @@ struct AppState {
     /// bounds concurrent simulations. Built once, so every request shares one
     /// semaphore; see [`policy_api::PolicyApiState`].
     policy_api: policy_api::PolicyApiState,
-}
-
-impl FromRef<AppState> for Arc<Telemetry> {
-    fn from_ref(state: &AppState) -> Self {
-        state.telemetry.clone()
-    }
 }
 
 impl FromRef<AppState> for Arc<PoolRegistry> {
@@ -93,7 +84,6 @@ impl FromRef<AppState> for Arc<PromMetrics> {
 fn router(state: AppState) -> Router {
     let get_only = || async { policy_api::method_not_allowed("GET, HEAD") };
     Router::new()
-        .route("/api/snapshot", get(snapshot).fallback(get_only))
         .route(
             "/api/policy/context",
             get(policy_api::context).fallback(get_only),
@@ -128,7 +118,6 @@ async fn fallback(uri: axum::http::Uri) -> Response {
 
 pub async fn serve(
     addr: SocketAddr,
-    telemetry: Arc<Telemetry>,
     pools: Arc<PoolRegistry>,
     policy: Option<Arc<crate::policy::store::PolicyStore>>,
     prom: Arc<PromMetrics>,
@@ -141,7 +130,6 @@ pub async fn serve(
             pools.clone(),
             metrics_registry,
         ),
-        telemetry,
         pools,
         policy,
         prom,
@@ -149,15 +137,11 @@ pub async fn serve(
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "Dashboard READY: serving live dashboard over HTTP");
+    tracing::info!(%addr, "Admin listener ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;
     Ok(())
-}
-
-async fn snapshot(State(tel): State<Arc<Telemetry>>) -> Json<serde_json::Value> {
-    Json(tel.snapshot_json())
 }
 
 /// Prometheus scrape target. Renders kinference's own metric set (currently

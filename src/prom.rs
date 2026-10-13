@@ -60,7 +60,7 @@ const ITL_LE_LABELS: [&str; 15] = [
 // writes both states on every call.
 
 /// `kinference_picks_total{outcome}` and `kinference_pick_duration_ms{outcome}`.
-/// Authoritative source: [`crate::telemetry::PickOutcome::as_label`].
+/// Authoritative source: [`PickOutcome::as_label`].
 const PICK_OUTCOMES: [&str; 3] = ["ok", "bad_request", "no_workers"];
 
 /// `kinference_score_degraded_total{reason}`. Source: [`crate::monitor::Degraded::as_label`].
@@ -75,7 +75,7 @@ const TOKENIZE_PATHS: [&str; 3] = ["local", "http_fallback", "unavailable"];
 /// but now the panel says "no divergences" rather than showing nothing at all.
 const TOKENIZE_COMPARE_RESULTS: [&str; 3] = ["match", "divergence", "error"];
 
-/// `kinference_index_events_total{kind}`. Source: [`PromMetrics::record_index_events`].
+/// `kinference_index_events_total{kind}`. Source: [`IngestEvent::as_label`].
 const INDEX_EVENT_KINDS: [&str; 3] = ["stored", "removed", "cleared"];
 
 /// `kinference_body_rejected_total{reason}`.
@@ -131,6 +131,53 @@ const WORKERSET_REJECT_REASONS: [&str; 7] = [
     "ModelMissingName",
     "KvEventsMissingPort",
 ];
+
+/// One KV-cache event kind, as the `kind` label on
+/// `kinference_index_events_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestEvent {
+    Stored,
+    Removed,
+    Cleared,
+}
+
+impl IngestEvent {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            IngestEvent::Stored => "stored",
+            IngestEvent::Removed => "removed",
+            IngestEvent::Cleared => "cleared",
+        }
+    }
+}
+
+/// Outcome of one pick, as the `outcome` label on `kinference_picks_total` and
+/// `kinference_pick_duration_ms`.
+///
+/// Distinct from the WIRE outcome (`pick_response::Outcome` in the proto):
+/// `DEGRADED` counts as a success here, because a worker was chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// Picker returned a worker. `outcome=OK` or `DEGRADED` in the response.
+    Success,
+    /// The body did not parse, or carried nothing to route on.
+    /// `outcome=BAD_REQUEST`.
+    NoOpinion,
+    /// No workers serve the requested model. `outcome=NO_WORKERS`.
+    NotFound,
+}
+
+impl PickOutcome {
+    /// Named for the WIRE outcome rather than the variant, since that is what
+    /// an operator sees in a response and in the proto.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            PickOutcome::Success => "ok",
+            PickOutcome::NoOpinion => "bad_request",
+            PickOutcome::NotFound => "no_workers",
+        }
+    }
+}
 
 /// kinference's Prometheus metric set. Clone-free: share via `Arc`.
 ///
@@ -251,11 +298,6 @@ pub struct PromMetrics {
     /// deleted stops appearing in the input, and a gauge left alone would hold
     /// its last non-zero value forever; this lets the recorder zero it instead.
     workers_by_model_seen: Mutex<HashSet<String>>,
-    /// `kinference_telemetry_slots_used` / `_capacity` — the telemetry slot pool.
-    telemetry_slots_used: IntGauge,
-    telemetry_slots_capacity: IntGauge,
-    /// `kinference_telemetry_slots_denied_total` — workers the snapshot omits.
-    telemetry_slots_denied: IntCounter,
     /// `kinference_index_blocks` — blocks in the radix tree, fleet-wide.
     index_blocks: IntGauge,
     /// `kinference_index_workers` — workers present in the radix tree, fleet-wide.
@@ -422,8 +464,8 @@ impl PromMetrics {
             Opts::new(
                 "kinference_build_info",
                 "Build identity of this router process. Always 1; read the labels. \
-                 Matches the `version` field on /api/snapshot and the `--version` \
-                 output, so a scrape and a human agree on which build is running",
+                 Matches the `--version` output, so a scrape and a human agree on \
+                 which build is running",
             ),
             &["version"],
         )
@@ -692,26 +734,6 @@ impl PromMetrics {
             &["result"],
         )
         .expect("tokenize_compare counter opts are valid");
-        let telemetry_slots_used = IntGauge::new(
-            "kinference_telemetry_slots_used",
-            "Telemetry slots occupied. The pool is preallocated at startup and \
-             sized by `telemetry_max_workers`",
-        )
-        .expect("telemetry_slots_used gauge opts are valid");
-        let telemetry_slots_capacity = IntGauge::new(
-            "kinference_telemetry_slots_capacity",
-            "Telemetry slot pool size, from `telemetry_max_workers`. Compare against \
-             kinference_telemetry_slots_used for headroom",
-        )
-        .expect("telemetry_slots_capacity gauge opts are valid");
-        let telemetry_slots_denied = IntCounter::new(
-            "kinference_telemetry_slots_denied_total",
-            "Workers absent from /api/snapshot for want of a telemetry slot. \
-             They route normally and are still counted by kinference_workers. \
-             EXPECTED whenever the fleet is larger than telemetry_max_workers; \
-             it is not an error condition",
-        )
-        .expect("telemetry_slots_denied counter opts are valid");
         let workers = IntGaugeVec::new(
             Opts::new(
                 "kinference_workers",
@@ -1001,15 +1023,6 @@ impl PromMetrics {
             .register(Box::new(build_info))
             .expect("register build_info");
         registry
-            .register(Box::new(telemetry_slots_used.clone()))
-            .expect("register telemetry_slots_used");
-        registry
-            .register(Box::new(telemetry_slots_capacity.clone()))
-            .expect("register telemetry_slots_capacity");
-        registry
-            .register(Box::new(telemetry_slots_denied.clone()))
-            .expect("register telemetry_slots_denied");
-        registry
             .register(Box::new(picks.clone()))
             .expect("register picks");
         registry
@@ -1095,9 +1108,6 @@ impl PromMetrics {
             .expect("register policy_warnings");
         let m = Self {
             tenants,
-            telemetry_slots_used,
-            telemetry_slots_capacity,
-            telemetry_slots_denied,
             picks,
             pick_duration_ms,
             tokenize_path,
@@ -1270,20 +1280,6 @@ impl PromMetrics {
         self.tokenize_compare.with_label_values(&[result]).inc();
     }
 
-    /// Telemetry slot occupancy, recomputed each rollup tick.
-    pub fn set_telemetry_slots(&self, used: u64, capacity: u64) {
-        self.telemetry_slots_used.set(used as i64);
-        self.telemetry_slots_capacity.set(capacity as i64);
-    }
-
-    /// Registrations refused for want of a slot, this tick.
-    ///
-    /// Takes a DELTA: the underlying counter is `swap(0)`-ed each tick, as with
-    /// the index counters.
-    pub fn record_telemetry_slots_denied(&self, n: u64) {
-        self.telemetry_slots_denied.inc_by(n);
-    }
-
     /// Worker reachability, recomputed each rollup tick.
     pub fn set_worker_states(&self, ok: u64, unresponsive: u64) {
         self.workers.with_label_values(&["ok"]).set(ok as i64);
@@ -1346,38 +1342,22 @@ impl PromMetrics {
     /// The radix tree's size, from a throttled dump.
     ///
     /// Called only on a dump tick, so between dumps the gauges hold their last
-    /// value — which is what a gauge does anyway, and matches the dashboard.
+    /// value, which is what a gauge does anyway.
     pub fn set_index_size(&self, blocks: u64, workers: u64) {
         self.index_blocks.set(blocks as i64);
         self.index_workers.set(workers as i64);
     }
 
-    /// Radix-tree ingest activity since the last rollup tick.
-    ///
-    /// Takes DELTAS, not totals: the underlying atomics are `swap(0)`-ed each
-    /// tick, so the caller hands over what happened in that interval and this
-    /// accumulates it into monotonic counters. That is what lets `rate()` work
-    /// on them — the per-second gauges the dashboard shows are re-derivable,
-    /// but the reverse is not.
-    pub fn record_index_events(
-        &self,
-        stored: u64,
-        removed: u64,
-        cleared: u64,
-        blocks_stored: u64,
-        blocks_removed: u64,
-    ) {
+    /// One KV-cache event as ingest decoded it, with the blocks it carried.
+    pub fn record_index_event(&self, kind: IngestEvent, blocks: u64) {
         self.index_events
-            .with_label_values(&["stored"])
-            .inc_by(stored);
-        self.index_events
-            .with_label_values(&["removed"])
-            .inc_by(removed);
-        self.index_events
-            .with_label_values(&["cleared"])
-            .inc_by(cleared);
-        self.index_blocks_stored.inc_by(blocks_stored);
-        self.index_blocks_removed.inc_by(blocks_removed);
+            .with_label_values(&[kind.as_label()])
+            .inc();
+        match kind {
+            IngestEvent::Stored => self.index_blocks_stored.inc_by(blocks),
+            IngestEvent::Removed => self.index_blocks_removed.inc_by(blocks),
+            IngestEvent::Cleared => {}
+        }
     }
 
     /// One pick's prefix-cache outcome for the CHOSEN worker.

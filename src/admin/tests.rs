@@ -1011,7 +1011,6 @@ fn app_with(
     let metrics = Arc::new(crate::metrics::MetricsRegistry::new());
     let prom = Arc::new(PromMetrics::new());
     let state = AppState {
-        telemetry: crate::telemetry::Telemetry::new(4, metrics.clone()),
         pools: pools.clone(),
         policy: policy.clone(),
         prom: prom.clone(),

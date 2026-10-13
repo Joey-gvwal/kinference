@@ -62,8 +62,8 @@ pub trait PoolHooks: Send + Sync {
     /// loud error than a visible one nothing feeds.
     fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> anyhow::Result<()>;
 
-    /// Drop every fleet-wide trace of this pool's workers: telemetry slots,
-    /// metrics samples, per-worker tasks.
+    /// Drop every fleet-wide trace of this pool's workers: metrics samples,
+    /// per-worker tasks.
     ///
     /// MUST NOT call into the pool's `KvIndexer` — its subtree goes away with
     /// the whole tree at reap, and calling `remove_worker` here would race the
@@ -181,9 +181,8 @@ impl PoolManager {
         let wanted: BTreeMap<PoolKey, PoolSpec> =
             desired.into_iter().map(|s| (s.key.clone(), s)).collect();
 
-        // Retire first, so a replace frees its workers' fleet-wide telemetry
-        // slots before the replacement asks for them. `telemetry_max_workers` is a hard
-        // cap and `handle_added` skips silently once it is hit.
+        // Retire first, so a replace frees its workers' fleet-wide state before
+        // the replacement claims the same ids.
         let going: Vec<PoolKey> = self
             .live
             .keys()
@@ -383,7 +382,7 @@ impl PoolManager {
         // 2. Drop its model claims, or a replacement worker set serving the
         //    same model is ignored forever.
         crate::monitor::release_models(&self.model_router, pool.id, &pool.name);
-        // 3. Fleet-wide worker state (telemetry slots, metrics, per-worker
+        // 3. Fleet-wide worker state (metrics, per-worker
         //    tasks). Deliberately no indexer call — see `PoolHooks::on_retire`.
         self.hooks.on_retire(&pool);
         tracing::info!(

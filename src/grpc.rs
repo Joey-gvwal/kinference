@@ -29,7 +29,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::monitor::{KinferenceService, PickAndRecordOutcome, Qos};
-use crate::telemetry::PickOutcome;
+use crate::prom::PickOutcome;
 
 use crate::proto;
 use crate::proto::picker_server::Picker;
@@ -305,7 +305,7 @@ impl Picker for KinferenceService {
 
         // Telemetry note: `Degraded` is mapped to `Success` for now — the
         // worker did get chosen, just on load-only signal.
-        let (response, telemetry_outcome) = match outcome {
+        let (response, pick_outcome) = match outcome {
             PickAndRecordOutcome::Ok {
                 endpoint,
                 response_id,
@@ -418,9 +418,7 @@ impl Picker for KinferenceService {
                 )
             }
         };
-        self.telemetry().record_pick(telemetry_outcome, latency_ms);
-        self.prom
-            .record_pick(telemetry_outcome.as_label(), latency_ms);
+        self.prom.record_pick(pick_outcome.as_label(), latency_ms);
         Ok(Response::new(response))
     }
 

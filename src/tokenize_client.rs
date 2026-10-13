@@ -16,7 +16,6 @@
 use std::time::{Duration, Instant};
 
 use crate::monitor::KinferenceService;
-use crate::telemetry::Telemetry;
 use crate::tokenize::{
     TokenizeInput, render_post_raw_at_url, render_structured_at_url, render_via_vllm_raw,
     render_via_vllm_structured,
@@ -80,10 +79,6 @@ impl KinferenceService {
         raw_body: Option<&[u8]>,
         req_id: Option<&str>,
     ) -> TokenizeOutcome {
-        // Telemetry: bump tokenize inflight at the very top, drop on return.
-        // The Arc-held-by-guard pattern ensures the counter balances on
-        // every exit path (Ok, Unavailable, panic).
-        let _tk_inflight = self.telemetry.tokenize_inflight_guard();
         let started = Instant::now();
 
         // Mode dispatcher. Each helper returns a `TokenizeOutcome`
@@ -120,8 +115,6 @@ impl KinferenceService {
         // gauge stays accurate across the whole tokenize lifetime.
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         let unavailable = matches!(outcome, TokenizeOutcome::Unavailable { .. });
-        self.telemetry
-            .record_tokenize_outcome(latency_ms, unavailable);
         self.prom.record_tokenize_duration(latency_ms);
         if unavailable {
             // The other two paths are counted where they succeed; this is the
@@ -169,7 +162,6 @@ impl KinferenceService {
             let render_ms = started.elapsed().as_secs_f64() * 1000.0;
             match result {
                 Ok(tokens) => {
-                    self.telemetry.record_tokenize_attempt(true);
                     tracing::debug!(
                         req = %req_id.unwrap_or("-"),
                         mode = "render",
@@ -182,7 +174,6 @@ impl KinferenceService {
                     return TokenizeOutcome::Ok(tokens);
                 }
                 Err(e) => {
-                    self.telemetry.record_tokenize_attempt(false);
                     let err = format!("{e:#}");
                     tracing::warn!(
                         tokenize_url = url,
@@ -222,7 +213,6 @@ impl KinferenceService {
         // Run the retry loop with a hard wall-clock deadline. Per-attempt
         // timeout (3s on the shared client) caps any individual hang; this
         // outer deadline caps the whole set.
-        let telemetry = self.telemetry.clone();
         let do_attempts = async {
             let mut last_err: Option<String> = None;
             for (i, (_num, worker_id_str, url)) in candidates.iter().enumerate() {
@@ -243,7 +233,6 @@ impl KinferenceService {
                 let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
                 match result {
                     Ok(tokens) => {
-                        telemetry.record_tokenize_attempt(true);
                         tracing::debug!(
                             req = %req_id.unwrap_or("-"),
                             mode = "render",
@@ -256,7 +245,6 @@ impl KinferenceService {
                         return Ok(tokens);
                     }
                     Err(e) => {
-                        telemetry.record_tokenize_attempt(false);
                         let err_string = format!("{e:#}");
                         tracing::warn!(
                             worker_id = %worker_id_str,
@@ -328,7 +316,6 @@ impl KinferenceService {
         let render_ms = started.elapsed().as_secs_f64() * 1000.0;
         match result {
             Ok(tokens) => {
-                self.telemetry.record_local_served();
                 self.prom.record_tokenize_path("local");
                 tracing::debug!(
                     req = %req_id.unwrap_or("-"),
@@ -364,7 +351,6 @@ impl KinferenceService {
                 // a double-fail just becomes Unavailable (the outer
                 // dispatcher counts it via record_tokenize_outcome).
                 if matches!(outcome, TokenizeOutcome::Ok(_)) {
-                    self.telemetry.record_http_fallback();
                     self.prom.record_tokenize_path("http_fallback");
                 }
                 outcome
@@ -398,12 +384,10 @@ impl KinferenceService {
             // the picker will see — running the local check inline
             // would add 50-100ms of Jinja+encode work to TTFT on every
             // request for models with complex chat templates (Gemma 4
-            // etc.). Telemetry (`record_local_tokenize_match` /
-            // `_divergence` / `_error`) and the once-per-endpoint
+            // etc.). The compare counters and the once-per-endpoint
             // WARN log fire from the spawned task, just slightly
             // after the response — fine for a diagnostic surface.
             let local_reg = local_reg.clone();
-            let telemetry = self.telemetry.clone();
             let prom = self.prom.clone();
             let model_owned = model.to_string();
             let input_owned = input.clone();
@@ -411,7 +395,6 @@ impl KinferenceService {
             tokio::spawn(async move {
                 Self::compare_local_tokenize_inner(
                     &local_reg,
-                    &telemetry,
                     &prom,
                     &model_owned,
                     &input_owned,
@@ -434,7 +417,6 @@ impl KinferenceService {
     /// directly.
     async fn compare_local_tokenize_inner(
         local_reg: &crate::local_tokenize::LocalTokenizerRegistry,
-        telemetry: &Telemetry,
         prom: &crate::prom::PromMetrics,
         model: &str,
         input: &TokenizeInput,
@@ -449,11 +431,9 @@ impl KinferenceService {
         };
         match local_reg.tokenize(model, input, &chat_kwargs).await {
             Ok(local_tokens) if local_tokens.as_slice() == http_tokens => {
-                telemetry.record_local_tokenize_match();
                 prom.record_tokenize_compare("match");
             }
             Ok(local_tokens) => {
-                telemetry.record_local_tokenize_divergence();
                 prom.record_tokenize_compare("divergence");
                 let first_diff = http_tokens
                     .iter()
@@ -497,7 +477,6 @@ impl KinferenceService {
                 );
             }
             Err(e) => {
-                telemetry.record_local_tokenize_error();
                 prom.record_tokenize_compare("error");
                 tracing::warn!(
                     model,

@@ -37,12 +37,6 @@ impl KinferenceService {
     ///
     /// `chat_kwargs` is consumed when `input` is Chat / Messages; it's
     /// ignored for Raw (no template) and Tokens (no /tokenize call).
-    ///
-    /// `record_call_telemetry` gates the `record_call` row push into the
-    /// telemetry rings. The gRPC handler sets this to `true` (gRPC calls
-    /// are first-class events in the existing dashboard); the pick path
-    /// sets it to `false` because picks have their own dedicated
-    /// counters (see `picks.*` in the snapshot).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn score_workers(
         &self,
@@ -52,11 +46,8 @@ impl KinferenceService {
         chat_kwargs: HashMap<String, String>,
         chat_extras: ChatExtras,
         raw_body: Option<Vec<u8>>,
-        record_call_telemetry: bool,
         req_id: Option<&str>,
     ) -> (ScoreOutcome, ScoreSideData) {
-        let started = Instant::now();
-        let _inflight = self.telemetry.inflight_guard();
         let mut side = ScoreSideData {
             tokens: Vec::new(),
             hashes_by_block_size: HashMap::new(),
@@ -143,18 +134,6 @@ impl KinferenceService {
                             "tokenize unavailable across the fleet; returning degraded ScoreResponse"
                         );
                         let degraded = self.degraded_response(&workers);
-                        if record_call_telemetry {
-                            let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-                            let overlaps: Vec<(u64, f64)> =
-                                workers.iter().map(|(num, _)| (*num, 0.0)).collect();
-                            self.telemetry.record_call(CallSample {
-                                model,
-                                tokens: 0,
-                                latency_ms,
-                                overlaps: &overlaps,
-                                top: None,
-                            });
-                        }
                         return (
                             ScoreOutcome::Unavailable(degraded, Degraded::Tokenize),
                             side,
@@ -163,7 +142,6 @@ impl KinferenceService {
                 }
             }
         };
-        let token_count = tokens.len() as u32;
         // Surface the tokens so a caller reaching the same MODEL across several
         // pools can re-score via `Input::Tokens` instead of re-tokenizing. The
         // tokenizer and chat template belong to the model; only the hashing and
@@ -248,39 +226,6 @@ impl KinferenceService {
                     worker_score(entry, &sample, block_size, kv_match, total_blocks),
                 );
             }
-        }
-
-        // 4. Feed telemetry: per-worker overlap fractions + the top-overlap
-        //    worker (the highest row of the response — NOT a routing
-        //    decision; the routing decision is made by the caller).
-        let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let mut overlaps: Vec<(u64, f64)> = Vec::with_capacity(out.len());
-        let mut top: Option<TopWorker> = None;
-        for (num, ws) in &out {
-            let overlap = if ws.total_blocks > 0 {
-                ws.matched_blocks as f64 / ws.total_blocks as f64
-            } else {
-                0.0
-            };
-            overlaps.push((*num, overlap));
-            if top.as_ref().map(|t| overlap > t.overlap).unwrap_or(true) {
-                top = Some(TopWorker {
-                    worker_id_num: *num,
-                    addr: ws.name.clone(),
-                    overlap,
-                    matched: ws.matched_blocks,
-                    total: ws.total_blocks,
-                });
-            }
-        }
-        if record_call_telemetry {
-            self.telemetry.record_call(CallSample {
-                model,
-                tokens: token_count,
-                latency_ms,
-                overlaps: &overlaps,
-                top,
-            });
         }
 
         let scores: Vec<WorkerScore> = out.into_values().collect();
