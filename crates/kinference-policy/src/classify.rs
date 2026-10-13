@@ -2,34 +2,19 @@
 //!
 //! An `InferencePolicy` matches classifier output through one request attribute:
 //! `tag`, an unordered set of opaque strings (`pii-detected`, `ssn`,
-//! `complexity-low`). One vehicle rather than a field per signal, so adding a
-//! classifier is a new tag rather than a CRD schema change.
+//! `complexity-low`), so adding a classifier needs no CRD schema change.
 //!
-//! # THESE CLASSIFIERS ARE KEYWORD STUBS
+//! The classifiers are keyword stubs: [`tags_for_request`] matches literal
+//! words in the most recent user turn, so policies can be exercised against a
+//! real tag vocabulary before real classifiers land.
 //!
-//! [`tags_for_request`] matches literal words in the most recent USER turn.
-//! There is no model, no scoring, and no detection worth the name — it exists
-//! so policies can be authored and exercised against a real tag vocabulary,
-//! with outcomes an operator can trigger on demand, before real classifiers
-//! land. Swapping in a real one changes this function and nothing else.
+//! A request whose user turn can't be extracted gets every classifier's
+//! `-unknown` tag rather than a default verdict, so `{not: pii-confirmed}`
+//! doesn't match unscreened traffic.
 //!
-//! A request whose user turn cannot be extracted at all gets every
-//! classifier's `-unknown` tag rather than a default verdict. That is the
-//! fail-closed contract the CRD describes: absence is not proof of a negative,
-//! so a detector that cannot answer says so explicitly instead of emitting
-//! nothing and letting `{not: pii-confirmed}` take the permissive branch.
-//!
-//! # Why a registry rather than parsing prefixes
-//!
-//! `tag` is untyped in the CRD — no enum, so no value validation, and a typo
-//! matches nothing silently. [`CLASSIFIERS`] is what a written tag gets checked
-//! against: each entry declares the prefix it owns and every tag it can emit,
-//! which is what the `UnemittableTag` warning lists, and what lets a rule
-//! referencing an unemittable tag be reported instead of quietly going inert.
-//!
-//! A prefix alone would not be enough. `pii-detected` resolves by prefix, but
-//! the CRD's own vocabulary includes bare tags like `ssn` and `code` that belong
-//! to a classifier without naming it — those resolve by emittable-set membership.
+//! `tag` is untyped in the CRD, so [`CLASSIFIERS`] is what written tags are
+//! checked against: each entry declares the prefix it owns and every tag it can
+//! emit, and `compile` warns on tags nothing emits.
 
 use std::collections::BTreeSet;
 
@@ -45,55 +30,40 @@ pub struct Verdict {
 
 /// One classifier kinference can run, and the tag vocabulary it owns.
 ///
-/// Not `PartialEq`/`Eq`: nothing compares these, and deriving them over a `fn`
-/// pointer field invites rustc's function-pointer-comparison lint for no gain.
+/// Not `PartialEq`, which would trip the function-pointer-comparison lint.
 #[derive(Debug, Clone, Copy)]
 pub struct Classifier {
     /// Name as it appears in a rule's `requiresClassifiers`, in the policy API's
     /// rule summaries.
     pub name: &'static str,
     /// Tag prefix this classifier owns. A referenced tag starting with this
-    /// belongs to this classifier even when it is not in `emits` — that is what
-    /// makes prefixes load-bearing rather than cosmetic.
+    /// belongs to this classifier even when it is not in `emits`.
     pub prefix: &'static str,
-    /// Every tag this classifier is currently capable of emitting.
-    ///
-    /// The honest set, not the aspirational one. A policy matching anything
-    /// outside it is inert, and saying so is the whole point of publishing this.
+    /// Every tag this classifier can currently emit.
     pub emits: &'static [&'static str],
     /// This classifier's rules, in its own module.
     ///
-    /// Receives the most recent user turn, LOWERCASED once for the whole
-    /// table so N classifiers do not each pay for their own copy. A classifier
-    /// that needs the verbatim text (casing is signal for a real detector)
-    /// is the point at which this widens to carry both.
+    /// Receives the most recent user turn, lowercased once for all
+    /// classifiers. Only called when there is text; [`tags_for_request`]
+    /// handles the `-unknown` case. The returned tag must appear in `emits`.
     ///
-    /// Called ONLY when there is text to inspect: the `-unknown` case is
-    /// handled once by [`tags_for_request`], so an individual classifier
-    /// cannot forget to fail closed. The returned tag MUST appear in `emits` —
-    /// guarded by `every_verdict_is_in_its_own_emits`.
-    ///
-    /// A `fn` pointer rather than a trait keeps `CLASSIFIERS` a `const` and
-    /// costs no dispatch machinery. It cannot express an `async fn`, so a
-    /// model-backed classifier will need this field widened to an enum holding
-    /// its client — a change confined to this file, since the per-classifier
-    /// modules only export `detect` and their metadata.
+    /// A `fn` pointer keeps `CLASSIFIERS` a `const`; an async, model-backed
+    /// classifier would need this widened.
     detect: fn(&str) -> Verdict,
 }
 
-/// The tag every classifier emits when it has no answer. Appending this suffix
-/// to a classifier's name is the convention a restrictive policy relies on.
+/// Appended to a classifier's name to form the tag it emits when it has no
+/// answer.
 pub const UNKNOWN_SUFFIX: &str = "-unknown";
 
 pub const CLASSIFIERS: &[Classifier] = &[pii::CLASSIFIER, complexity::CLASSIFIER];
 
 /// The most recent USER turn's text, which is all the classifiers look at.
 ///
-/// Chat bodies carry `content` either as a plain string or as an array of typed
-/// parts (multimodal); both are handled, and the parts' `text` fields are joined
-/// so an image-plus-text turn still classifies on its words. Returns `None` when
-/// there is no user turn at all — the caller falls back to a raw `prompt`, and
-/// failing that the classifiers report `-unknown`.
+/// `content` may be a string or an array of typed parts (multimodal), whose
+/// `text` fields are joined. Returns `None` when there is no user turn; the
+/// caller then falls back to a raw `prompt`, and failing that the classifiers
+/// report `-unknown`.
 pub fn last_user_text(messages: &[serde_json::Value]) -> Option<String> {
     let msg = messages
         .iter()
@@ -112,12 +82,8 @@ pub fn last_user_text(messages: &[serde_json::Value]) -> Option<String> {
     }
 }
 
-/// Whole-word, case-insensitive match.
-///
-/// Substring matching would be shorter and wrong: "Kansas" is a substring of
-/// "Arkansas", so `text.contains("kansas")` flags every request mentioning a
-/// neighbouring state as confirmed PII. A keyword stub is still a classifier,
-/// and a false positive here routes real traffic somewhere it should not go.
+/// Whole-word match, so "kansas" doesn't match "Arkansas". `lowercased` must
+/// already be lowercase.
 fn contains_word(lowercased: &str, word: &str) -> bool {
     lowercased
         .split(|c: char| !c.is_alphanumeric())
@@ -126,14 +92,11 @@ fn contains_word(lowercased: &str, word: &str) -> bool {
 
 /// Tags for one request, sorted.
 ///
-/// `user_text` is the most recent user turn — see [`last_user_text`]. `None`
-/// means it could not be determined, and every classifier reports `-unknown`
-/// rather than guessing.
+/// `user_text` is the most recent user turn (see [`last_user_text`]). `None`
+/// means it could not be determined, and every classifier reports `-unknown`.
 ///
-/// Every decision is logged at DEBUG with the keyword that drove it, because
-/// `tag` is untyped and a policy that silently fails to match gives an operator
-/// nothing to look at otherwise. `req` correlates the lines with the rest of the
-/// pick, which matters as soon as two requests are in flight.
+/// Every decision is logged at DEBUG with the keyword that drove it; `req`
+/// correlates the lines with the rest of the pick.
 ///
 /// Keyword rules, all case-insensitive and whole-word:
 ///
@@ -145,19 +108,15 @@ fn contains_word(lowercased: &str, word: &str) -> bool {
 /// | `kansas`  | `pii-confirmed`    |
 /// | absent    | `pii-none`         |
 ///
-/// `basil` wins over `oregano` when both appear — a request carrying a signal
-/// for "hard" is hard, whatever else it also says.
+/// `basil` wins over `oregano` when both appear.
 pub fn tags_for_request(req: &str, user_text: Option<&str>) -> Vec<String> {
     let Some(text) = user_text else {
-        // THE fail-closed rule, in one place, for every classifier in the
-        // table — so adding a classifier cannot omit it.
+        // The fail-closed rule, in one place for every classifier.
         let mut tags: Vec<String> = CLASSIFIERS
             .iter()
             .map(|c| format!("{}{}", c.name, UNKNOWN_SUFFIX))
             .collect();
         tags.sort();
-        // The fail-closed path, and the one most worth seeing: a policy written
-        // to reject unscreened traffic fires here, and nothing else says why.
         tracing::debug!(
             req,
             ?tags,
@@ -181,16 +140,13 @@ pub fn tags_for_request(req: &str, user_text: Option<&str>) -> Vec<String> {
             v.tag.to_string()
         })
         .collect();
-    // Load-bearing, not cosmetic: CLASSIFIERS is declared [pii, complexity], so
-    // the raw fold is pii-first while every caller and test expects sorted
-    // output. Do not "fix" this by reordering the table.
+    // Callers expect sorted output; `CLASSIFIERS` is not in tag order.
     tags.sort();
     tags
 }
 
 /// The classifier responsible for `tag`, by prefix first and emittable-set
-/// membership second. `None` means no classifier can produce it — a typo, or a
-/// signal kinference does not implement.
+/// membership second. `None` means no classifier can produce it.
 pub fn classifier_for(tag: &str) -> Option<&'static Classifier> {
     CLASSIFIERS
         .iter()
@@ -204,9 +160,8 @@ pub fn is_emittable(tag: &str) -> bool {
     CLASSIFIERS.iter().any(|c| c.emits.contains(&tag))
 }
 
-/// Every tag the named classifiers can emit, sorted and deduplicated. Feeds
-/// the "Emittable today" list in the `UnemittableTag` warning, whose job is to
-/// let a reviewer check a written tag against reality.
+/// Every tag the named classifiers can emit, sorted and deduplicated, for the
+/// `UnemittableTag` warning.
 pub fn emittable_tags<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let wanted: BTreeSet<&str> = names.into_iter().collect();
     let mut out: BTreeSet<String> = BTreeSet::new();

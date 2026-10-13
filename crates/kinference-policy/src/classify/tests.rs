@@ -19,8 +19,7 @@ fn keyword_rules() {
     );
 }
 
-/// Both signals present means the request carries evidence it is hard, and
-/// evidence of hard outranks evidence of easy.
+/// `basil` wins over `oregano`.
 #[test]
 fn basil_outranks_oregano() {
     assert_eq!(tags("oregano and basil"), ["complexity-high", "pii-none"]);
@@ -33,8 +32,7 @@ fn matching_is_case_insensitive() {
     assert_eq!(tags("kansas"), ["complexity-normal", "pii-confirmed"]);
 }
 
-/// The reason `contains_word` exists. Substring matching would flag every
-/// mention of Arkansas as confirmed PII and route it accordingly.
+/// Whole-word matching: "Arkansas" doesn't match "kansas".
 #[test]
 fn a_word_inside_another_word_does_not_match() {
     assert_eq!(
@@ -52,9 +50,7 @@ fn a_word_inside_another_word_does_not_match() {
     );
 }
 
-/// No user turn means no verdict — NOT a default verdict. Emitting
-/// `pii-none` here would assert a request is clean without having looked at
-/// it, which is the exact failure the CRD's fail-closed rule exists to stop.
+/// No user turn means `-unknown` tags, not a default verdict.
 #[test]
 fn an_unreadable_request_reports_unknown_not_a_default() {
     let t = tags_for_request("test", None);
@@ -95,8 +91,7 @@ fn last_user_turn_wins_and_handles_both_content_shapes() {
     assert_eq!(last_user_text(no_user.as_array().unwrap()), None);
 }
 
-/// Only the latest turn is classified, so an earlier mention does not keep
-/// tagging every subsequent turn in the conversation.
+/// Only the latest user turn is classified.
 #[test]
 fn an_earlier_turn_does_not_leak_into_the_verdict() {
     let msgs = serde_json::json!([
@@ -134,9 +129,7 @@ fn emitted_tags_resolve_to_their_own_classifier() {
     }
 }
 
-/// A prefixed tag no classifier emits yet still names its owner — that is
-/// what makes the rule cost the classifier's latency once it is real, and
-/// what lets the compiler warn precisely instead of shrugging.
+/// A prefixed tag no classifier emits still resolves to its owner.
 #[test]
 fn an_unemittable_prefixed_tag_still_resolves_but_is_not_emittable() {
     assert_eq!(classifier_for("pii-detected").map(|c| c.name), Some("pii"));
@@ -172,15 +165,9 @@ fn emittable_tags_are_scoped_to_the_named_classifiers() {
 
 /// Every classifier's verdicts are inside its own declared `emits`.
 ///
-/// The two halves of a classifier can drift: `emits` is what `compile` warns
-/// against and what the status writer publishes, while `detect` is what
-/// actually runs. A tag produced but not declared makes a working rule report
-/// as inert; a tag declared but never produced advertises a signal that never
-/// arrives. Nothing checked either direction before the per-classifier split
-/// made it expressible.
-///
-/// The `-unknown` tag is excluded: it is emitted by the fold in
-/// `tags_for_request`, never by a `detect`.
+/// `emits` (what `compile` checks against) and `detect` (what runs) must
+/// agree in both directions. The `-unknown` tag is excluded, since
+/// `tags_for_request` emits it.
 #[test]
 fn every_verdict_is_in_its_own_emits() {
     // Inputs chosen to reach every branch of every classifier, plus text that

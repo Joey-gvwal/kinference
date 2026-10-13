@@ -1,8 +1,6 @@
 use super::*;
 
-/// The wire spelling is the variant name. Pinned because both `as_str` and
-/// serde produce it, and a drift between them would make the CLI's JSON and
-/// `status.warnings` disagree about what a finding is called.
+/// The wire spelling is the variant name, from both `as_str` and serde.
 #[test]
 fn every_code_serializes_as_its_as_str() {
     for code in WarningCode::ALL {
@@ -14,9 +12,7 @@ fn every_code_serializes_as_its_as_str() {
     }
 }
 
-/// `ALL` is hand-maintained, so check it is complete: every variant appears
-/// exactly once. A code missing from `ALL` would also be missing from the doc
-/// drift check, which is the whole reason `ALL` exists.
+/// `ALL` is hand-maintained, so check every variant appears exactly once.
 #[test]
 fn all_lists_each_code_once() {
     let mut seen = std::collections::BTreeSet::new();
@@ -71,7 +67,7 @@ fn did_you_mean_finds_typos_and_ignores_strangers() {
         "transposition"
     );
     assert_eq!(did_you_mean("together", names), None);
-    // Case is not an edit: `Local` for `local` is the classic slip.
+    // Case differences are not edits.
     assert_eq!(did_you_mean("local", ["Local", "Provider"]), Some("Local"));
     // An exact match is not a suggestion.
     assert_eq!(did_you_mean("databricks", names), None);
