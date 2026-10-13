@@ -1,47 +1,30 @@
 //! The `InferencePolicy` predicate grammar, compiled to a typed AST.
 //!
 //! The CRD stores every predicate value as
-//! `x-kubernetes-preserve-unknown-fields`, because the *shape* of the YAML
-//! value is what picks the comparison:
+//! `x-kubernetes-preserve-unknown-fields`, since the shape of the YAML value
+//! picks the comparison:
 //!
 //! | RHS shape | Meaning                                        | Example                        |
 //! |-----------|------------------------------------------------|--------------------------------|
 //! | scalar    | exact match; CONTAINS for a set-valued attr    | `tag: ssn`, `model: foo`       |
-//! | array     | membership — INTERSECTION for set-valued attrs | `qos: [batch, deferrable]`     |
+//! | array     | membership; INTERSECTION for set-valued attrs  | `qos: [batch, deferrable]`     |
 //! | hash      | explicit operator                              | `queuedPrompts: {greaterThan: 8}` |
 //!
 //! Operators: `not`, `greaterThan`, `lessThan`, `greaterThanOrEqual`,
 //! `lessThanOrEqual`, `containsAll`, `exists`. Keys within one predicate are
 //! ANDed.
 //!
-//! **`qos` is the one exception: array-only.** Its CRD schema enumerates the
-//! closed domain rather than preserving unknown fields, and a schema with an
-//! enum needs a single YAML type — so `qos: [batch]` is the only accepted form
-//! and `qos: batch` is rejected by the API server. See `compile_qos`.
+//! `qos` is the exception: its schema enumerates a closed domain, which needs a
+//! single YAML type, so it is array-only (`qos: [batch]`). See `compile_qos`.
 //!
-//! Two things here are deliberate:
+//! Predicates compile once per policy revision, so a bad one is reported once
+//! in `status.warnings`. The attribute determines the expected type, so
+//! mismatches like `model: {greaterThan: 5}` are caught at compile time.
 //!
-//! 1. **Compilation happens once per policy revision, never per request.**
-//!    Interpreting untyped JSON on the pick hot path would be both slow and
-//!    silent about malformed policy. Compiling up front means a bad predicate
-//!    is reported once, in `status.warnings`, with a reason an operator can act
-//!    on.
-//! 2. **The attribute name determines the expected type**, so operator/type
-//!    mismatches (`model: {greaterThan: 5}`) are caught at compile time rather
-//!    than mysteriously never matching at runtime.
-//!
-//! ## Absence
-//!
-//! *"A predicate over a signal the candidate does not carry does not match."*
-//! Applied uniformly to both scopes. The single exception is `{exists: false}`,
-//! whose entire job is to match absence.
-//!
-//! `tag` is the one attribute that is ALWAYS present, even when empty — see
-//! [`RequestAttrs::get`]. An empty tag set means no classifier answered, which
-//! the CRD is explicit is not the same as a clean result, and collapsing the two
-//! into "absent" would make `{not: pii-detected}` fail to match a request nobody
-//! screened. So classifiers emit an explicit `-unknown` tag instead of nothing;
-//! see [`super::classify`].
+//! A predicate over an attribute that is absent does not match, in both
+//! scopes, except `{exists: false}`. `model`, `tenant` and `tag` are always
+//! present (see [`RequestAttrs::get`]); classifiers emit an explicit `-unknown`
+//! tag rather than nothing (see [`super::classify`]).
 
 use std::time::Duration;
 
@@ -98,9 +81,9 @@ pub enum RequestAttr {
     MaxTokens,
     Tenant,
     Qos,
-    /// Classifier output, as an unordered set of opaque tags. Which classifier
-    /// a rule actually needs comes from the tag VALUES, not from this variant —
-    /// see [`CompiledRequestPredicate::required_classifiers`].
+    /// Classifier output, as an unordered set of opaque tags. The tag values
+    /// select which classifiers run; see
+    /// [`CompiledRequestPredicate::required_classifiers`].
     Tag,
 }
 
@@ -108,10 +91,7 @@ impl RequestAttr {
     pub fn kind(&self) -> AttrKind {
         match self {
             RequestAttr::InputTokens | RequestAttr::MaxTokens => AttrKind::Int,
-            // Both are SETS. `tag` obviously so; `model` because the upstream a
-            // request resolved to and the client-facing aliases for it are all
-            // names the same request legitimately answers to — see
-            // [`RequestAttrs::model`].
+            // Both are sets; see [`RequestAttrs::model`].
             RequestAttr::Tag | RequestAttr::Model => AttrKind::StrList,
             _ => AttrKind::Str,
         }
@@ -133,25 +113,20 @@ impl RequestAttr {
 /// Candidate-scope attributes, available in `drop:`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateAttr {
-    /// Effective window from THIS endpoint, not the architectural one.
+    /// Effective window from this endpoint, not the architectural one.
     ContextWindow,
     PredictedTtft,
     PrefixCacheHitRatio,
-    /// `num_requests_waiting` on this endpoint. Self-normalizing: nonzero means
-    /// the scheduler could not admit.
+    /// Mean `num_requests_waiting` on this endpoint over the scrape window.
     QueuedPrompts,
     /// KV-cache utilization, 0.0..1.0, averaged over the scrape window.
     ///
-    /// The saturation signal `queuedPrompts` is not: it rises monotonically
-    /// with pressure, where the queue can read LOW at high pressure (a fleet
-    /// measured at 93% KV / 100 ms ITL showed `waiting = 1`, while a moment at
-    /// 31% KV showed `waiting = 5`). Threshold this for headroom; threshold
-    /// the queue for admission.
+    /// Unlike `queuedPrompts`, it rises monotonically with pressure, so
+    /// threshold this for headroom and the queue for admission.
     KvCacheUsage,
     ModelName,
     BackendName,
-    /// `Local` or `Provider`. The one candidate signal every candidate carries,
-    /// which is what lets a policy scope the rest.
+    /// `Local` or `Provider`. Every candidate carries it.
     BackendType,
     /// Local-only.
     BackendReadyEndpoints,
@@ -166,11 +141,7 @@ impl CandidateAttr {
     pub fn kind(self) -> AttrKind {
         match self {
             CandidateAttr::ContextWindow | CandidateAttr::BackendReadyEndpoints => AttrKind::Int,
-            // FLOAT, not Int: `queuedPrompts` is a mean over the scrape
-            // window, so a worker that queued 5 prompts for two seconds out of
-            // thirty reads ~0.3. Rounding that to an integer would throw away
-            // the whole point of averaging — every non-zero blip would land
-            // back on 0 or 1.
+            // A mean over the scrape window, so fractional.
             CandidateAttr::QueuedPrompts => AttrKind::Float,
             CandidateAttr::PredictedTtft | CandidateAttr::BackendObservedTtftP95 => {
                 AttrKind::Duration
@@ -185,9 +156,8 @@ impl CandidateAttr {
 
     /// Which backend class can answer this signal, or `None` when both can.
     ///
-    /// Used to warn on a predicate whose signal no candidate in scope carries —
-    /// silent by design (absence does not match), and therefore worth saying out
-    /// loud at admission.
+    /// Used to warn on a predicate whose signal no candidate in scope carries,
+    /// since absence silently doesn't match.
     pub fn scoped_to(self) -> Option<super::crd::BackendType> {
         use super::crd::BackendType as B;
         match self {
@@ -241,10 +211,8 @@ pub enum Matcher {
 impl Matcher {
     /// Every string this matcher compares against, including under `not`.
     ///
-    /// Used to recover the tag VALUES a rule references, which is what selects
-    /// the classifiers it needs. `{exists: _}` names no tag and contributes
-    /// nothing — a rule asking only whether any tag is present depends on no
-    /// particular classifier.
+    /// Used to recover the tag values a rule references, which select the
+    /// classifiers it needs. `{exists: _}` contributes nothing.
     pub fn string_operands(&self, out: &mut Vec<String>) {
         match self {
             Matcher::Equals(AttrValue::Str(s)) => out.push(s.clone()),
@@ -267,12 +235,9 @@ impl Matcher {
         }
     }
 
-    /// A matcher that matches nothing — what an invalid term compiles to.
-    ///
-    /// An empty `OneOf` has no member to equal, so `eval` is false for every
-    /// value, present or absent. That makes the entry holding it unsatisfiable,
-    /// which is the safe direction everywhere a predicate appears: a `matches`
-    /// entry stops matching, an `if` stops applying, a `drop` drops nothing.
+    /// A matcher that matches nothing, which is what an invalid term compiles
+    /// to. That makes its predicate unsatisfiable: a `matches` entry stops
+    /// matching, an `if` stops applying, a `drop` drops nothing.
     pub fn never() -> Matcher {
         Matcher::OneOf(Vec::new())
     }
@@ -285,10 +250,9 @@ impl Matcher {
         Matcher::compile_noting(raw, kind, &mut Vec::new())
     }
 
-    /// [`Matcher::compile`], also reporting values that were ACCEPTED after a
-    /// lossy conversion — a number given for a string attribute, a fraction
-    /// given for an integer one. Those compile, so they are not errors, but the
-    /// author wrote something other than what will be compared.
+    /// [`Matcher::compile`], also noting values accepted after a lossy
+    /// conversion, such as a number for a string attribute or a fraction for an
+    /// integer one.
     pub fn compile_noting(
         raw: &serde_json::Value,
         kind: AttrKind,
@@ -357,15 +321,13 @@ impl Matcher {
     }
 
     /// Evaluate against a resolved value. `None` means the attribute is absent,
-    /// which does not match — except for `exists: false`.
+    /// which does not match, except for `exists: false`.
     pub fn eval(&self, actual: Option<&AttrValue>) -> bool {
         // `exists` and `not` are the only forms that get a say about absence.
         match self {
             Matcher::Exists(want) => return actual.is_some() == *want,
             Matcher::Not(inner) => {
-                // An absent attribute does not match, negated or not — a
-                // candidate that carries no `backend.name` is not "a candidate
-                // whose backend.name is not X".
+                // An absent attribute does not match, negated or not.
                 return match actual {
                     None => false,
                     Some(_) => !inner.eval(actual),
@@ -406,8 +368,7 @@ fn equals(actual: &AttrValue, want: &AttrValue) -> bool {
     match (actual, want) {
         (AttrValue::Str(a), AttrValue::Str(b)) => a == b,
         (AttrValue::Bool(a), AttrValue::Bool(b)) => a == b,
-        // Scalar against a set means CONTAINS, per the CRD: `tag: pii-detected`
-        // asks whether the tag is present, not whether it is the only one.
+        // Scalar against a set means contains.
         (AttrValue::List(a), AttrValue::Str(b)) => a.contains(b),
         _ => match (actual.as_f64(), want.as_f64()) {
             (Some(a), Some(b)) => a == b,
@@ -427,9 +388,8 @@ fn scalar(
     match kind {
         AttrKind::Str | AttrKind::StrList => match raw {
             V::String(s) => Ok(AttrValue::Str(s.clone())),
-            // A bare number/bool against a string attribute is almost always a
-            // YAML quoting slip; accept it rather than fail the whole policy —
-            // but say so, because `tenant: 007` is compared as "7".
+            // Usually a YAML quoting slip; accept it, but note it, since
+            // `tenant: 007` is compared as "7".
             V::Number(n) => {
                 notes.push(format!(
                     "`{n}` is a number but this attribute is a string, so it is compared as \
@@ -470,14 +430,12 @@ fn scalar(
 }
 
 /// Numeric RHS. Durations arrive as strings (`5s`); everything else must be a
-/// real JSON number — the guide is explicit that thresholds are numbers, not
-/// quoted strings.
+/// JSON number.
 fn number(raw: &serde_json::Value, kind: AttrKind) -> Result<f64, String> {
     if kind == AttrKind::Duration {
         return match raw {
             serde_json::Value::String(s) => parse_duration_ms(s),
-            // A bare number for a duration is ambiguous about units; the CRD
-            // spells durations as strings, so say so rather than guess.
+            // A bare number is ambiguous about units.
             serde_json::Value::Number(_) => Err(
                 "a duration takes a string with units (`5s`, `200ms`), not a bare number"
                     .to_string(),
@@ -552,23 +510,15 @@ pub fn parse_duration_ms(s: &str) -> Result<f64, String> {
     Ok(total)
 }
 
-/// The closed QoS domain, matching `PickRequest.QosClass` and `Qos::as_label`.
-/// Enumerated in the CRD schema, so the API server rejects a typo — but checked
-/// here too, since kinference may be reading a policy admitted by an older schema.
-pub // Deliberately excludes `unknown`, which `Qos::as_label` can emit. That value
-// exists only on the terminal-report path, for a report whose pick kinference can no
-// longer identify; policy matches at PICK time, where `Qos::from_proto` never
-// produces it. A rule written `qos: [unknown]` could therefore never fire.
-const QOS_VALUES: &[&str] = &["interactive", "batch", "deferrable"];
-
-/// `qos` is the one attribute whose CRD type is not
-/// `x-kubernetes-preserve-unknown-fields`: it is an array over a closed enum.
+/// The closed QoS domain, matching `PickRequest.QosClass`. Also checked here
+/// since the policy may have been admitted by an older schema.
 ///
-/// Enumerating the domain forces a single YAML type, so membership is the only
-/// form — `qos: interactive` is rejected by the API server and must be
-/// `qos: [interactive]`. Three values have no use for `greaterThan` or a bare
-/// scalar, and the trade buys something no other attribute gets: `[bacth]`
-/// fails at apply time rather than becoming a rule that never fires.
+/// Excludes `unknown`, which `Qos::as_label` emits only on the terminal-report
+/// path; at pick time it never occurs.
+pub const QOS_VALUES: &[&str] = &["interactive", "batch", "deferrable"];
+
+/// `qos` is an array over a closed enum rather than a free-form predicate, so
+/// a typo like `[bacth]` fails at apply time.
 fn compile_qos(raw: &serde_json::Value) -> Result<Matcher, String> {
     let serde_json::Value::Array(items) = raw else {
         return Err(format!(
@@ -592,8 +542,7 @@ fn compile_qos(raw: &serde_json::Value) -> Result<Matcher, String> {
     Ok(Matcher::OneOf(vals))
 }
 
-/// A problem with one term, reported before the caller knows where in the
-/// manifest the predicate sits — the compiler adds the path and the rule.
+/// A problem with one term. The compiler adds the manifest path and the rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TermIssue {
     /// The attribute as spelled in YAML: `inputTokens`, `backend.type`.
@@ -604,15 +553,10 @@ pub struct TermIssue {
     pub message: String,
 }
 
-/// Compile one term, failing CLOSED on error.
+/// Compile one term, failing closed on error.
 ///
-/// An invalid term becomes [`Matcher::never`] rather than being left out.
-/// Leaving it out was the old behaviour, and it failed in the dangerous
-/// direction: terms AND, so dropping one WIDENS the predicate. A `drop` of
-/// `{backend: {type: Local}, queuedPrompts: {greaterThan: "4"}}` — a quoted
-/// number — compiled to `{backend: {type: Local}}` and removed every local
-/// candidate, and a `matches` entry whose only term was bad became a
-/// catch-all.
+/// An invalid term becomes [`Matcher::never`] rather than being left out:
+/// terms AND, so dropping one would widen the predicate.
 fn compile_term<A: Clone>(
     attr: A,
     name: String,
@@ -651,8 +595,7 @@ impl CompiledRequestPredicate {
     /// Compile one `matches[]` entry or one `if:` guard.
     ///
     /// A term that fails to compile is reported in `issues` and replaced by
-    /// one that never matches, so the whole predicate can never be satisfied —
-    /// see `compile_term` for why it must not simply be left out.
+    /// one that never matches; see `compile_term`.
     pub fn compile(raw: &RequestPredicate, issues: &mut Vec<TermIssue>) -> Self {
         let mut terms = Vec::new();
         let mut push = |attr: RequestAttr, v: &Option<serde_json::Value>| {
@@ -672,8 +615,7 @@ impl CompiledRequestPredicate {
         push(RequestAttr::MaxTokens, &raw.max_tokens);
         push(RequestAttr::Tenant, &raw.tenant);
         push(RequestAttr::Tag, &raw.tag);
-        // `qos` after the closure's last use, so it can borrow `terms` directly.
-        // Term order is irrelevant — they all AND.
+        // `qos` after the closure's last use, so it can borrow `terms`.
         if let Some(v) = &raw.qos {
             match compile_qos(v) {
                 Ok(m) => terms.push((RequestAttr::Qos, m)),
@@ -683,8 +625,7 @@ impl CompiledRequestPredicate {
                         fatal: true,
                         message,
                     });
-                    // Fail closed, like every other term: an unsatisfiable term
-                    // must make the entry inert, never drop out and widen it.
+                    // Fail closed, like every other term.
                     terms.push((RequestAttr::Qos, Matcher::never()));
                 }
             }
@@ -692,8 +633,7 @@ impl CompiledRequestPredicate {
         Self { terms }
     }
 
-    /// True when every term matches. An empty predicate matches everything —
-    /// a rule with no `matches` is the documented catch-all.
+    /// True when every term matches. An empty predicate matches everything.
     pub fn matches(&self, attrs: &RequestAttrs) -> bool {
         self.terms
             .iter()
@@ -702,12 +642,9 @@ impl CompiledRequestPredicate {
 
     /// True when this entry matches every request.
     ///
-    /// `matches` over zero terms is `all()` over an empty iterator, which is
-    /// TRUE — so `matches: [{}]` is a catch-all exactly like omitting `matches`
-    /// altogether. Note the deliberate asymmetry with
-    /// [`CompiledCandidatePredicate::matches`], which guards the empty case and
-    /// returns FALSE: a request predicate with nothing to say admits
-    /// everything, a candidate predicate with nothing to say drops nothing.
+    /// So `matches: [{}]` is a catch-all, like omitting `matches`. Unlike
+    /// [`CompiledCandidatePredicate::matches`], where an empty predicate drops
+    /// nothing.
     pub fn is_unconditional(&self) -> bool {
         self.terms.is_empty()
     }
@@ -725,13 +662,9 @@ impl CompiledRequestPredicate {
         out
     }
 
-    /// Classifiers this predicate depends on, resolved from the tag values it
-    /// names — the tag PREFIX is what selects a classifier, so this cannot be
-    /// derived from the attribute alone.
-    ///
-    /// A tag no classifier claims contributes nothing here and is reported
-    /// separately by the compiler; it would otherwise show up as a rule
-    /// requiring a classifier that does not exist.
+    /// Classifiers this predicate depends on, by the prefixes of the tag values
+    /// it names. A tag no classifier claims contributes nothing; the compiler
+    /// reports it separately.
     pub fn required_classifiers(&self) -> Vec<&'static str> {
         let mut out: Vec<&'static str> = self
             .referenced_tags()
@@ -743,10 +676,8 @@ impl CompiledRequestPredicate {
         out
     }
 
-    /// Tags this predicate names that no classifier can currently emit. A term
-    /// over one of these can never be satisfied, so the rule is inert — which is
-    /// a different fault from a malformed predicate and is reported as its own
-    /// warning.
+    /// Tags this predicate names that no classifier can emit, which make the
+    /// rule inert.
     pub fn unemittable_tags(&self) -> Vec<String> {
         self.referenced_tags()
             .into_iter()
@@ -799,11 +730,8 @@ impl CompiledCandidatePredicate {
         Self { terms }
     }
 
-    /// True when every term matches — i.e. this exclusion drops the candidate.
-    ///
-    /// An EMPTY predicate matches nothing. `drop: {}` would otherwise silently
-    /// empty the candidate set, and "cannot fail open" cuts both ways: an
-    /// exclusion that says nothing should remove nothing.
+    /// True when every term matches, i.e. this exclusion drops the candidate.
+    /// An empty predicate matches nothing, so `drop: {}` removes nothing.
     pub fn matches(&self, attrs: &CandidateAttrs) -> bool {
         if self.terms.is_empty() {
             return false;
@@ -820,44 +748,34 @@ pub struct RequestAttrs {
     /// Every name this request answers to: the upstream model it resolved to,
     /// plus each client-facing alias declared for that upstream.
     ///
-    /// A SET, because by the time a predicate runs the client's own spelling is
-    /// gone — `auto` and declared aliases are both rewritten to a concrete
-    /// upstream before scoring. Matching only the upstream meant
-    /// `model: qwen-simple` never fired, silently, while the identical name
-    /// worked in `route.consider[].models.names[]` (which resolves through the
-    /// alias table). Carrying both spellings makes the two agree.
-    ///
-    /// Ordering is upstream first, then aliases sorted, so traces read
-    /// predictably.
+    /// A set, since the client's spelling is rewritten to a concrete upstream
+    /// before predicates run; this way `model:` matches aliases just as
+    /// `consider[].models.names[]` does. Upstream first, then aliases sorted.
     pub model: Vec<String>,
     pub input_tokens: Option<i64>,
     pub max_tokens: Option<i64>,
-    /// Mandatory on the wire, so always present. `""` is "undetermined" and
-    /// matches only a rule naming the empty string — never a named tenant, and
-    /// never every rule.
+    /// Always present. `""` is "undetermined" and matches only a rule naming
+    /// the empty string.
     pub tenant: String,
     pub qos: Option<String>,
-    /// Classifier output. Always populated — every classifier emits at least its
-    /// `-unknown` tag — so an EMPTY set means none of them ran, not that they
-    /// ran and found nothing. See [`super::classify::tags_for_request`].
+    /// Classifier output. Every classifier that runs emits at least its
+    /// `-unknown` tag, so an empty set means none ran. See
+    /// [`super::classify::tags_for_request`].
     pub tag: Vec<String>,
 }
 
 impl RequestAttrs {
     pub fn get(&self, attr: &RequestAttr) -> Option<AttrValue> {
         match attr {
-            // Always `Some`, like `tag`: an empty set means the model could not
-            // be determined at all, which must not read as "matches anything".
+            // Always `Some`, like `tag`.
             RequestAttr::Model => Some(AttrValue::List(self.model.clone())),
             RequestAttr::InputTokens => self.input_tokens.map(AttrValue::Int),
             RequestAttr::MaxTokens => self.max_tokens.map(AttrValue::Int),
             // Always `Some`: an empty tenant is the value "", not an absence.
             RequestAttr::Tenant => Some(AttrValue::Str(self.tenant.clone())),
             RequestAttr::Qos => self.qos.clone().map(AttrValue::Str),
-            // ALWAYS `Some`, even for an empty set. `Matcher::Not` treats an
-            // absent attribute as non-matching, so returning `None` here would
-            // make `{not: pii-detected}` silently fail to match a request that
-            // no classifier screened — the opposite of fail-closed.
+            // Always `Some`, even when empty, so `{not: pii-detected}` matches
+            // a request no classifier screened.
             RequestAttr::Tag => Some(AttrValue::List(self.tag.clone())),
         }
     }
@@ -869,8 +787,8 @@ pub struct CandidateAttrs {
     pub context_window: Option<i64>,
     pub predicted_ttft_ms: Option<f64>,
     pub prefix_cache_hit_ratio: Option<f64>,
-    /// Mean queued prompts over the scrape window — fractional by
-    /// construction, hence f64. See `MetricsSample::waiting_mean`.
+    /// Mean queued prompts over the scrape window. See
+    /// `MetricsSample::waiting_mean`.
     pub queued_prompts: Option<f64>,
     /// Mean KV-cache utilization over the same window, 0.0..1.0.
     pub kv_cache_usage: Option<f64>,

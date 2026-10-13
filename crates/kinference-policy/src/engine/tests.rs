@@ -178,8 +178,7 @@ fn duplicate_targets_are_deduped() {
 }
 
 /// A Local group and a Provider group for one model are two subsets, not one
-/// twice. Dedupe used to compare only names and labels, so the Provider group
-/// was dropped as a duplicate and providers were never considered.
+/// twice.
 #[test]
 fn groups_differing_only_by_class_are_both_scored() {
     let p = policy(json!({"rules": [{"name": "r", "route": {
@@ -195,9 +194,7 @@ fn groups_differing_only_by_class_are_both_scored() {
     );
 }
 
-/// A `select` tier that subsets by label sees the destination's labels. It
-/// used to be handed an empty map, so a label subset admitted nothing and the
-/// next tier decided instead.
+/// A `select` tier that subsets by label sees the destination's labels.
 #[test]
 fn a_select_tier_can_subset_by_label() {
     let p = policy(json!({"rules": [{"name": "r", "route": {"select": [
@@ -346,7 +343,7 @@ fn guarded_exclusion_sits_out_when_the_guard_misses() {
 
 #[test]
 fn two_guarded_exclusions_in_one_rule_compose() {
-    // The documented reason `if:` exists — two rules would NOT compose.
+    // Two first-match-wins rules couldn't express this.
     let p = policy(json!({"rules": [{"name": "r", "route": {
         "exclude": [
             {"name": "eu", "if": {"tenant": "health-eu"}, "drop": {"backend": {"name": "us"}}},
@@ -376,7 +373,7 @@ fn two_guarded_exclusions_in_one_rule_compose() {
 
 #[test]
 fn queued_prompts_exclusion_sheds_by_emptying_the_set() {
-    // v1 semantic: this SHEDS load rather than routing around it.
+    // This sheds load rather than routing around it.
     let p = policy(json!({"rules": [{"name": "r", "route": {
         "exclude": [{"name": "shed", "drop": {"queuedPrompts": {"greaterThan": 8}}}],
         "select": [{"minimize": "PredictedTTFT"}],
@@ -420,7 +417,7 @@ fn first_tier_with_a_survivor_wins_outright() {
         "select": [
             {"backends": {"names": ["h100"]}, "minimize": "PredictedTTFT"},
             {"backends": {"names": ["a100"]}, "minimize": "PredictedTTFT"}]}}]}));
-    // h100 present but much slower — tier order beats the objective.
+    // h100 present but much slower; tier order beats the objective.
     let out = evaluate(
         route_of(&p),
         Some("r"),
@@ -569,7 +566,6 @@ fn unmatched_reject_refuses() {
 
 #[test]
 fn trace_records_survivors_the_killer_and_the_objective() {
-    // Exactly what the guide asks be emitted from day one.
     let p = policy(json!({"rules": [{"name": "cheap", "route": {
         "exclude": [{"name": "no-a100", "drop": {"backend": {"name": "a100"}}}],
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
@@ -605,12 +601,8 @@ fn empty_candidate_set_traces_the_rule() {
 
 // --- provider candidates ----------------------------------------------
 
-/// The single most important property in this file.
-///
-/// `predicted_ttft_ms` used to be a bare `f32`. Had a provider arrived there
-/// as `0.0`, it would have been the BEST possible score under every
-/// `minimize` — so the candidate that knows least about itself would win
-/// every comparison, and a vendor would quietly swallow all traffic.
+/// A provider has no `PredictedTTFT`, and must not be scored as if it were
+/// `0.0`, the best possible value.
 #[test]
 fn an_unrankable_candidate_is_dropped_from_the_tier_not_scored_as_zero() {
     let p = policy(json!({
@@ -650,8 +642,7 @@ fn estimated_ttft_ranks_a_prediction_against_an_observation() {
             "route": { "select": [{ "minimize": "EstimatedTTFT" }] }
         }]
     }));
-    // The provider is genuinely faster, so it wins — which is the whole point
-    // of an objective that spans both classes.
+    // The provider is faster, so it wins.
     let out = evaluate(
         route_of(&p),
         Some("r"),
@@ -676,8 +667,8 @@ fn estimated_ttft_ranks_a_prediction_against_an_observation() {
     );
 }
 
-/// An unobserved provider has to stay eligible, or it can never earn an
-/// observation and is unreachable forever.
+/// An unobserved provider stays eligible, or it could never get an
+/// observation.
 #[test]
 fn an_unobserved_provider_sorts_last_but_still_wins_when_alone() {
     let p = policy(json!({
@@ -716,9 +707,8 @@ fn a_tier_can_select_by_backend_class() {
             ]}
         }]
     }));
-    // Tier 1 has a local candidate, so it wins outright — the provider tier
-    // is never consulted. This is the spill shape: the provider only becomes
-    // reachable once nothing local survives.
+    // Tier 1 has a local candidate, so it wins outright; the provider tier is
+    // only reached once nothing local survives.
     let out = evaluate(
         route_of(&p),
         Some("r"),
@@ -745,8 +735,7 @@ fn a_tier_can_select_by_backend_class() {
 
 #[test]
 fn dropping_by_backend_type_keeps_a_request_in_the_cluster() {
-    // The PII rule from the guide, which is near-harmless while everything is
-    // local and load-bearing the moment a provider is reachable.
+    // Drop providers for requests tagged with PII.
     let p = policy(json!({
         "rules": [{
             "name": "pii",
@@ -781,7 +770,7 @@ fn dropping_by_backend_type_keeps_a_request_in_the_cluster() {
     assert!(matches!(out, Outcome::Empty { .. }), "{out:?}");
 }
 
-/// A Local-only signal must not drop a provider — absence does not match.
+/// A Local-only signal doesn't drop a provider, since absence doesn't match.
 #[test]
 fn a_local_only_signal_never_drops_a_provider_candidate() {
     let p = policy(json!({
@@ -804,9 +793,8 @@ fn a_local_only_signal_never_drops_a_provider_candidate() {
         &req(),
         vec![busy, prov("together", "m", Some(900.0))],
     );
-    // The busy local endpoint goes; the provider survives despite carrying no
-    // `queuedPrompts` at all. This is the inversion the guide warns about —
-    // the same three lines that shed load now spill off-cluster.
+    // The busy local endpoint goes; the provider survives, carrying no
+    // `queuedPrompts` at all, so load spills off-cluster.
     assert!(
         matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "together"),
         "{out:?}"
@@ -887,13 +875,8 @@ fn the_context_window_check_applies_to_providers_too() {
     );
 }
 
-/// `type:` on a select tier is a real filter, not decoration.
-///
-/// Regression test. It was parsed, it satisfied the CRD's Local-only CEL rule,
-/// and then `compile_route` ignored it — so a tier written `type: Provider`
-/// admitted local candidates too. The `minimize` tiers hid it, because an
-/// unrankable candidate is dropped from the tier anyway; an `order` tier ranks
-/// by NAME and has no such check, which is where it showed.
+/// `type:` on a select tier filters candidates, including on an `order` tier,
+/// which ranks by name and so has no objective to drop them by.
 #[test]
 fn a_tier_type_actually_filters_by_class() {
     let p = policy(json!({
@@ -902,9 +885,8 @@ fn a_tier_type_actually_filters_by_class() {
             "route": { "select": [{ "type": "Provider", "order": ["together"] }] }
         }]
     }));
-    // A local candidate must not be admitted to a Provider-only tier, even
-    // when it is the only thing standing. Refusing is correct: the rule said
-    // where this request may go.
+    // A local candidate is not admitted to a Provider-only tier, even when it
+    // is the only thing standing.
     let out = evaluate(
         route_of(&p),
         Some("r"),
@@ -917,7 +899,7 @@ fn a_tier_type_actually_filters_by_class() {
     );
 }
 
-/// The mirror image, and the one an operator meets first.
+/// The mirror image.
 #[test]
 fn a_local_tier_excludes_providers() {
     let p = policy(json!({
@@ -956,13 +938,8 @@ fn the_long_form_of_the_tier_type_behaves_identically() {
     assert!(matches!(out, Outcome::Empty { .. }), "{out:?}");
 }
 
-/// Unmatched traffic must never leave the cluster.
-///
-/// It behaved this way before `default_route` said `Local`, but only because
-/// a provider has no `PredictedTTFT` and the tier dropped it. This pins the
-/// GUARANTEE rather than the accident: unmatched traffic is the path nobody
-/// wrote a rule for, so it should not depend on which objective the implicit
-/// tier happens to use.
+/// Unmatched traffic never leaves the cluster, regardless of which objective
+/// the implicit tier uses.
 #[test]
 fn the_unmatched_route_never_reaches_a_provider() {
     let route = CompiledPolicy::default_route();
@@ -972,8 +949,8 @@ fn the_unmatched_route_never_reaches_a_provider() {
         "a provider served unmatched traffic: {out:?}"
     );
 
-    // And a local candidate is still served, fail-open as intended — even a
-    // slow one, since the implicit route carries no exclusions on purpose.
+    // A local candidate is still served, even a slow one, since the implicit
+    // route carries no exclusions.
     let out = evaluate(
         &route,
         None,
@@ -986,11 +963,8 @@ fn the_unmatched_route_never_reaches_a_provider() {
     );
 }
 
-/// The provider is excluded at GENERATION, not by failing to rank.
-///
-/// The distinction is what an operator reads in the trace: "not an eligible
-/// destination" is the truth, where "no value for its objective" reads as a
-/// missing metric and sends them looking for one.
+/// The provider is excluded at generation, not by failing to rank, so the
+/// trace doesn't suggest a missing metric.
 #[test]
 fn the_unmatched_route_rejects_a_provider_as_ineligible_not_unmeasurable() {
     let route = CompiledPolicy::default_route();
@@ -1023,19 +997,9 @@ fn unmatched_generation_does_not_target_providers() {
     ));
 }
 
-/// A rule with no `consider` must reach a provider serving its OWN build of
-/// the requested model.
-///
-/// Alias resolution happens once, before any rule runs, collapsing the
-/// client's `qwen-2.5` to whichever upstream the local fleet serves
-/// (`Qwen/…-AWQ`). Scoring only that name asked every destination for a model
-/// only the local set has, so a provider serving `Qwen/…-Turbo` under the same
-/// alias matched nothing and never became a candidate — leaving a
-/// `select: [{type: Provider}]` tier unreachable on a policy whose entire
-/// purpose is provider failover, with no warning anywhere.
-///
-/// Carrying the whole request set is what lets each destination resolve
-/// through its own alias table.
+/// A rule with no `consider` reaches a provider serving its own build of the
+/// requested model, since every name the request answers to is scored and
+/// each destination resolves it through its own alias table.
 #[test]
 fn a_defaulted_consider_reaches_every_name_the_request_answers_to() {
     let p = policy(serde_json::json!({
@@ -1064,16 +1028,15 @@ fn a_defaulted_consider_reaches_every_name_the_request_answers_to() {
         "every name must be scored, or a destination that only knows the alias is unreachable"
     );
 
-    // The load-bearing one: without `qwen-2.5` among the targets, a provider
-    // declaring it as an alias of its own build is never asked about.
+    // Without `qwen-2.5` among the targets, a provider declaring it as an
+    // alias of its own build would never be asked about.
     assert!(
         names.contains(&"qwen-2.5"),
         "the alias the provider declares must be a target: {names:?}"
     );
 }
 
-/// One name in, one target out — the defaulted case must not fan out when
-/// there is nothing to fan out to.
+/// One name in, one target out.
 #[test]
 fn a_defaulted_consider_with_a_single_name_yields_a_single_target() {
     let p = policy(serde_json::json!({
