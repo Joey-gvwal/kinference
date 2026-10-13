@@ -1,5 +1,4 @@
-//! Driven against hand-built `Service` objects — the same no-cluster approach
-//! as `store`'s and `discovery::kubernetes`'s tests.
+//! Driven against hand-built `Service` objects.
 use super::*;
 use k8s_openapi::api::core::v1::ServiceSpec;
 use kube::core::ObjectMeta;
@@ -45,7 +44,7 @@ fn a_named_port_resolves_to_the_service_port() {
         "workers-h100",
         &[("http", 80), ("metrics", 9090)],
     )]);
-    // 80, not the pod's 8000: the whole reason to read the Service.
+    // 80, the Service port, not the pod's 8000.
     assert_eq!(
         idx.port_number("infra", "workers-h100", Some(&name("http"))),
         Ok(80)
@@ -65,9 +64,7 @@ fn an_unknown_port_name_is_reported_rather_than_guessed() {
     );
 }
 
-/// The case that motivates reading the Service at all. A number kinference cannot
-/// see on the Service must NOT be passed through: a `BackendBinding` carrying
-/// it would resolve, program a route, and fail every request.
+/// A number the Service doesn't expose is refused rather than passed through.
 #[test]
 fn a_numeric_port_must_be_one_the_service_exposes() {
     let idx = index(&[service("infra", "workers-h100", &[("http", 80)])]);
@@ -118,9 +115,7 @@ fn a_service_with_no_ports_has_none_to_resolve() {
     );
 }
 
-/// Namespace is part of the key. Getting this wrong would let one namespace's
-/// Service answer for another's — the same collapse the pool index avoids by
-/// keying on identity.
+/// Namespace is part of the key.
 #[test]
 fn the_namespace_is_part_of_the_identity() {
     let idx = index(&[
@@ -141,8 +136,7 @@ fn the_namespace_is_part_of_the_identity() {
     );
 }
 
-/// The distinction the publish gate does NOT make for us: an index that has
-/// not listed must not report a Service missing.
+/// An index that has not listed doesn't report a Service missing.
 #[test]
 fn an_unlisted_index_says_so_instead_of_reporting_absence() {
     let idx = ServiceIndex::unlisted();

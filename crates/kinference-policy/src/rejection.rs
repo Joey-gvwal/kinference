@@ -1,48 +1,35 @@
 //! Why an `InferenceWorkerSet` produced no pool.
 //!
-//! `worker_sets::desired_pools` produces these; `resolve` projects them into the
-//! reasons status reports. Kept apart from `worker_sets` because that module
-//! also holds the watch, and resolving names (`resolve::resolve`, `kinfctl
-//! check`) needs only the verdict, not the watcher.
+//! The router's `worker_sets::desired_pools` produces these; `resolve`
+//! projects them into the reasons status reports.
 
 use super::PoolKey;
 
 /// Why a worker set could not be materialized.
 ///
-/// Every variant is an operator-fixable misconfiguration, and they are kept
-/// distinct because the FIX differs: an unknown profile means editing the
-/// router's TOML, a missing one means editing the CR. Reporting them alike
-/// would send an operator to the wrong file.
+/// Every variant is an operator-fixable misconfiguration. They are distinct
+/// because the fix differs: an unknown profile means editing the router's
+/// TOML, a missing one means editing the CR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectReason {
     /// `spec.profile` absent. Required by the schema, so this means the object
     /// predates it or bypassed validation.
     MissingProfile,
     /// `spec.profile` names a profile the router does not define. Carries the
-    /// defined names, because in practice this is a typo and seeing the list
-    /// resolves it immediately.
+    /// defined names, since this is usually a typo.
     UnknownProfile { defined: Vec<String> },
     /// `spec.kvBlockSize` absent, same provenance as `MissingProfile`.
     MissingKvBlockSize,
-    /// `spec.kvBlockSize` is zero. The schema forbids it; a `KvIndexer` built
-    /// on it would divide by zero.
+    /// `spec.kvBlockSize` is zero, which the schema forbids.
     InvalidKvBlockSize { got: u32 },
     /// `spec.serviceRef.name` is empty, so there is nothing to watch.
     MissingServiceRef,
-    /// A `spec.models` row carries no `name`.
-    ///
-    /// The row maps an alias onto nothing, so the alias silently would not
-    /// resolve. Refused rather than dropped: the schema requires `name`, so this
-    /// is only reachable by an object that bypassed validation, and a declared
-    /// alias that does not work is a routing lie rather than a cosmetic slip.
+    /// A `spec.models` row carries no `name`, so its aliases would resolve to
+    /// nothing. Only reachable by an object that bypassed validation.
     ModelMissingName,
-    /// `spec.kvEvents` is present but carries no `port`.
-    ///
-    /// A contradiction rather than an omission: the block IS the declaration
-    /// that these engines publish events, and it does not say where. The schema
-    /// requires `port`, so this is only reachable by an object that bypassed
-    /// validation — but it has to be reachable, because `port` is `Option` in
-    /// Rust precisely so one such object cannot fail a whole watcher page.
+    /// `spec.kvEvents` is present but carries no `port`: it declares that the
+    /// engines publish events without saying where. Only reachable by an
+    /// object that bypassed validation.
     KvEventsMissingPort,
 }
 

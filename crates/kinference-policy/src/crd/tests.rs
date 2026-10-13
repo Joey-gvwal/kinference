@@ -1,7 +1,7 @@
 use super::*;
 
-/// The YAML in `charts/kinference-crds/templates/` is the contract; these pin that our types actually
-/// deserialize the guide's own examples.
+/// The YAML in `charts/kinference-crds/templates/` is the contract; these check
+/// that our types deserialize its examples.
 #[test]
 fn worker_set_from_guide_example() {
     let y = serde_yaml_lite(
@@ -16,9 +16,7 @@ fn worker_set_from_guide_example() {
         spec.service_ref.port.as_ref().unwrap().as_name(),
         Some("openai")
     );
-    // Two entries sharing an ALIAS = interchangeable upstream models. The
-    // names are the two upstream models and so differ; it is the alias that
-    // ties them together, where the old shape duplicated the canonical `name`.
+    // Two upstream models sharing an alias are interchangeable.
     assert_eq!(spec.models.len(), 2);
     assert_ne!(spec.models[0].name, spec.models[1].name);
     assert_eq!(spec.models[0].aliases, spec.models[1].aliases);
@@ -151,9 +149,8 @@ fn order_tier_parses_as_alternative_to_minimize() {
     assert_eq!(tier.minimize, None, "exactly one of minimize or order");
 }
 
-/// `path` is the one provider field whose ABSENCE is a decision: it means
-/// "dispatch on whatever the client sent", so it must survive as `None`
-/// rather than defaulting to a path nobody declared.
+/// An absent provider `path` means "dispatch on whatever the client sent", so
+/// it stays `None`.
 #[test]
 fn provider_path_is_optional() {
     let with: InferenceProviderSpec = serde_json::from_value(serde_yaml_lite(
@@ -175,8 +172,7 @@ fn provider_path_is_optional() {
     assert_eq!(without.path, None, "an omitted path rewrites nothing");
 }
 
-/// Tiny JSON helper so the tests can be written in the CRD's own YAML-ish
-/// shape without pulling in a YAML dependency.
+/// Lets tests be written in the CRD's shape without a YAML dependency.
 fn serde_yaml_lite(s: &str) -> serde_json::Value {
     serde_json::from_str(s).expect("test fixture is valid JSON")
 }
