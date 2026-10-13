@@ -60,8 +60,7 @@ fn harness(reap: ReapPolicy) -> Harness {
     }
 }
 
-/// Reap as soon as the pool is idle — the linger only exists to make
-/// resurrection possible, and tests that want it set it explicitly.
+/// Reap as soon as the pool is idle; tests that need a linger set one.
 fn eager() -> ReapPolicy {
     ReapPolicy {
         linger: Duration::ZERO,
@@ -123,10 +122,8 @@ async fn create_retire_reap() {
     );
 }
 
-/// The reason retire and reap are separate at all: `KvIndexer`'s channel
-/// send unwraps, so anything still reaching the indexer after cancellation
-/// panics. A retired pool's indexer therefore has to keep answering until
-/// the reaper decides nothing is using it.
+/// A retired pool's indexer keeps answering until it is reaped, since
+/// `KvIndexer` panics if reached after cancellation.
 #[tokio::test]
 async fn a_retired_pool_indexer_still_answers_until_reaped() {
     let mut h = harness(ReapPolicy {
@@ -137,8 +134,7 @@ async fn a_retired_pool_indexer_still_answers_until_reaped() {
     let pool = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
 
     h.mgr.reconcile(Vec::new());
-    // Retired, not reaped: an in-flight event or a pick that started before
-    // the retire must still find a working index rather than a panic.
+    // Retired, not reaped: in-flight work still finds a working index.
     pool.indexer
         .find_matches(Vec::new())
         .await
@@ -147,8 +143,7 @@ async fn a_retired_pool_indexer_still_answers_until_reaped() {
     assert!(!pool.cancel.is_cancelled());
 }
 
-/// The strong-count gate. A request inside the pool holds an `Arc<Pool>`,
-/// and reaping under it would cancel the indexer while a pick is using it.
+/// A request inside the pool holds an `Arc<Pool>`, which blocks reaping.
 #[tokio::test]
 async fn a_pool_with_an_outstanding_handle_is_not_reaped() {
     let mut h = harness(eager());
@@ -169,7 +164,7 @@ async fn a_pool_with_an_outstanding_handle_is_not_reaped() {
     assert!(token.is_cancelled());
 }
 
-/// The backstop: a leaked `Arc` must not pin an OS thread forever.
+/// The backstop reaps a pool despite a leaked `Arc`.
 #[tokio::test]
 async fn the_backstop_reaps_past_the_deadline_even_when_held() {
     let mut h = harness(ReapPolicy {
@@ -186,12 +181,11 @@ async fn the_backstop_reaps_past_the_deadline_even_when_held() {
     );
 }
 
-/// A reconnect that retires and immediately recreates the same set must not
-/// dump its prefix cache. Same `PoolId`, same indexer, same registry.
+/// Retiring and immediately recreating the same set resurrects it: same
+/// `PoolId`, indexer and registry.
 #[tokio::test]
 async fn resurrection_preserves_the_pool_and_its_cache() {
-    // Non-zero linger: without it the sweeper could reap before the
-    // recreate, which is exactly what the linger is for.
+    // Non-zero linger, so the sweeper can't reap before the recreate.
     let mut h = harness(ReapPolicy {
         linger: Duration::from_secs(30),
         backstop: Duration::from_secs(600),
@@ -228,8 +222,7 @@ async fn resurrection_preserves_the_pool_and_its_cache() {
     );
 }
 
-/// Resurrection is only safe when NOTHING changed. A different spec must
-/// build a fresh pool rather than reuse an indexer sized for the old one.
+/// A different spec builds a fresh pool rather than resurrecting.
 #[tokio::test]
 async fn a_changed_spec_does_not_resurrect() {
     let mut h = harness(ReapPolicy {
@@ -248,8 +241,7 @@ async fn a_changed_spec_does_not_resurrect() {
     assert_eq!(after.block_size, 64);
 }
 
-/// An unchanged spec is a no-op, so a reconcile loop that re-derives
-/// everything every tick does not churn pools.
+/// An unchanged spec is a no-op.
 #[tokio::test]
 async fn reconciling_an_unchanged_set_does_nothing() {
     let mut h = harness(eager());
@@ -301,14 +293,8 @@ async fn a_tuning_change_is_copy_on_write() {
     );
 }
 
-/// Editing a Static set's declared model list must reach the workers that
-/// are already registered, and the router with them.
-///
-/// The update path shares the registry so the prefix cache survives, which
-/// is exactly why this needs doing explicitly: nothing else pushes the
-/// change through. Left alone the new list sits inert until a worker
-/// churns, and that worker is then refused for disagreeing with the pin
-/// nobody updated.
+/// Editing a Static set's declared model list reaches the already-registered
+/// workers, and the router.
 #[tokio::test]
 async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     let mut h = harness(eager());
@@ -346,8 +332,7 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     );
 }
 
-/// A block-size change cannot be absorbed by the indexer, so it is a
-/// replace — a different pool, and the cache is genuinely gone.
+/// A block-size change replaces the pool.
 #[tokio::test]
 async fn a_block_size_change_replaces_the_pool() {
     let mut h = harness(eager());
@@ -362,9 +347,7 @@ async fn a_block_size_change_replaces_the_pool() {
     assert_eq!(h.hooks.retired.lock().unwrap().as_slice(), ["a"]);
 }
 
-/// The R2 regression at the manager level: a retired pool's model claims
-/// must go, or its replacement is ignored forever and requests 404 while
-/// healthy workers idle.
+/// A retired pool's model claims are released.
 #[tokio::test]
 async fn retiring_releases_the_model_claims() {
     let mut h = harness(eager());
@@ -380,9 +363,7 @@ async fn retiring_releases_the_model_claims() {
     );
 }
 
-/// A pool whose discovery cannot start must not appear in the snapshot:
-/// "visible" has to imply "fully wired", or a pick lands somewhere nothing
-/// feeds and reads as an empty worker set forever.
+/// A pool whose discovery can't start isn't published.
 #[tokio::test]
 async fn a_failed_create_is_not_published() {
     let mut h = harness(eager());
@@ -394,8 +375,7 @@ async fn a_failed_create_is_not_published() {
     assert!(h.mgr.live_pool(&PoolKey::local("bad")).is_none());
 }
 
-/// Churn soak. Every pool created must end up reaped with its token
-/// cancelled — a leak here is an OS thread per cycle.
+/// Churn soak: every pool created ends up reaped with its token cancelled.
 #[tokio::test]
 async fn churn_leaves_nothing_behind() {
     let mut h = harness(eager());

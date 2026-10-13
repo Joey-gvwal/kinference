@@ -34,7 +34,7 @@ fn dispatches_for_returns_oldest_first_with_full_snapshot() {
     assert_eq!(blocks, vec![100, 200, 50]);
     let totals: Vec<u32> = ds.iter().map(|d| d.total_at_dispatch).collect();
     assert_eq!(totals, vec![500, 800, 200]);
-    // dispatched_at is monotonic non-decreasing — callers rely on
+    // dispatched_at is monotonic non-decreasing; callers rely on
     // position-as-age across the slice.
     assert!(ds[0].dispatched_at <= ds[1].dispatched_at);
     assert!(ds[1].dispatched_at <= ds[2].dispatched_at);
@@ -85,7 +85,7 @@ fn sweep_drops_old_keeps_fresh() {
     p.insert(1, "a:1".into(), hs(&[1]), 0, 0);
     std::thread::sleep(Duration::from_millis(50));
     p.insert(2, "a:1".into(), hs(&[2]), 0, 0);
-    // Anything older than 25ms goes — that's dispatch #1.
+    // Anything older than 25ms goes: dispatch #1.
     p.sweep(Duration::from_millis(25));
     let ds = p.dispatches_for("a:1");
     assert_eq!(ds.len(), 1);

@@ -23,11 +23,8 @@ fn entry(num: u64, block_size: u32, model: &str) -> WorkerEntry {
 
 #[test]
 fn register_uses_seeded_block_size() {
-    // Each WorkerEntry is built with the fleet-wide block_size at
-    // construction (in handle_added). The registry no longer
-    // mutates block_size after register — homogeneity is enforced
-    // upstream and any worker reporting a different engine value
-    // is evicted by the ingest path.
+    // block_size is set at construction and never mutated by the registry;
+    // a mismatching worker is evicted by ingest.
     let reg = WorkerRegistry::new();
     reg.register(1, entry(1, 64, "qwen"));
     reg.register(2, entry(2, 64, "qwen"));
@@ -38,9 +35,7 @@ fn register_uses_seeded_block_size() {
 #[test]
 fn worker_is_not_ready_at_construction() {
     let e = entry(1, 16, "qwen");
-    // entry() sets current_models to non-empty for ergonomics in
-    // the existing tests; reset it here to mirror a fresh
-    // post-register worker before any signals fire.
+    // entry() sets current_models; reset it to mirror a fresh worker.
     let fresh = WorkerEntry {
         current_models: Vec::new(),
         initial_sync_complete: false,
@@ -52,9 +47,8 @@ fn worker_is_not_ready_at_construction() {
 
 #[test]
 fn worker_ready_requires_both_signals() {
-    // Readiness is `initial_sync_complete && !current_models.is_empty()`.
-    // block_size is intentionally NOT a readiness signal — it's
-    // seeded from config and auto-corrected on first BlockStored.
+    // Readiness is `initial_sync_complete && !current_models.is_empty()`;
+    // block_size is not a readiness signal.
     let cases: Vec<(&str, bool, bool, bool)> = vec![
         // (label, sync, models_present, expected_ready)
         ("none", false, false, false),
@@ -97,8 +91,7 @@ fn any_ready_returns_true_when_at_least_one_ready() {
     let reg = WorkerRegistry::new();
     reg.register(1, entry(1, 16, "qwen"));
     reg.register(2, entry(2, 16, "gemma"));
-    // current_models is already non-empty via entry(); flip the
-    // sync flag on worker 2 only.
+    // current_models is set via entry(); flip sync on worker 2 only.
     reg.set_initial_sync_complete(2);
     assert!(
         !reg.lookup(1).unwrap().is_ready(),
@@ -122,10 +115,8 @@ fn any_ready_returns_false_when_none_ready() {
     assert!(!reg.any_ready(), "no ready workers → any_ready false");
 }
 
-/// Construct a WorkerEntry with empty `current_models` so the
-/// first `set_served_models` call drives the canonical-pinning
-/// path (mirrors a fresh post-register worker, not the
-/// pre-populated fixture `entry(...)` returns).
+/// A WorkerEntry with empty `current_models`, so the first
+/// `set_served_models` call pins canonical.
 fn empty_entry(num: u64, block_size: u32) -> WorkerEntry {
     WorkerEntry {
         current_models: Vec::new(),
@@ -155,18 +146,15 @@ fn set_served_models_matching_returns_accepted() {
         reg.set_served_models(1, &["gemma".into()]),
         ServedModelsVerdict::Accepted
     );
-    // Order doesn't matter (set semantics), but here it's
-    // already canonical-equal anyway.
+    // Order doesn't matter (set semantics).
     assert_eq!(
         reg.set_served_models(2, &["gemma".into()]),
         ServedModelsVerdict::Accepted
     );
 }
 
-/// The bug this replaced: a worker that GAINED a model was treated as a
-/// homogeneity violation and evicted. vLLM loads LoRA adapters at runtime, so
-/// rolling one across a fleet walked it pod by pod and emptied the pool while
-/// the worker set still reported Accepted=True.
+/// A worker that gained a model (e.g. a LoRA adapter loaded at runtime)
+/// widens canonical rather than being evicted.
 #[test]
 fn a_worker_that_gained_a_model_widens_the_set_instead_of_being_evicted() {
     let reg = WorkerRegistry::new();
@@ -184,8 +172,8 @@ fn a_worker_that_gained_a_model_widens_the_set_instead_of_being_evicted() {
             added: vec!["adapter".to_string()]
         }
     );
-    // Canonical followed, so the NEXT worker reporting the same set is not a
-    // conflict — without this, a staggered rollout evicts every pod in turn.
+    // Canonical followed, so the next worker reporting the same set is not a
+    // conflict.
     assert_eq!(
         reg.set_served_models(1, &["base".into(), "adapter".into()]),
         ServedModelsVerdict::Accepted
@@ -198,10 +186,8 @@ fn a_worker_that_gained_a_model_widens_the_set_instead_of_being_evicted() {
     );
 }
 
-/// The other half of a staggered rollout: a worker that has not caught up
-/// yet. It stays in the fleet and is routable for what it does serve, and
-/// canonical is NOT narrowed — narrowing would make every other worker look
-/// like a superset and re-widen it on the next scrape, flapping forever.
+/// A worker that hasn't caught up with a rollout stays routable for what it
+/// serves, and canonical is not narrowed.
 #[test]
 fn a_worker_missing_a_model_is_kept_and_canonical_is_not_narrowed() {
     let reg = WorkerRegistry::new();
@@ -215,7 +201,7 @@ fn a_worker_missing_a_model_is_kept_and_canonical_is_not_narrowed() {
             missing: vec!["adapter".to_string()]
         }
     );
-    // Routable for `base`, NOT for the model it lacks.
+    // Routable for `base`, not for the model it lacks.
     assert!(reg.workers_for_model("base").iter().any(|(n, _)| *n == 2));
     assert!(
         !reg.workers_for_model("adapter")
@@ -229,9 +215,8 @@ fn a_worker_missing_a_model_is_kept_and_canonical_is_not_narrowed() {
     );
 }
 
-/// A CONFLICT — each side has something the other lacks — is still fatal.
-/// This is the case the canonical pin exists for: two different fleets merged
-/// into one pool, which silently corrupts the pool-scoped prefix model.
+/// A conflict, where each side has something the other lacks, is fatal: two
+/// different fleets merged into one pool.
 #[test]
 fn a_conflicting_model_set_is_still_a_mismatch() {
     let reg = WorkerRegistry::new();
@@ -265,7 +250,7 @@ fn set_served_models_mismatch_returns_mismatch_and_skips_by_model() {
         }
         other => panic!("expected Mismatch, got {other:?}"),
     }
-    // by_model must NOT have routed `qwen` to worker 2.
+    // by_model must not have routed `qwen` to worker 2.
     let workers_for_qwen = reg.workers_for_model("qwen");
     assert!(
         workers_for_qwen.is_empty(),
@@ -282,8 +267,7 @@ fn set_served_models_empty_returns_empty_without_changing_canonical() {
     let reg = WorkerRegistry::new();
     reg.register(1, empty_entry(1, 64));
     reg.set_served_models(1, &["gemma".into()]);
-    // Worker 2 reports empty (engine not ready yet). Must not
-    // disturb canonical or trigger eviction.
+    // Worker 2 reports empty (engine not ready yet): no change, no eviction.
     reg.register(2, empty_entry(2, 64));
     assert_eq!(reg.set_served_models(2, &[]), ServedModelsVerdict::Empty);
     let canonical = reg.canonical_models.lock().unwrap().clone();
@@ -291,11 +275,8 @@ fn set_served_models_empty_returns_empty_without_changing_canonical() {
     assert_eq!(canonical, Some(expected));
 }
 
-/// Editing a Static set's `spec.models` must reach the workers that are
-/// ALREADY registered. The pool update shares this registry so the prefix
-/// cache survives, which means nothing else would push the change through:
-/// the list would sit inert until a worker churned, and that worker would
-/// then be refused for disagreeing with the stale pin.
+/// Editing a Static set's `spec.models` reaches already-registered workers,
+/// since the pool update keeps this registry.
 #[test]
 fn reset_declared_models_repins_and_reroutes_existing_workers() {
     let reg = WorkerRegistry::new();
@@ -322,8 +303,7 @@ fn reset_declared_models_repins_and_reroutes_existing_workers() {
     assert_eq!(by_model.get("new-model").map(|s| s.len()), Some(2));
     drop(by_model);
 
-    // And the pin moved with it, so a worker joining later is ACCEPTED
-    // rather than refused for disagreeing with a list nobody uses.
+    // And the pin moved with it, so a worker joining later is accepted.
     reg.register(3, entry(3, 16, "new-model"));
     assert!(matches!(
         reg.set_served_models(3, &["new-model".to_string()]),
@@ -332,7 +312,7 @@ fn reset_declared_models_repins_and_reroutes_existing_workers() {
 }
 
 /// Going back to endpoint discovery drops the pin so the next scrape can
-/// establish it — without inventing a model list of our own.
+/// establish it.
 #[test]
 fn reset_declared_models_with_none_only_drops_the_pin() {
     let reg = WorkerRegistry::new();
@@ -354,8 +334,8 @@ fn canonical_models_cleared_when_registry_becomes_empty() {
     reg.register(1, empty_entry(1, 64));
     reg.set_served_models(1, &["gemma".into()]);
     assert!(reg.canonical_models.lock().unwrap().is_some());
-    // Unregister the last worker → canonical clears so a rolling
-    // model swap can re-pin on the next worker's report.
+    // Unregistering the last worker clears canonical, so a rolling model
+    // swap can re-pin it.
     reg.unregister(1);
     assert!(reg.canonical_models.lock().unwrap().is_none());
 }

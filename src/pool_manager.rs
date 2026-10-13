@@ -1,45 +1,27 @@
 //! Pool lifecycle: create, update, retire, reap.
 //!
-//! Pools used to be built once at startup and never touched. Once a worker set
-//! can appear and disappear while traffic flows — a `[[workerset]]` today, an
-//! `InferenceWorkerSet` next — something has to own that transition, and the
-//! transitions are not symmetric.
-//!
-//! ## One owner, no lock
-//!
 //! `PoolManager` is owned by a single reconcile task and takes `&mut self`, so
-//! the live map needs no lock at all. What the rest of the process reads is the
-//! [`PoolRegistry`] snapshot the manager publishes — the same
-//! `RwLock<Arc<_>>`-behind-a-pointer-write shape as `policy::store::PolicyStore`.
+//! the live map needs no lock. The rest of the process reads the
+//! [`PoolRegistry`] snapshot it publishes.
 //!
-//! ## Teardown is two-phase, and that is not fastidiousness
+//! Teardown is two-phase, because the vendored `KvIndexer::apply_event` and
+//! `remove_worker` `.unwrap()` a channel send and panic once the indexer's
+//! token is cancelled:
 //!
-//! The vendored `KvIndexer::apply_event` and `remove_worker` **`.unwrap()` a
-//! channel send**, so they panic once the indexer's token is cancelled. A
-//! one-shot "cancel and drop" teardown would therefore race every in-flight
-//! event against the cancellation and panic the ingest task that lost.
-//!
-//! So:
-//!
-//! 1. **Retire**, synchronous: publish a snapshot without the pool, drop its
-//!    `model_router` claims, stop its discovery, evict its workers *without*
+//! 1. Retire, synchronously: publish a snapshot without the pool, drop its
+//!    `model_router` claims, stop its discovery, evict its workers without
 //!    touching the indexer, and move it to `retired`. The token stays live.
-//! 2. **Reap**, on a sweep: once nothing else holds the pool and a linger has
-//!    passed, cancel the token — the indexer thread exits — and drop.
+//! 2. Reap, on a sweep: once nothing else holds the pool and a linger has
+//!    passed, cancel the token (the indexer thread exits) and drop it.
 //!
-//! The strong-count test is exact rather than a heuristic, and only because of
-//! the earlier `InflightHandles` work: nothing outlives `pick_and_record`
-//! holding an `Arc<Pool>`, so `strong_count == 1` really does mean "no request
-//! is inside this pool". A pending observation carries the two registries
-//! directly and does not pin the pool.
+//! Nothing outlives `pick_and_record` holding an `Arc<Pool>` (a pending
+//! observation holds the registries directly), so `strong_count == 1` means
+//! no request is inside the pool.
 //!
-//! ## Resurrection
-//!
-//! A watch reconnect, or a `delete --all && apply`, retires and recreates the
-//! same worker set within seconds. Recreating from scratch would dump every
-//! prefix in the fleet and re-warm from cold. So create first checks `retired`
-//! for the same [`PoolKey`] with an identical spec and un-retires in place:
-//! same `PoolId`, same radix tree, same registry.
+//! A watch reconnect or `delete --all && apply` retires and recreates a worker
+//! set within seconds, so create first looks in `retired` for the same
+//! [`PoolKey`] with an identical spec and resurrects it in place, keeping its
+//! `PoolId`, radix tree and registry.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -50,22 +32,20 @@ use crate::policy::PoolId;
 use crate::policy::PoolKey;
 use crate::pool::{Pool, PoolMap, PoolRegistry};
 
-/// Side effects the manager cannot perform itself, because they belong to
-/// subsystems it must not depend on (discovery, telemetry, the coordinator
-/// channel). Implemented in `main.rs`, where those handles live.
+/// Side effects that belong to subsystems the manager doesn't depend on
+/// (discovery, the coordinator channel). Implemented in `server.rs`.
 pub trait PoolHooks: Send + Sync {
     /// Start everything that feeds a new pool: its `Discovery` task and the
     /// forwarder that tags its `WorkerChange`s onto the shared coordinator
     /// channel.
     ///
-    /// An `Err` means the pool is NOT published — better an absent pool with a
-    /// loud error than a visible one nothing feeds.
+    /// On `Err` the pool is not published.
     fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> anyhow::Result<()>;
 
     /// Drop every fleet-wide trace of this pool's workers: metrics samples,
     /// per-worker tasks.
     ///
-    /// MUST NOT call into the pool's `KvIndexer` — its subtree goes away with
+    /// MUST NOT call into the pool's `KvIndexer`: its subtree goes away with
     /// the whole tree at reap, and calling `remove_worker` here would race the
     /// cancellation the reaper is about to do. MUST NOT cancel the pool token.
     fn on_retire(&self, pool: &Arc<Pool>);
@@ -77,9 +57,8 @@ pub struct ReapPolicy {
     /// Grace period after retirement before reaping is even considered, so a
     /// worker set that flaps can be resurrected with its cache intact.
     pub linger: Duration,
-    /// Hard backstop. A leaked `Arc<Pool>` would otherwise pin an OS thread
-    /// forever; past this point the pool is reaped regardless, with a WARN
-    /// naming the strong count so the leak is attributable.
+    /// Hard backstop: past this the pool is reaped regardless, with a warning,
+    /// so a leaked `Arc<Pool>` can't pin an OS thread forever.
     pub backstop: Duration,
 }
 
@@ -115,8 +94,8 @@ pub struct ReconcileReport {
     pub resurrected: Vec<PoolKey>,
     /// Tuning changed; same pool, same cache, new coefficients.
     pub updated: Vec<PoolKey>,
-    /// `kv_block_size` changed, which the indexer cannot absorb — retire +
-    /// create, and the cache is genuinely lost.
+    /// `kv_block_size` changed, which needs retire and create, losing the
+    /// cache.
     pub replaced: Vec<PoolKey>,
     pub retired: Vec<PoolKey>,
     /// `on_create` failed; nothing was published.
@@ -132,9 +111,7 @@ impl ReconcileReport {
 
 pub struct PoolManager {
     registry: Arc<PoolRegistry>,
-    /// The live set, ordered so the published `PoolMap` has a stable order and
-    /// two replicas that saw their pools appear in different orders still rank
-    /// candidates identically.
+    /// The live set, ordered so replicas publish pools in the same order.
     live: BTreeMap<PoolKey, (Arc<Pool>, PoolSpec)>,
     retired: Vec<Retired>,
     hooks: Arc<dyn PoolHooks>,
@@ -171,11 +148,8 @@ impl PoolManager {
 
     /// Bring the live set in line with `desired`.
     ///
-    /// The caller decides what `desired` is; this only applies it. In
-    /// particular an EMPTY `desired` retires everything, which is correct when
-    /// the operator really removed every worker set and catastrophic when it
-    /// just means "the watch has not listed yet" — gating on that is the
-    /// caller's job, not this function's.
+    /// An empty `desired` retires everything, so the caller must not reconcile
+    /// before its watch has listed.
     pub fn reconcile(&mut self, desired: Vec<PoolSpec>) -> ReconcileReport {
         let mut report = ReconcileReport::default();
         let wanted: BTreeMap<PoolKey, PoolSpec> =
@@ -198,9 +172,8 @@ impl PoolManager {
             match self.live.get(&key) {
                 Some((_, live_spec)) if *live_spec == spec => {}
                 Some((pool, _)) if pool.block_size != spec.kv_block_size => {
-                    // The indexer is built around block_size and cannot be
-                    // rebased. Loud, because the whole prefix cache for this set
-                    // is about to be discarded.
+                    // The indexer can't change block size, so this discards
+                    // the set's prefix cache.
                     tracing::warn!(
                         workerset = %key,
                         from = pool.block_size,
@@ -211,17 +184,13 @@ impl PoolManager {
                     self.retire(&key);
                     match self.create(spec) {
                         CreateOutcome::Failed => report.failed.push(key),
-                        // A replace can still land on a matching retired entry
-                        // from an earlier cycle, which is a saving, not a bug.
+                        // May resurrect a matching retired entry.
                         _ => report.replaced.push(key),
                     }
                 }
                 Some((pool, live_spec)) => {
-                    // A DECLARED model list is per-worker state, and the update
-                    // below shares the registry — so a change to it has to be
-                    // pushed into the existing workers here. Left alone it would
-                    // sit inert until a worker churned, and that worker would
-                    // then be refused for disagreeing with the stale pin.
+                    // A declared model list is per-worker state in the shared
+                    // registry, so push a change into the existing workers.
                     if live_spec.static_models != spec.static_models {
                         let touched = pool
                             .registry
@@ -265,8 +234,8 @@ impl PoolManager {
 
     /// Reap retired pools that nothing is using any more.
     ///
-    /// Returns how many were reaped. Cheap enough to call on a 10s tick: it
-    /// touches only the retired list, which is empty in the steady state.
+    /// Returns how many were reaped. Only touches the retired list, normally
+    /// empty.
     pub fn sweep(&mut self) -> usize {
         let (linger, backstop) = (self.reap.linger, self.reap.backstop);
         let mut reaped = 0;
@@ -287,9 +256,7 @@ impl PoolManager {
                      still outstanding; something leaked an Arc<Pool>"
                 );
             }
-            // Cancelling here and not at retire is the whole point of the two
-            // phases: the KvIndexer's channel send unwraps, so anything still
-            // feeding it would panic rather than stop.
+            // Cancelled here, not at retire; see the module docs.
             r.pool.cancel.cancel();
             tracing::info!(workerset = %r.pool.key, age_secs = age.as_secs(), "worker set reaped");
             reaped += 1;
@@ -324,8 +291,7 @@ impl PoolManager {
                 false,
             ),
         };
-        // Hooks BEFORE publishing: "visible in the snapshot" must imply "fully
-        // wired", or a pick can land on a pool whose discovery never started.
+        // Hooks before publishing, so a published pool is fully wired.
         if let Err(err) = self.hooks.on_create(&pool, &spec) {
             tracing::error!(
                 workerset = %spec.key,
@@ -333,8 +299,7 @@ impl PoolManager {
                 "failed to start this worker set's discovery; not publishing it"
             );
             if resurrected {
-                // Put it back, or nothing ever reaps it and its indexer thread
-                // outlives the process's interest in it.
+                // Put it back so it still gets reaped.
                 self.retired.push(Retired {
                     pool,
                     spec,
@@ -361,9 +326,8 @@ impl PoolManager {
 
     /// Pull a retired pool back if its spec is unchanged.
     ///
-    /// A spec that CHANGED must not resurrect: the retired pool's indexer is
-    /// built around the old block size and its registry holds the old set's
-    /// workers, so reusing it would be a silent mismatch rather than a saving.
+    /// A changed spec doesn't resurrect: the retired pool's indexer and
+    /// registry belong to the old one.
     fn take_resurrectable(&mut self, spec: &PoolSpec) -> Option<Arc<Pool>> {
         let idx = self
             .retired
@@ -376,14 +340,12 @@ impl PoolManager {
         let Some((pool, spec)) = self.live.remove(key) else {
             return;
         };
-        // 1. Stop routing to it. Publishing first means no NEW pick can enter
-        //    the pool while we tear its workers down.
+        // 1. Stop routing to it, so no new pick enters during teardown.
         self.publish();
-        // 2. Drop its model claims, or a replacement worker set serving the
-        //    same model is ignored forever.
+        // 2. Drop its model claims.
         crate::monitor::release_models(&self.model_router, pool.id, &pool.name);
-        // 3. Fleet-wide worker state (metrics, per-worker
-        //    tasks). Deliberately no indexer call — see `PoolHooks::on_retire`.
+        // 3. Fleet-wide worker state (metrics, per-worker tasks), without
+        //    touching the indexer; see `PoolHooks::on_retire`.
         self.hooks.on_retire(&pool);
         tracing::info!(
             workerset = %key,

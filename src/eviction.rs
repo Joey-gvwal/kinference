@@ -1,26 +1,15 @@
 //! Worker eviction signaling and teardown.
 //!
-//! Two pathways funnel into the same teardown sequence:
+//! Worker eviction signaling.
 //!
-//! 1. **Discovery removal** — `WorkerChange::Removed` from the static
-//!    or kubernetes discovery source. The pod went away on its own.
-//! 2. **Homogeneity violation** — the ingest path observes an engine
-//!    reporting a different `block_size` than the fleet-wide
-//!    configured value, or the metrics path observes a `/v1/models`
-//!    list that disagrees with the canonical set. In both cases the
-//!    misbehaving worker needs to be removed so the rest of the pool
-//!    keeps serving on a single set of coherent assumptions.
+//! A worker is torn down when discovery removes it, or on a homogeneity
+//! violation: ingest sees a block size other than the pool's, or the metrics
+//! poller sees a `/v1/models` list that disagrees with the pool's canonical
+//! set.
 //!
-//! Subsystems (ingest listener, metrics poller) request eviction by
-//! sending an [`EvictionRequest`] on the shared
-//! [`tokio::sync::mpsc::UnboundedSender`]. The main coordinator owns
-//! the receiver and drives the actual teardown — this keeps
-//! lifecycle logic in a single place and avoids each subsystem
-//! reaching into shared state on its own.
-//!
-//! [`EvictionReason`] carries a human-readable description so the
-//! INFO line emitted from `evict_worker` (in `main.rs`) tells the
-//! operator exactly why a worker disappeared.
+//! The ingest listener and metrics poller request eviction by sending an
+//! [`EvictionRequest`]; the coordinator in `server.rs` owns the receiver and
+//! does the teardown, keeping lifecycle logic in one place.
 
 use tokio::sync::mpsc;
 
@@ -34,14 +23,11 @@ pub struct EvictionRequest {
 /// Why a worker is being evicted.
 #[derive(Debug, Clone)]
 pub enum EvictionReason {
-    /// The configured fleet-wide `kv_block_size` does not match the
-    /// engine's reported value seen on the first `BlockStored`
-    /// event. Carrier of the two numbers so the WARN log makes the
-    /// fix obvious.
+    /// The engine's KV events use a block size other than the pool's
+    /// `kv_block_size`.
     BlockSizeMismatch { expected: u32, observed: u32 },
-    /// The worker's `/v1/models` list differs from the canonical
-    /// set pinned by the first non-empty report from the pool.
-    /// Carrier of both lists for diff-printing.
+    /// The worker's `/v1/models` list differs from the canonical set pinned by
+    /// the pool's first non-empty report.
     ModelMismatch {
         expected: Vec<String>,
         observed: Vec<String>,
@@ -51,9 +37,8 @@ pub enum EvictionReason {
 impl EvictionReason {
     /// The `reason` label on `kinference_worker_evictions_total`.
     ///
-    /// Separate from `Display`, which carries the two mismatched VALUES so the
-    /// WARN log names the fix. Those values are unbounded, so they must not
-    /// reach a label.
+    /// Separate from `Display`, whose mismatched values are unbounded and must
+    /// not reach a label.
     pub fn as_label(&self) -> &'static str {
         match self {
             EvictionReason::BlockSizeMismatch { .. } => "block_size_mismatch",
@@ -77,16 +62,14 @@ impl std::fmt::Display for EvictionReason {
     }
 }
 
-/// Type alias for the eviction channel's sender. Each subsystem
-/// that can request an eviction (ingest listener, metrics poller)
-/// holds a clone.
+/// The eviction channel's sender, cloned into each subsystem that can request
+/// an eviction.
 pub type EvictionTx = mpsc::UnboundedSender<EvictionRequest>;
 
-/// Type alias for the eviction channel's receiver. The main
-/// coordinator holds one and drains it inside its select! loop.
+/// The eviction channel's receiver, drained by the coordinator.
 pub type EvictionRx = mpsc::UnboundedReceiver<EvictionRequest>;
 
-/// Build a fresh eviction channel. Called once in `main()`.
+/// Build the eviction channel. Called once at startup.
 pub fn channel() -> (EvictionTx, EvictionRx) {
     mpsc::unbounded_channel()
 }
