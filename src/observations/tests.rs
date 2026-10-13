@@ -49,9 +49,7 @@ fn synthetic_record() -> PendingObservation {
 
 #[test]
 fn csv_header_matches_format_csv_row_arity() {
-    // Pin the header column count to the format_csv_row column
-    // count so adding a column to one without the other fails the
-    // build before any CSV gets corrupted.
+    // The header and row column counts must match.
     let header_cols: Vec<&str> = CSV_HEADER.split(',').collect();
     let row = format_csv_row(&synthetic_record(), 0, 0.0, 200);
     let row_cols: Vec<&str> = row.split(',').collect();
@@ -63,8 +61,7 @@ fn csv_header_matches_format_csv_row_arity() {
         header_cols.len(),
         row_cols.len(),
     );
-    // The header itself must end without a trailing newline — the
-    // sink appends one when it writes.
+    // No trailing newline; the sink appends one.
     assert!(
         !CSV_HEADER.contains('\n'),
         "CSV_HEADER should not contain newlines"
@@ -203,7 +200,7 @@ fn pending_observations_take_returns_inserted_entry() {
     let taken = pending.take(id);
     assert!(taken.is_some());
     assert_eq!(pending.len(), 0);
-    // Second take returns None — entry consumed.
+    // Second take returns None: the entry was consumed.
     assert!(pending.take(id).is_none());
 }
 
@@ -235,15 +232,8 @@ fn pending_observations_sweep_keeps_fresh() {
 
 /// `RequestLabels` round-trips the labels a feedback RPC reads back.
 ///
-/// This map is what `ReportFinalToken` consults to label the token and ITL
-/// metrics, so anything it drops becomes a silently mislabelled series rather
-/// than an error. It had no coverage before the `tenant` label was added.
-///
-/// Note the provider-vs-local distinction this pins: BOTH inserts must carry
-/// the caller's real `qos`. `record_provider_pick` used to hardcode
-/// `Qos::Interactive`, so every off-cluster request reported
-/// `qos="interactive"` whatever was sent. That is now a required parameter, so
-/// the compiler prevents the regression and this test documents the contract.
+/// `ReportFinalToken` uses these to label the token and ITL metrics. Both
+/// local and provider picks carry the caller's real `qos`.
 #[test]
 fn request_labels_round_trip_the_metric_labels() {
     let labels = RequestLabels::new(Duration::from_secs(600));
@@ -266,21 +256,18 @@ fn request_labels_round_trip_the_metric_labels() {
     assert_eq!(got.tenant, "acme");
     assert!(got.provider.is_none());
 
-    // Taking consumes: a second ReportFinalToken for the same id finds nothing,
-    // which is what makes its `acknowledged: false` truthful.
+    // Taking consumes, so a second ReportFinalToken finds nothing.
     assert!(labels.take(1).is_none(), "take must consume the entry");
 
-    // A provider pick carries the same request-side labels; only `provider`
-    // differs. `Deferrable` specifically, because it is neither the old
-    // hardcoded value nor the enum's first variant.
+    // A provider pick carries the same request-side labels plus `provider`.
+    // `Deferrable`, since it is neither the default nor the first variant.
     labels.insert(
         2,
         RequestMeta {
             model: "llama-3".to_string(),
             qos: Qos::Deferrable,
             tenant: "globex".to_string(),
-            // NON-streaming on purpose: this is the case whose reported
-            // first-token time is really total latency.
+            // Non-streaming, whose reported first-token time is total latency.
             streaming: false,
             picked_at: Instant::now(),
             provider: Some(crate::policy::engine::ObjectKey {
@@ -291,8 +278,7 @@ fn request_labels_round_trip_the_metric_labels() {
     );
     // A peek must not consume, since provider feedback arrives in stages.
     assert!(labels.provider_pick_for(2).is_some());
-    // The peek must carry `streaming`: it is the only thing that lets the
-    // provider feedback path tell a real TTFT from a whole-response time.
+    // The peek carries `streaming`, which the provider feedback path needs.
     let peek = labels.provider_pick_for(2).expect("still present");
     assert!(!peek.streaming, "the peek must carry the streaming flag");
     assert_eq!(peek.model, "llama-3");

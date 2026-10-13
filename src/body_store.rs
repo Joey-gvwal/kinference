@@ -1,10 +1,8 @@
-//! `BodyStore` — server-side buffer for request bodies pushed by callers.
+//! `BodyStore`: server-side buffer for request bodies pushed by callers.
 //!
-//! The gRPC contract (see `proto/kinference.proto`) is that a caller never buffers
-//! the body itself: it streams the body in via `PushBody`, names the resulting
+//! A caller streams the body in via `PushBody`, names the resulting
 //! `stream_id` on `Pick`, then streams the (possibly rewritten) body back out
-//! via `PullBody`. kinference therefore owns the bytes for the window between those
-//! calls, and owns bounding that memory.
+//! via `PullBody`. kinference holds and bounds the bytes in between.
 //!
 //! Lifecycle of one body, and the id it lives under:
 //!
@@ -17,24 +15,16 @@
 //!          PullBody ──► take_outbound() ──► BodyLease ──► (freed on drop)
 //! ```
 //!
-//! Two deliberate design points:
+//! - There is no `Receiving` state. A push in progress lives in a local buffer
+//!   in the handler, with a [`Reservation`] holding its bytes against the
+//!   global budget, so a push that breaks or goes idle is reclaimed by `Drop`
+//!   without a TTL. The body behind a non-OK `Pick` is likewise released at
+//!   once by [`PickHandle::discard`].
+//! - `Consumed` is a tombstone, so a second `Pick` on the same id gets
+//!   `FAILED_PRECONDITION` rather than `NOT_FOUND`.
 //!
-//! 1. **There is no `Receiving` state.** A push in progress lives in a local
-//!    buffer in the handler, with a [`Reservation`] holding its bytes against
-//!    the global budget. A push that breaks or goes idle before half-close is
-//!    reclaimed by `Drop` — no TTL required. That is one of the two cases the
-//!    proto assigns to the server alone; the other (the body behind a non-OK
-//!    `Pick`) is handled by [`PickHandle::discard`], also immediately.
-//! 2. **`Consumed` is a tombstone, not a deletion.** Keeping the `stream_id`
-//!    entry after `Pick` is what lets a second `Pick` on the same id return
-//!    `FAILED_PRECONDITION` instead of an indistinguishable `NOT_FOUND`.
-//!
-//! NOTE ON ERROR STYLE: this module returns `tonic::Status` directly, which is
-//! the opposite of the convention on `Pick` (see `crate::grpc`, where every
-//! routing outcome comes back inside a `PickResponse` and `Status` is reserved
-//! for transport failures). That inversion is intentional and specified:
-//! `PushBody` / `PullBody` / `Abort` are protocol operations with no routing
-//! semantics, so the proto has them report failures as gRPC status codes.
+//! This module returns `tonic::Status` directly; unlike `Pick`, these
+//! operations report failures as gRPC status codes (see `crate::grpc`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -115,7 +105,7 @@ impl BodyStore {
         }
     }
 
-    /// `(entries, bytes_in_use)` — for `/metrics` gauges and tests.
+    /// `(entries, bytes_in_use)`, for `/metrics` gauges and tests.
     pub fn stats(&self) -> (usize, u64) {
         (
             self.entries.len(),
@@ -261,7 +251,7 @@ impl BodyStore {
     }
 
     /// Release whatever is held for `response_id`. Returns `(released, bytes)`.
-    /// Idempotent — an unknown or already-released id is `(false, 0)`, never an
+    /// Idempotent: an unknown or already-released id is `(false, 0)`, never an
     /// error, because `Abort` must tolerate duplicates.
     pub fn abort(&self, response_id: u64) -> (bool, u64) {
         let Some((_, entry)) = self.entries.remove(&response_id) else {
@@ -274,9 +264,8 @@ impl BodyStore {
 
     /// Drop every entry past the TTL. Returns `(entries, bytes)` reclaimed.
     ///
-    /// This is the mechanism the proto requires: `Abort` only shortens the
-    /// window. Bodies whose caller vanished — before `Pick`, between `Pick` and
-    /// `PullBody`, or never reporting at all — come back here.
+    /// `Abort` only shortens the window; bodies whose caller vanished at any
+    /// stage are reclaimed here.
     pub fn take_expired(&self) -> (usize, u64) {
         let cutoff = Instant::now() - self.ttl;
         let expired: Vec<u64> = self
@@ -361,13 +350,10 @@ impl BodyStore {
             let mut buf = [0u8; 8];
             let candidate = match getrandom::getrandom(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
-                // A failing CSPRNG must not silently collapse the id space to
-                // a guessable one; refuse rather than hand out a weak id.
                 Err(e) => {
                     tracing::error!(error = %e, "getrandom failed while minting a body id");
-                    // Wall-clock nanos: collision-free in practice, though
-                    // guessable. This path is effectively unreachable, and
-                    // failing the push outright would be worse than a weak id.
+                    // Wall-clock nanos: guessable, but this path is effectively
+                    // unreachable and failing the push would be worse.
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
@@ -458,14 +444,12 @@ impl PickHandle {
     }
 
     /// Re-key the body to `response_id` for `PullBody` to stream. `outbound`
-    /// is the body the upstream should receive — the pushed bytes when kinference
-    /// left them alone, or the rewritten bytes when it didn't.
+    /// is the body the upstream should receive, rewritten or not.
     pub fn commit(mut self, response_id: u64, outbound: Arc<Vec<u8>>) {
         self.resolved = true;
         let new_bytes = outbound.len() as u64;
-        // The outbound body may differ in size from the pushed one (a rewrite
-        // adds a few bytes). Re-charge the delta without failing the pick — a
-        // handful of bytes must never turn a completed pick into an error.
+        // A rewrite may add a few bytes; charge the delta without failing the
+        // pick.
         if new_bytes > self.bytes {
             self.store
                 .bytes_in_use
@@ -489,10 +473,8 @@ impl PickHandle {
         );
     }
 
-    /// Free the body: the pick produced no dispatchable endpoint, so nothing
-    /// will ever pull it. The proto makes this case the server's own —
-    /// callers don't `Abort` a non-OK `Pick` — so release now rather than
-    /// waiting for the TTL.
+    /// Free the body: the pick produced no endpoint, and callers don't `Abort`
+    /// a non-OK `Pick`, so release now rather than at the TTL.
     pub fn discard(mut self) {
         self.resolved = true;
         self.store.release(self.bytes);
@@ -548,7 +530,7 @@ impl BodyLease {
     }
 }
 
-/// Arc ctor, mirroring `observations::shared`.
+/// `Arc` constructor.
 pub fn shared(max_total_bytes: u64, max_request_bytes: u64, ttl: Duration) -> Arc<BodyStore> {
     Arc::new(BodyStore::new(max_total_bytes, max_request_bytes, ttl))
 }
