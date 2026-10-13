@@ -1,17 +1,12 @@
 //! Name checks: does a policy name things that exist in the pools it serves?
 //!
-//! The compiler judges a policy by its spec alone. These checks need the other
-//! side of every name a policy uses — the destinations of the pools it is
-//! attached to — so they run where those are known: on the server, for the
-//! pools whose `policyRef` names the policy, and in `kinfctl check`, for pools
-//! among its inputs. Both pass `ResolvedPool`s built by the same
-//! [`super::resolve::resolve`], so the CLI cannot disagree with the cluster about
-//! what a name refers to.
+//! These need the destinations of the attached pools, so they run on the
+//! server for the pools whose `policyRef` names the policy, and in `kinfctl
+//! check` for pools among its inputs, both using [`super::resolve::resolve`].
 //!
-//! Only DECLARED names are consulted — object names, labels, worker-set
-//! `spec.models` rows, provider model tables — never what an engine reports
-//! right now. That keeps the results stable enough for `status.warnings`: they
-//! change when someone edits an object, not when a pod restarts.
+//! Only declared names are consulted (object names, labels, `spec.models`
+//! rows, provider model tables), never what engines report, so results only
+//! change when an object is edited.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,27 +21,20 @@ pub struct NameCheck {
     pub warnings: Vec<PolicyWarning>,
     /// Why model names were not checked, when they were not.
     ///
-    /// A worker set's `spec.models` rows ADD names — they never hide the other
-    /// models its engine reports — so a set with no rows can serve any name at
-    /// all, and nothing about a model name can be concluded. Reported rather
-    /// than silently skipped, so "no `UnknownModel` warnings" is never mistaken
-    /// for "every model name checked out".
+    /// A worker set with no `spec.models` rows can serve any name, so nothing
+    /// can be concluded about model names.
     pub models_unchecked: Option<String>,
 }
 
 /// Check every backend, label, class and model name in `spec` against the
-/// union of `pools`' destinations. No pools, no findings: a policy nothing
-/// references has nothing to be checked against.
+/// union of `pools`' destinations. No pools, no findings.
 pub fn reference_warnings(spec: &InferencePolicySpec, pools: &[&ResolvedPool]) -> NameCheck {
     check(spec, pools, &[], true)
 }
 
-/// What a manifest check knows that a running kinference does not need to be
-/// told.
-///
-/// In a cluster, a destination that did not resolve does not exist, and
-/// nothing can route to it. Offline it has usually just not been passed, so
-/// the names a pool lists stand in for the objects behind them.
+/// Extra input for a manifest check. Offline, a destination that didn't
+/// resolve has usually just not been passed, so the names a pool lists stand
+/// in for the objects behind them.
 #[derive(Debug, Default)]
 pub struct Offline {
     /// Destinations the pools list by name, with their class. Present for the

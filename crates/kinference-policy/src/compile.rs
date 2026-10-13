@@ -1,13 +1,8 @@
-//! `InferencePolicy` → `CompiledPolicy`.
+//! `InferencePolicy` to `CompiledPolicy`.
 //!
-//! Runs once per policy revision, off the watch path. Everything it can decide
-//! ahead of time it decides here: predicates become typed ASTs, defaults are
-//! resolved, and anything suspect becomes a warning destined for
-//! `status.warnings` rather than a request that mysteriously never matches.
-//!
-//! The validations below are the ones that catch *silent* misconfiguration —
-//! policy that admission accepts and that then does nothing. Those are the
-//! expensive kind, because nothing surfaces them at apply time.
+//! Runs once per policy revision. Predicates become typed ASTs, defaults are
+//! resolved, and anything suspect becomes a warning in `status.warnings`. The
+//! checks focus on policies admission accepts but that silently do nothing.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +19,7 @@ use super::warning::{PolicyWarning, WarningCode, did_you_mean};
 /// How a `consider` group picks models.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelChoice {
-    /// The model the request asked for — the default when `consider` is omitted.
+    /// The model the request asked for; the default when `consider` is omitted.
     FromRequest,
     /// An explicit set, which is the only way to route to a model the client
     /// did not ask for.
@@ -34,8 +29,7 @@ pub enum ModelChoice {
 /// A subset of the pool's destinations, by class, name or label.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendMatch {
-    /// Backend class. `None` admits both — which is what an omitted `type:`
-    /// means, and why a tier ranking on a Local-only objective has to say so.
+    /// Backend class. `None` (an omitted `type:`) admits both.
     pub backend_type: Option<BackendType>,
     pub names: Vec<String>,
     pub match_labels: BTreeMap<String, String>,
@@ -54,12 +48,8 @@ impl BackendMatch {
         }
     }
 
-    /// True when a destination is in this subset. An empty match is
-    /// "everything", which is what an omitted `backends:` means.
-    ///
-    /// `type` is a FILTER, not another alternative: it ANDs with whatever
-    /// name/label test follows, because `{type: Local, names: [a]}` plainly means
-    /// "the local one called a" and not "anything local, or anything called a".
+    /// True when a destination is in this subset. An empty match (an omitted
+    /// `backends:`) is everything. `type` ANDs with the name/label test.
     pub fn matches(
         &self,
         backend_type: BackendType,
@@ -93,11 +83,9 @@ impl BackendMatch {
 pub struct CompiledConsiderGroup {
     pub name: Option<String>,
     /// Relative weight, `1` when unset. Only meaningful when the route
-    /// partitions — see [`CompiledRoute::weighted`].
+    /// partitions; see [`CompiledRoute::weighted`].
     pub weight: u32,
-    /// Whether the YAML actually said `weight:`. Kept distinct from
-    /// `weight == 1` because "unset" and "set to 1" mean different things: the
-    /// former unions, the latter partitions.
+    /// Whether the YAML said `weight:`. Unset unions; set to 1 partitions.
     pub explicit_weight: bool,
     pub models: ModelChoice,
     pub backends: BackendMatch,
@@ -106,17 +94,15 @@ pub struct CompiledConsiderGroup {
 #[derive(Debug, Clone)]
 pub struct CompiledExclusion {
     pub name: String,
-    /// Request-scope guard. `None` → always applies.
+    /// Request-scope guard. `None` always applies.
     pub if_: Option<CompiledRequestPredicate>,
     pub drop: CompiledCandidatePredicate,
 }
 
 /// How one `select` tier ranks its candidates.
 ///
-/// Both objectives are partial: a candidate that cannot answer one is dropped
-/// from that tier rather than given a stand-in value. Substituting a default
-/// would not be conservative — a missing latency read as `0` is the *best*
-/// possible score, so the candidate that knows least would win every time.
+/// Both objectives are partial: a candidate with no value is dropped from the
+/// tier rather than defaulted, since `0` would be the best possible score.
 #[derive(Debug, Clone)]
 pub enum Rank {
     /// A calibrated per-request prediction. Local candidates only; the CRD
@@ -150,11 +136,8 @@ impl CompiledRoute {
     /// True when the groups partition traffic stochastically rather than
     /// unioning.
     ///
-    /// The distinction is implicit in the guide: `consider:
-    /// [{models: {names: [foo, bar]}}]` ADDS models (union), while a 70/30 pair
-    /// PARTITIONS (sample one group, then exclude/select within it). Weight
-    /// presence is the signal, so a route where any group carries a weight is
-    /// sampled and one where none does is unioned.
+    /// A route where any group carries a weight is sampled (one group, then
+    /// exclude/select within it); one where none does is unioned.
     pub fn weighted(&self) -> bool {
         self.consider.iter().any(|g| g.explicit_weight)
     }
@@ -214,12 +197,9 @@ impl CompiledConsiderGroup {
                     .as_ref()
                     .map(BackendMatch::compile)
                     .unwrap_or_default();
-                // Folded in HERE for the same reason as on a select tier:
-                // `BackendMatch::compile` only sees the `backends` block, so a
-                // group written `{type: Provider}` would carry no class filter
-                // and admit every candidate. Silent widening is the failure
-                // direction this codebase spends effort avoiding, and the tier
-                // version of exactly this bug shipped once already.
+                // `BackendMatch::compile` only sees the `backends` block, so
+                // fold in the `type:` shorthand here, or `{type: Provider}`
+                // would admit every candidate.
                 if backends.backend_type.is_none() {
                     backends.backend_type = raw.backend_type();
                 }
@@ -242,7 +222,7 @@ pub struct CompiledRule {
 
 impl CompiledRule {
     /// True when this rule matches the request. Entries OR; an empty `matches`
-    /// is the documented catch-all.
+    /// is a catch-all.
     pub fn matches(&self, attrs: &super::predicate::RequestAttrs) -> bool {
         self.matches.is_empty() || self.matches.iter().any(|p| p.matches(attrs))
     }
@@ -253,18 +233,15 @@ pub struct CompiledPolicy {
     pub name: String,
     pub unmatched: Unmatched,
     pub rules: Vec<CompiledRule>,
-    /// Everything the spec alone can reveal. Rendered into `status.warnings`;
-    /// the name checks that need the attached pools live in
-    /// [`super::lint`].
+    /// Warnings from the spec alone. The name checks that need the attached
+    /// pools live in [`super::lint`].
     pub warnings: Vec<PolicyWarning>,
 }
 
 impl CompiledPolicy {
     /// The implicit policy for a pool with no `policyRef`, and for traffic that
-    /// matches no rule: serve as asked, no exclusions.
-    ///
-    /// Note the deliberate absence of a queue threshold — "accepting the queue
-    /// beats rejecting requests that queueing would have served."
+    /// matches no rule: serve as asked, with no exclusions (not even a queue
+    /// threshold).
     pub fn serve_as_asked(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -279,19 +256,9 @@ impl CompiledPolicy {
     /// `consider: [{models: {fromRequest: true}, backends: {type: Local}}]`
     /// + `select: [{type: Local, minimize: PredictedTTFT}]`.
     ///
-    /// **`Local` is stated, not inferred.** It would behave the same today
-    /// without it — a provider has no `PredictedTTFT`, so the tier would drop it
-    /// anyway — and that is exactly the problem: the guarantee would rest on the
-    /// objective happening to be Local-only rather than on anything saying so.
-    /// Changing this tier to `EstimatedTTFT`, which looks like an improvement,
-    /// would silently start sending unmatched traffic off-cluster.
-    ///
-    /// Unmatched traffic is the path nobody wrote a rule for, so it is the worst
-    /// one to leave resting on an unstated invariant. It also completes a rule
-    /// the rest of the API already follows: **a paid provider is never reached by
-    /// default.** An omitted `destinations` list means Local only, an absent
-    /// `policyRef` means Local only, and so does traffic no rule claimed.
-    /// Reaching a vendor always takes someone writing it down.
+    /// `Local` is stated explicitly rather than relying on `PredictedTTFT`
+    /// being Local-only, so changing the objective can't send unmatched
+    /// traffic off-cluster. A provider is never reached by default.
     pub fn default_route() -> CompiledRoute {
         let local = BackendMatch {
             backend_type: Some(BackendType::Local),
@@ -303,9 +270,7 @@ impl CompiledPolicy {
                 weight: 1,
                 explicit_weight: false,
                 models: ModelChoice::FromRequest,
-                // Filters at GENERATION, so a provider candidate is never built
-                // for unmatched traffic — cheaper, and it makes the trace say the
-                // destination was not eligible rather than not measurable.
+                // Filters at generation, so no provider candidate is built.
                 backends: local.clone(),
             }],
             exclude: Vec::new(),
@@ -344,20 +309,13 @@ const DROP_FIELDS: &str = "contextWindow, predictedTTFT, prefixCacheHitRatio, qu
                            kvCacheUsage, model.name, backend.type, backend.name, \
                            backend.readyEndpoints, backend.observedTTFTP95, \
                            backend.budgetExhausted";
-/// Why an empty predicate is suspicious rather than merely odd.
-///
-/// The API server PRUNES fields the CRD schema does not know, so a misspelled
-/// key never reaches kinference: `if: {tennant: acme}` arrives as `if: {}`, and
-/// an exclusion written for one tenant applies to every request. Nothing here
-/// can see the typo — it was deleted before it arrived — but the empty shape it
-/// leaves behind is visible, and naming the likely cause is the only way an
-/// author connects the two.
+/// Hint for an empty predicate. The API server prunes unknown fields, so a
+/// misspelled key (`if: {tennant: acme}`) arrives as `if: {}`.
 const PRUNED_HINT: &str = "If you wrote conditions here, none were recognized: the API server \
                            silently drops fields it doesn't know, so a misspelled key simply \
                            disappears. `kinfctl check` reports unknown fields before you apply.";
 
-/// Where a predicate sits, which decides what an invalid term DOES — and so
-/// what the warning has to say.
+/// Where a predicate sits, which decides what an invalid term does.
 #[derive(Clone, Copy)]
 enum PredicateSite {
     MatchesEntry,
@@ -439,7 +397,7 @@ struct Domain {
     hi: f64,
     /// How the attribute is measured, for the message.
     what: &'static str,
-    /// Suffix for rendering a threshold — durations compile to milliseconds.
+    /// Suffix for rendering a threshold; durations compile to milliseconds.
     unit: &'static str,
 }
 
@@ -550,11 +508,8 @@ fn threshold(m: &Matcher) -> Option<f64> {
 
 /// Warn when a numeric term is decided by its threshold alone.
 ///
-/// Fractions are the case this exists for. `kvCacheUsage` and
-/// `prefixCacheHitRatio` are 0–1, and `{greaterThan: 80}` — 80 meaning "80%" —
-/// is never true, so an exclusion written to shed saturated workers silently
-/// sheds none. That is the most natural slip there is when the dashboard shows
-/// a percentage, and nothing at runtime would ever reveal it.
+/// Mostly for fractions: `kvCacheUsage` is 0 to 1, so `{greaterThan: 80}`
+/// (meaning 80%) is never true.
 fn range_warning(
     name: &str,
     m: &Matcher,
@@ -588,7 +543,7 @@ fn range_warning(
 enum TagEffect {
     /// The term can never be true.
     Never,
-    /// The term is true for every request — a negated dead tag.
+    /// The term is true for every request: a negated dead tag.
     Always,
     /// Some alternatives are dead, but the term can still match on the rest.
     DeadAlternatives(Vec<String>),
@@ -597,10 +552,8 @@ enum TagEffect {
 /// How the unemittable values in a `tag` term change what it can match, with
 /// those values. `None` when every value it names is emittable.
 ///
-/// Polarity matters, and getting it wrong was the old bug: a dead tag makes
-/// `tag: X` never match, but makes `{not: X}` match EVERY request — the tag
-/// set is always present, so `not` is always true. Reporting both as "never
-/// matches" told an operator the opposite of what their exclusion does.
+/// Polarity matters: a dead tag makes `tag: X` never match, but `{not: X}`
+/// match every request.
 fn tag_effect(m: &Matcher) -> Option<(TagEffect, Vec<String>)> {
     let dead = |t: &str| !super::classify::is_emittable(t);
     match m {
@@ -764,21 +717,11 @@ fn compile_rule(
         matches.push(p);
     }
 
-    // A catch-all rule that cannot fall through makes every later rule dead
-    // code. The CRD only says this in prose; nothing enforces it.
-    //
-    // TWO ways to be a catch-all, and only the first is obvious. Omitting
-    // `matches` is one. The other is an ENTRY with no terms — `matches: [{}]`,
-    // or a `[{}, {model: x}]` where someone deleted the fields of one entry —
-    // because entries are ORed and a zero-term entry matches everything
-    // (`all()` over an empty iterator is true). Checking only
-    // `raw.matches.is_empty()` missed that shape entirely. An entry whose terms
-    // were all invalid is NOT a catch-all: it compiles to never-matching terms.
-    //
-    // And `onEmpty: FallThrough` is the escape: a catch-all that falls through
-    // does NOT shadow, because `policy_driver` continues to the next matching
-    // rule when the candidate set comes up empty. That is the ordinary
-    // "local first, then provider" shape, and warning on it would cry wolf.
+    // A catch-all rule that cannot fall through makes every later rule dead.
+    // A rule is a catch-all when `matches` is omitted or any entry has no
+    // terms (entries OR). An entry whose terms were all invalid is not, since
+    // it compiles to never-matching terms. `onEmpty: FallThrough` doesn't
+    // shadow, since the next rule still runs on an empty candidate set.
     let unconditional = raw.matches.is_empty() || matches.iter().any(|p| p.is_unconditional());
     if unconditional && raw.route.on_empty != OnEmpty::FallThrough && index + 1 < total {
         let (how, path) = if raw.matches.is_empty() {
@@ -856,11 +799,8 @@ fn duplicate_rule_names(spec: &InferencePolicySpec, warnings: &mut Vec<PolicyWar
 /// not fall through can never be reached: the earlier one claims every request
 /// it would. Usually a copy-paste that was meant to be edited.
 ///
-/// Verbatim only. Containment — a later rule strictly narrower than an earlier
-/// one — is also unreachable, but deciding it needs predicate implication, and
-/// a check that is right only some of the time is worse than one that is
-/// narrow and always right. An earlier catch-all is reported on the catch-all
-/// itself, so it is skipped here rather than repeated on every rule after it.
+/// Verbatim only; containment would need predicate implication. An earlier
+/// catch-all is reported on the catch-all itself, so it is skipped here.
 fn identical_matches(spec: &InferencePolicySpec, warnings: &mut Vec<PolicyWarning>) {
     let raw: Vec<serde_json::Value> = spec
         .rules
@@ -907,10 +847,8 @@ fn compile_route(
         })
         .collect();
 
-    // Weights partition traffic, so a route that weights SOME groups samples
-    // all of them — and an unset weight counts as 1. `[{weight: 70}, {}]` is a
-    // 70:1 split, which nobody writing it meant. Either every group says its
-    // share, or none does and the groups union.
+    // Weighting some groups samples all of them, with unset as 1, so
+    // `[{weight: 70}, {}]` is a 70:1 split.
     let weighted = raw.consider.iter().filter(|g| g.weight.is_some()).count();
     if weighted > 0 && weighted < raw.consider.len() {
         let unset: Vec<String> = raw
@@ -1037,9 +975,8 @@ fn compile_route(
                 }
             }
 
-            // `backend.type` is compared as a plain string, so a value outside
-            // the enum — `local`, the natural lowercase — never matches and
-            // nothing at admission objects: the field preserves unknown values.
+            // `backend.type` is compared as a plain string, and the schema
+            // admits any value, so `local` never matches.
             if let Some((_, m)) = drop
                 .terms
                 .iter()
@@ -1067,9 +1004,8 @@ fn compile_route(
                 }
             }
 
-            // A signal only one class carries cannot drop the other class —
-            // absence never matches. That is the right semantics and the reason
-            // this needs saying: nothing in the manifest shows it.
+            // A signal only one class carries can't drop the other class, since
+            // absence never matches.
             let classes = admitted_classes(&drop);
             for (attr, _) in &drop.terms {
                 let Some(class) = attr.scoped_to() else {
@@ -1142,15 +1078,9 @@ fn compile_route(
             .as_ref()
             .map(BackendMatch::compile)
             .unwrap_or_default();
-        // `type:` on the tier is shorthand for `backends.type`, and it has to be
-        // folded in HERE — `BackendMatch::compile` only sees the `backends` block,
-        // so a tier written `{type: Provider, order: [...]}` would otherwise carry
-        // no class filter at all and admit local candidates. The CRD accepts that
-        // spelling and its Local-only rule is satisfied by it, so ignoring it is
-        // the silent-widening failure this codebase goes out of its way to avoid.
-        //
-        // `SelectTier::backend_type` prefers the shorthand; the CRD rejects setting
-        // both, so there is no conflict to resolve.
+        // Fold in the `type:` shorthand, which `BackendMatch::compile` doesn't
+        // see; otherwise `{type: Provider, order: [...]}` would admit local
+        // candidates. The CRD rejects setting both.
         if backends.backend_type.is_none() {
             backends.backend_type = tier.backend_type();
         }
@@ -1184,9 +1114,8 @@ fn compile_route(
                 Rank::MinimizePredictedTtft
             }
         };
-        // A tier with no `backends` subset always keeps whatever survived, so
-        // nothing after it can ever run. The guide flags this as a check worth
-        // making ("unreachable select tiers").
+        // A tier with no `backends` subset keeps whatever survived, so nothing
+        // after it can run.
         if backends.is_empty() && i + 1 < raw.select.len() {
             warnings.push(PolicyWarning::new(
                 WarningCode::UnreachableTier,
@@ -1200,9 +1129,8 @@ fn compile_route(
         }
         // `order` ranks by name and ignores load, so every endpoint of the
         // top-ranked backend ties. With no random tie-break, `pick_among` takes
-        // the first of them EVERY time: one pod gets all of this tier's traffic
-        // while its siblings idle. Providers are exempt — one row per model,
-        // nothing to spread.
+        // the first of them every time. Providers are exempt, with nothing to
+        // spread.
         if matches!(rank, Rank::Order(_))
             && backends.backend_type != Some(BackendType::Provider)
             && route_admits_local
@@ -1224,8 +1152,7 @@ fn compile_route(
         select.push(CompiledSelectTier { backends, rank });
     }
     if select.is_empty() {
-        // `select` is required with minItems 1; be explicit rather than
-        // silently picking nothing.
+        // `select` is required with minItems 1.
         warnings.push(PolicyWarning::new(
             WarningCode::EmptySelect,
             format!("{route_path}.select"),

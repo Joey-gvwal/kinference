@@ -337,11 +337,9 @@ spec:
     ]
 }
 
-/// The known-keys table is what decides a field is "unknown", so it must be
-/// exactly what the CRD schema declares — no more (an unknown field would pass
-/// silently) and no less (a valid one would be flagged). Walked from the
-/// schema, both directions: every table position must exist with the same
-/// keys, and every structural object in the schema must have a table entry.
+/// The known-keys table matches the CRD schema exactly, in both directions:
+/// every table position exists with the same keys, and every structural object
+/// in the schema has a table entry.
 #[test]
 fn known_keys_match_the_crd_schema() {
     let text = std::fs::read_to_string(concat!(
@@ -460,9 +458,8 @@ fn a_deserialization_error_is_located_and_stops_further_checks() {
     assert!(!r.ok);
 }
 
-/// Errors are what is wrong with the policy whatever pool serves it, and
-/// warnings what is wrong for the pools it was checked against: a policy can
-/// serve several, and a name one lacks may be right for another.
+/// Errors are wrong whatever pool serves the policy; warnings are wrong for
+/// the pools it was checked against.
 #[test]
 fn spec_findings_are_errors_and_name_findings_warnings() {
     let r = check(
@@ -665,10 +662,9 @@ fn a_pool_that_does_not_name_its_destinations_needs_their_manifests() {
 }
 
 /// With worker sets and providers among the inputs, a destination the pool
-/// lists but the inputs lack still counts by name: offline it has usually
-/// just not been passed. Its models are unknown, so a model only it serves is
-/// flagged, and the destination is recorded to say why. `kubectl get` of a
-/// cluster whose pool lists a worker set that does not exist reads the same.
+/// lists but the inputs lack still counts by name. Its models are unknown, so
+/// a model only it serves is flagged, and the destination is recorded to say
+/// why.
 #[test]
 fn a_listed_destination_without_its_manifest_counts_by_name_only() {
     let draft = input(
@@ -718,10 +714,8 @@ fn input_that_cannot_be_checked_is_an_error_not_a_finding() {
     );
 }
 
-/// Two manifests joined with no `---` between them, as `{ kubectl get -o yaml;
-/// cat policy.yaml; }` joins them, are one document with every key twice. The
-/// error must say so, not pass on serde-saphyr's advice to set one of its
-/// options, which nobody running kinfctl can do.
+/// Two manifests joined with no `---` between them are one document with
+/// every key twice, and the error says so.
 #[test]
 fn manifests_joined_without_a_separator_get_a_hint() {
     let joined = "apiVersion: v1\nkind: List\nitems: []\nmetadata:\n  resourceVersion: \"\"\n\
@@ -760,13 +754,8 @@ fn the_same_policy_twice_is_an_error_on_the_second() {
     );
 }
 
-/// Every demo policy must check clean — spec, unknown fields AND names —
-/// against the demo pool, so a warning a user sees is about their change,
-/// never inherited from an example.
-///
-/// Supersedes the old line-scanning check for unemittable tags: a dead tag is
-/// now an `UnemittableTag` warning, and this parses the YAML instead of
-/// guessing at it.
+/// Every demo policy checks clean (spec, unknown fields and names) against
+/// the demo pool.
 #[test]
 fn every_demo_policy_checks_clean_against_its_pool() {
     let r = check(
@@ -805,9 +794,8 @@ fn every_demo_policy_passes_the_spec_checks_alone() {
     assert_eq!(checked, 5, "the demo policies changed?");
 }
 
-/// A long comment block before a list entry is ordinary in a well-documented
-/// manifest, and the YAML parser refuses more than 32 in a row. Checked here
-/// with 40, above a policy rule — exactly where an explanation would go.
+/// The YAML parser refuses more than 32 comment lines in a row before a list
+/// entry; 40 above a policy rule still parses.
 #[test]
 fn a_long_comment_block_does_not_stop_the_parse() {
     let comments: String = (0..40)

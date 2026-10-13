@@ -1,31 +1,23 @@
-//! Everything kinference can say about `InferencePolicy` manifests before they
-//! are applied — the engine behind `kinfctl check`.
+//! Checks on `InferencePolicy` manifests before they are applied; the engine
+//! behind `kinfctl check`.
 //!
-//! Pure over its inputs: text in, a [`Report`] out. No cluster, no network, no
-//! files — the CLI does the reading, so a later server endpoint can wrap the
-//! same function and give the same answers.
+//! Pure over its inputs: text in, a [`Report`] out. The CLI does the reading.
 //!
-//! Every finding has a path into the manifest and a stable code, and is one of
-//! two kinds, by whether it depends on the pool the policy serves.
+//! Every finding has a path into the manifest and a stable code.
 //!
-//! **Errors** are wrong whatever pool serves the policy. In the order a fix
-//! should address them:
+//! Errors are wrong whatever pool serves the policy, in the order to fix them:
 //!
-//! 1. `SchemaError` — the spec does not deserialize, so nothing else can be
-//!    said. Located with `serde_path_to_error`, because "unknown variant
-//!    `local`" without a path is a hunt through a long manifest.
-//! 2. `UnknownField` — keys the CRD schema does not declare. The API server
-//!    PRUNES these on apply, silently, so a misspelled `tennant:` is not an
-//!    error anywhere: the condition simply vanishes and the rule matches more
-//!    than its author wrote. This is the one place it can be caught.
-//! 3. The compile checks of [`super::compile`], from the spec alone.
+//! 1. `SchemaError`: the spec does not deserialize, located with
+//!    `serde_path_to_error`.
+//! 2. `UnknownField`: keys the CRD schema does not declare. The API server
+//!    silently prunes these on apply, so a misspelled `tennant:` makes the rule
+//!    broader; this is the only place it can be caught.
+//! 3. The compile checks of [`super::compile`].
 //!
-//! **Warnings** are the name checks of [`super::lint`], against the pools the
-//! policy is attached to, when those pools and their destinations are among the
-//! inputs. Resolved through the server's own [`super::resolve::resolve`], so the
-//! CLI cannot disagree with a running kinference about what a name means. A
-//! policy can serve several pools, and a name one of them lacks may be right
-//! for another: a warning is about the pairing, not the policy.
+//! Warnings are the name checks of [`super::lint`], against the pools the
+//! policy is attached to, when those are among the inputs. Resolution uses
+//! the server's own [`super::resolve::resolve`]. A name one pool lacks may be
+//! right for another, so these are warnings.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -50,15 +42,14 @@ pub struct Input {
 
 /// Knobs for [`check`].
 pub struct Options {
-    /// Namespace for objects that do not set one — what `kubectl apply -n`
-    /// would use.
+    /// Namespace for objects that do not set one, as with `kubectl apply -n`.
     pub namespace: String,
     /// `NAMESPACE/NAME` of a pool to check every policy against, as if
     /// attached to it. For a draft no pool references yet.
     pub pool: Option<String>,
 }
 
-/// Input that cannot be checked at all — exit status 2, not a finding.
+/// Input that cannot be checked at all: exit status 2, not a finding.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputError {
     /// Not YAML (or JSON) at all.
@@ -239,7 +230,7 @@ const REQUEST_KEYS: &[&str] = &["model", "inputTokens", "maxTokens", "tenant", "
 /// positions spelled as dotted paths with list indices removed.
 ///
 /// A key anywhere else is pruned by the API server on apply. Positions not
-/// listed hold free-form values — predicate values, `matchLabels` — whose keys
+/// listed hold free-form values (predicate values, `matchLabels`) whose keys
 /// are data, not schema, and are not checked. Pinned to the CRD by the test
 /// `known_keys_match_the_crd_schema`, which fails on any drift either way.
 pub(crate) const SPEC_KEYS: &[(&str, &[&str])] = &[
@@ -375,8 +366,8 @@ fn named(pool: &InferencePool) -> impl Iterator<Item = (String, BackendType)> + 
     })
 }
 
-/// Whether `v` claims `group` in its `apiVersion` — so a same-named kind from
-/// some other API group is not mistaken for ours.
+/// Whether `v` claims `group` in its `apiVersion`, so a same-named kind from
+/// another API group is not mistaken for ours.
 fn in_group(v: &Value, group: &str) -> bool {
     v.get("apiVersion")
         .and_then(Value::as_str)
@@ -386,13 +377,10 @@ fn in_group(v: &Value, group: &str) -> bool {
 /// Parse a multi-document YAML stream into JSON values.
 ///
 /// The parser refuses more than 32 consecutive comment lines before a list
-/// entry — a fixed limit, not a configurable budget — and a well-commented
-/// manifest reaches that easily (`charts/kinference/templates/deployment.yaml` does). So on
-/// exactly that error, parse again with every full-line comment blanked.
-/// Blanked, not deleted, so line numbers in any later error still point at
-/// the file as written. Nothing structural changes: a full-line comment is
-/// either a comment, or a line of a block scalar, where an empty line keeps the
-/// scalar going.
+/// entry, a fixed limit that well-commented manifests hit. On that error,
+/// parse again with every full-line comment blanked (not deleted, so line
+/// numbers still match). Blank lines don't end a block scalar, so nothing
+/// structural changes.
 fn parse_yaml(text: &str) -> Result<Vec<Value>, String> {
     let err = match serde_saphyr::from_multiple(text) {
         Ok(docs) => return Ok(docs),
@@ -420,12 +408,9 @@ fn parse_yaml(text: &str) -> Result<Vec<Value>, String> {
 
 /// A parse error, worded for whoever is running kinfctl.
 ///
-/// serde-saphyr's default wording advises on its own options ("set
-/// DuplicateKeyPolicy in Options"), which nobody running kinfctl can set;
-/// `UserMessageFormatter` is its wording for end users. And a duplicate
-/// `apiVersion` or `kind` at the start of a line is two manifests joined with
-/// no `---` between them: what `cat a.yaml b.yaml` gives when `a.yaml` does
-/// not end with one, as `kubectl get -o yaml` output never does.
+/// Uses serde-saphyr's `UserMessageFormatter`, whose wording is for end
+/// users. A duplicate `apiVersion` or `kind` usually means two manifests were
+/// concatenated without a `---` between them.
 fn describe_parse_error(e: &serde_saphyr::Error) -> String {
     let mut message = e.render_with_formatter(&serde_saphyr::UserMessageFormatter);
     if let serde_saphyr::Error::DuplicateMappingKey {
@@ -502,10 +487,8 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
             {
                 meta.insert("namespace".into(), Value::String(opts.namespace.clone()));
             }
-            // Status is the server's, not part of the manifest, and nothing here
-            // reads it. Dropped so that objects from `kubectl get -o yaml` read
-            // the same as the files that created them, whatever status a router
-            // older or newer than this binary wrote on them.
+            // Drop status, so objects from `kubectl get -o yaml` read the same
+            // as the files that created them.
             if let Some(m) = obj.as_object_mut() {
                 m.remove("status");
             }
@@ -617,11 +600,10 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
         reports.push(report);
     }
 
-    // --- resolve, exactly as the server does ----------------------------------
+    // --- resolve, as the server does ------------------------------------------
     //
-    // Offline there is no discovery, so a worker set never "binds" to a pool of
-    // endpoints the way it does in a cluster. Treat every declared set as found:
-    // the question here is what the NAMES refer to, not whether pods are up.
+    // Offline there is no discovery, so treat every declared worker set as
+    // bound to a pool; the question is what names refer to.
     let bound: PoolIndex = worker_sets
         .iter()
         .filter_map(|w| {

@@ -16,10 +16,8 @@ fn policy(json: serde_json::Value) -> CompiledPolicy {
 /// One local candidate, with the two duplicated latency fields written from a
 /// SINGLE input.
 ///
-/// `target.predicted_ttft_ms` (f32) drives ranking via `objective_ms`, while
-/// `attrs.predicted_ttft_ms` (f64) drives `drop:` predicates. They are
-/// independent fields, so a helper that took them separately would let a test —
-/// and the dashboard handler — rank on one number while displaying another.
+/// `target.predicted_ttft_ms` (f32) drives ranking, while
+/// `attrs.predicted_ttft_ms` (f64) drives `drop:` predicates; they must agree.
 fn local(backend: &str, model: &str, ttft: f32, queued: i64) -> Candidate {
     Candidate {
         canonical_model: model.to_string(),
@@ -76,11 +74,7 @@ fn attrs(model: &str, qos: &str, tags: &[&str]) -> RequestAttrs {
     }
 }
 
-/// The duplicated latency fields must agree, or ranking and `drop:` predicates
-/// describe different worlds.
-///
-/// Cheap to assert and expensive to get wrong: an explorer that ranks on a
-/// stale f32 while showing an edited f64 would be confidently wrong.
+/// The duplicated latency fields agree.
 #[test]
 fn the_two_predicted_ttft_copies_stay_in_sync() {
     let c = local("ws-a", "m", 412.0, 3);
@@ -103,12 +97,9 @@ fn the_two_predicted_ttft_copies_stay_in_sync() {
     );
 }
 
-/// PARITY: the explainer's winner is whatever a direct `evaluate()` says.
-///
-/// The point is to pin the SEQUENCING, which is the only part the explainer
-/// re-implements. The candidate filtering is done by hand here rather than by
-/// calling `apply_consider`, so this is an independent check and not a
-/// tautology.
+/// Parity: the explainer's winner is whatever a direct `evaluate()` says. The
+/// `consider` filtering is done by hand rather than via `apply_consider`, so
+/// this independently checks the sequencing.
 #[test]
 fn parity_with_a_direct_evaluate_call() {
     // policy-2: matches on model+tag, considers two models, minimizes TTFT.
@@ -148,8 +139,7 @@ fn parity_with_a_direct_evaluate_call() {
     };
     assert_eq!(got.winner, Some(want));
 
-    // Second case: TWO rules match and both could decide. First-match-wins, so
-    // parity here also pins the ORDER — with one matching rule it could not.
+    // Two rules match and both could decide, so this also checks rule order.
     let p2 = policy(serde_json::json!({
         "rules": [
             { "name": "first-wins", "route": {
@@ -181,8 +171,7 @@ fn parity_with_a_direct_evaluate_call() {
     );
 }
 
-/// A non-matching rule must say WHICH term failed — the whole reason this
-/// module exists rather than reusing `CompiledRequestPredicate::matches`.
+/// A non-matching rule says which term failed.
 #[test]
 fn a_rule_that_does_not_match_names_the_failing_term() {
     let p = policy(serde_json::json!({
@@ -213,8 +202,8 @@ fn a_rule_that_does_not_match_names_the_failing_term() {
     );
 }
 
-/// `consider` filters during candidate GENERATION in the driver, so a `Trace`
-/// never shows it. The explainer has to apply it or `consider` looks inert.
+/// The explainer applies `consider`, which the driver applies during
+/// candidate generation.
 #[test]
 fn consider_filters_by_model_and_reports_why() {
     let p = policy(serde_json::json!({
@@ -252,9 +241,8 @@ fn consider_filters_by_model_and_reports_why() {
 
 /// policy-5: batch-only-where-nothing-is-queued, with `onEmpty: Reject`.
 ///
-/// The pair below is the whole feature in miniature — matching, an exclusion
-/// reading a candidate attribute, and the verdict flipping on an edited
-/// override.
+/// Matching, an exclusion reading a candidate attribute, and the verdict
+/// flipping on an edited override.
 #[test]
 fn on_empty_reject_flips_when_a_candidate_is_edited() {
     let p = policy(serde_json::json!({
@@ -292,8 +280,7 @@ fn on_empty_reject_flips_when_a_candidate_is_edited() {
     );
 }
 
-/// `onEmpty: FallThrough` must advance to the NEXT matching rule. This is the
-/// sequencing the parity test cannot reach with a single rule.
+/// `onEmpty: FallThrough` advances to the next matching rule.
 #[test]
 fn fall_through_advances_to_the_next_rule() {
     let p = policy(serde_json::json!({
@@ -328,8 +315,8 @@ fn fall_through_advances_to_the_next_rule() {
     assert!(got.steps[1].winner.is_some(), "rule 1 decided");
 }
 
-/// A `select` tier that subsets by class silently skips the other class, with
-/// no trace entry. The explorer reconstructs that.
+/// A `select` tier that subsets by class skips the other class without a
+/// trace entry; the explainer reports it.
 #[test]
 fn tier_subset_misses_are_reported_though_the_trace_omits_them() {
     let p = policy(serde_json::json!({
@@ -388,8 +375,8 @@ fn unmatched_reject_is_distinct_from_on_empty() {
     assert_eq!(got.winner, None);
 }
 
-/// The default `unmatched: ServeLocal` serves, and reports as its own verdict
-/// rather than as `chosen` — the same split `kinference_policy_decisions_total` makes.
+/// The default `unmatched: ServeLocal` serves, reported as its own verdict
+/// rather than `chosen`, as in `kinference_policy_decisions_total`.
 #[test]
 fn unmatched_serve_local_reports_unmatched_served() {
     let p = policy(serde_json::json!({
@@ -410,8 +397,7 @@ fn unmatched_serve_local_reports_unmatched_served() {
     );
 }
 
-/// Nondeterminism has to be declared before the user reads one roll as the
-/// answer.
+/// Sources of nondeterminism are declared.
 #[test]
 fn nondeterminism_names_both_sources() {
     let random = policy(serde_json::json!({
@@ -458,10 +444,8 @@ fn nondeterminism_names_both_sources() {
     );
 }
 
-/// The route nobody wrote is a source too. `unmatched: ServeLocal` — the
-/// default — serves with the built-in route, which breaks ties at random; a
-/// policy that left it out claimed to be reproducible while idle, equally fast
-/// endpoints traded wins between runs.
+/// The built-in route for `unmatched: ServeLocal` (the default) breaks ties at
+/// random, so it is a source too.
 #[test]
 fn the_unmatched_route_is_a_source_of_nondeterminism_unless_it_rejects() {
     let serve = policy(serde_json::json!({
@@ -479,8 +463,7 @@ fn the_unmatched_route_is_a_source_of_nondeterminism_unless_it_rejects() {
     assert!(nondeterminism(&reject).is_empty());
 }
 
-/// Every rule appears, matched or not. A rule that never fires is exactly what
-/// an operator needs to see, and `matching_rules` alone would hide it.
+/// Every rule appears, matched or not.
 #[test]
 fn every_rule_is_reported_in_list_order() {
     let p = policy(serde_json::json!({

@@ -1,46 +1,26 @@
-//! Policy explanation for the dashboard's interactive explorer.
+//! Policy explanation, for the admin API's `/api/policy/simulate`.
 //!
-//! Answers "if a request looked like X, what would policy P do?" — and, unlike
-//! the pick path, says WHY at every step.
+//! Answers "if a request looked like X, what would policy P do?", and why.
 //!
-//! # Why this is not the driver
+//! The router's `monitor::policy_driver` walk is tied to async candidate
+//! generation and metrics, so this module re-sequences the walk from the same
+//! engine functions ([`engine::matching_rules`], [`engine::models_to_score`],
+//! [`engine::evaluate`], [`engine::falls_through`],
+//! [`engine::unmatched_route`]). Only the sequencing could diverge, and
+//! `tests.rs` checks it against a direct `evaluate()` call.
 //!
-//! `monitor::policy_driver` owns the real rule walk, and it is entangled with
-//! candidate generation (async, tokenizer, radix index), Prometheus recording
-//! and `PickAndRecordOutcome`. None of that can run for a hypothetical request.
+//! It adds what the pick path doesn't compute:
 //!
-//! So this module re-sequences the walk from the engine's own public pieces —
-//! [`engine::matching_rules`], [`engine::models_to_score`],
-//! [`engine::evaluate`], [`engine::falls_through`], [`engine::unmatched_route`]
-//! — which is the same set the driver calls. The DECISION therefore cannot
-//! diverge from production: only the sequencing could, and `tests.rs` pins that
-//! against a direct `evaluate()` call.
+//! 1. Per-term predicate results, so a rule that didn't match says which
+//!    attribute failed.
+//! 2. The `consider` stage, which the driver applies during candidate
+//!    generation, so it must be applied here to a caller-supplied candidate
+//!    set.
+//! 3. Select-tier subset misses, which `evaluate` skips without a trace entry.
 //!
-//! # What it adds
-//!
-//! Three things the hot path deliberately does not compute, because they cost
-//! work per pick and nobody reads them at 1000 rps:
-//!
-//! 1. **Per-predicate detail.** [`crate::predicate::CompiledRequestPredicate::matches`]
-//!    returns a bare `bool`. Here each term is evaluated separately via
-//!    `Matcher::eval`, so a rule that did not match can say which attribute
-//!    failed. Additive — nothing in `predicate.rs` changes.
-//! 2. **The `consider` stage.** Model/backend filtering happens during
-//!    candidate GENERATION in the driver, not inside `evaluate`, so a trace
-//!    never shows it. With a caller-supplied candidate set it has to be applied
-//!    here or `consider` would appear to do nothing.
-//! 3. **Select-tier subset misses.** `evaluate` skips a candidate outside a
-//!    tier's `backends` with a bare `continue` and no trace entry, so
-//!    "this provider was not in tier 0 because the tier is `type: Local`" is
-//!    unexplainable from `Trace` alone. Recomputed here.
-//!
-//! # Nondeterminism
-//!
-//! `evaluate` is pure except for two `getrandom` calls — `tieBreak: Random`
-//! with a live tie, and weighted `consider` sampling. A policy using either
-//! gives a different answer between runs, so [`nondeterminism`] names the
-//! reasons and the caller can offer to run the simulation repeatedly instead of
-//! presenting one roll as the answer.
+//! `tieBreak: Random` with a live tie and weighted `consider` sampling make
+//! results vary between runs; [`nondeterminism`] names those reasons so the
+//! caller can repeat the simulation.
 
 use super::compile::{CompiledPolicy, CompiledRoute, Rank};
 use super::crd::TieBreak;
@@ -81,8 +61,7 @@ pub struct RuleStep {
     pub index: usize,
     pub name: String,
     pub matched: bool,
-    /// Empty `matches` is the documented catch-all, and reports as matched with
-    /// no predicates rather than as an absence.
+    /// An empty `matches` (a catch-all) reports as matched with no predicates.
     pub predicates: Vec<PredicateOutcome>,
     /// `None` when the rule did not match, so was never evaluated.
     pub consider: Option<ConsiderStage>,
@@ -150,9 +129,7 @@ impl Nondeterminism {
 
 /// Reasons this policy will not give the same answer twice.
 ///
-/// Both come from `getrandom` inside the engine. Reported per policy rather
-/// than per run so the UI can warn BEFORE the user reads one roll as the
-/// answer.
+/// Reported per policy rather than per run, so callers can warn up front.
 pub fn nondeterminism(policy: &CompiledPolicy) -> Vec<Nondeterminism> {
     let mut out = Vec::new();
     for (i, rule) in policy.rules.iter().enumerate() {
@@ -178,10 +155,8 @@ pub fn nondeterminism(policy: &CompiledPolicy) -> Vec<Nondeterminism> {
             });
         }
     }
-    // The route no rule wrote. `default_route()` breaks ties at random, and
-    // `ServeLocal` is the default, so nearly every policy has this source —
-    // and missing it meant the explorer called a policy reproducible while
-    // two idle, equally fast endpoints traded wins between runs.
+    // `default_route()` breaks ties at random, and `ServeLocal` is the
+    // default, so nearly every policy has this source.
     if policy.unmatched == crate::crd::Unmatched::ServeLocal {
         out.push(Nondeterminism {
             code: "UnmatchedRandomTieBreak",
@@ -301,15 +276,13 @@ fn apply_consider(
 
 /// Tier subset misses, which `evaluate` skips without a trace entry.
 ///
-/// Only the survivors matter: a candidate already eliminated by an exclusion
-/// was never offered to a tier, and reporting it here would double-count it.
+/// Only survivors are considered, so exclusions aren't double-counted.
 fn tier_subset_drops(
     route: &CompiledRoute,
     candidates: &[Candidate],
     survivors: &[String],
 ) -> Vec<(String, String)> {
-    // A set, not `Vec::contains`: this runs per candidate per tier per run,
-    // and a simulation may repeat 500 times.
+    // A set, since a simulation may repeat many times.
     let alive: std::collections::HashSet<&str> = survivors.iter().map(String::as_str).collect();
     let mut out = Vec::new();
     for (i, tier) in route.select.iter().enumerate() {
@@ -379,9 +352,8 @@ fn run_route(
 
 /// Explain what `policy` would do with `attrs` over `candidates`.
 ///
-/// `consider` is resolved against the whole of `attrs.model` — the upstream
-/// plus every declared alias — so each destination can resolve through its own
-/// alias table. See [`engine::models_to_score`].
+/// `consider` is resolved against all of `attrs.model`; see
+/// [`engine::models_to_score`].
 pub fn explain(
     policy: &CompiledPolicy,
     attrs: &RequestAttrs,
@@ -390,9 +362,7 @@ pub fn explain(
     let requested_models = attrs.model.clone();
     let mut steps: Vec<RuleStep> = Vec::new();
 
-    // Every rule is reported, matched or not — a rule that never fires is the
-    // thing an operator most needs to see, and `matching_rules` alone would
-    // hide it.
+    // Every rule is reported, matched or not.
     let matched: Vec<usize> = policy
         .rules
         .iter()
