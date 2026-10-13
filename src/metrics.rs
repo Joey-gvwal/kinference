@@ -9,29 +9,18 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{Engine, WorkerConfig};
 use crate::policy::PoolId;
 
-// `Engine` is no longer used to dispatch metric-name lookups (we probe both
-// vLLM- and SGLang-prefixed names on every scrape). It IS still used as a
-// label for the engine identity detected from `/v1/models` `owned_by`, so
-// the import is retained.
+// vLLM and SGLang prefix metric names with `<engine>:`, which
+// prometheus-parse 0.2.5 rejects. The scraped body is rewritten to `vllm_` /
+// `sglang_` before parsing, and the names below use that form.
 
-// Both vLLM and SGLang prefix their metric names with `<engine>:`, which is
-// valid Prometheus but rejected by prometheus-parse 0.2.5's `\w+` metric-name
-// regex. We rewrite `vllm:` → `vllm_` and `sglang:` → `sglang_` in the scraped
-// body before parsing and look up the rewritten names here. SGLang v0.5.4+
-// already emits the underscore form natively, in which case the rewrite is a
-// harmless no-op.
-
-/// Per-engine table of which Prometheus metric names to read for each of the
-/// fields on `MetricsSample`. Built lazily as `&'static`, dispatched on
-/// `Engine` via [`names_for`].
+/// Which Prometheus metric names to read for each field of `MetricsSample`.
 struct MetricNames {
     /// Candidate names for the "requests waiting in queue" gauge. First match
     /// wins, so put preferred names first.
     waiting: &'static [&'static str],
     /// Candidate names for the "currently running" gauge.
     running: &'static [&'static str],
-    /// Candidate names for "swapped to CPU" — empty slice when the engine
-    /// doesn't have this concept (SGLang).
+    /// Candidate names for "swapped to CPU" (vLLM only).
     swapped: &'static [&'static str],
     /// Candidate names for KV-cache utilization (0.0..1.0).
     kv_cache_usage: &'static [&'static str],
@@ -58,10 +47,8 @@ struct MetricNames {
     prefix_cache_hit_rate_gauge: &'static [&'static str],
 }
 
-// Union of vLLM and SGLang candidate names. The two engines use disjoint
-// metric-name prefixes (`vllm_*` vs `sglang_*`), so no name collisions; the
-// scraper picks whichever the engine actually emits. Listing vLLM first
-// matches the historical preference order.
+// Union of vLLM and SGLang candidate names, which don't collide; the scraper
+// picks whichever the engine emits.
 const ALL_NAMES: MetricNames = MetricNames {
     waiting: &["vllm_num_requests_waiting", "sglang_num_queue_reqs"],
     running: &["vllm_num_requests_running", "sglang_num_running_reqs"],
@@ -98,9 +85,8 @@ const ALL_NAMES: MetricNames = MetricNames {
 };
 
 /// Best-effort detection of which engine a `/v1/models` response was served
-/// by. Sourced from `data[*].owned_by` (vLLM emits `"vllm"`, SGLang emits
-/// `"sglang"`). `None` if neither matches — non-fatal; the field is purely
-/// informational (display label, mismatch warnings).
+/// by, from `data[*].owned_by`. `None` if neither matches; informational
+/// only.
 fn engine_from_owned_by(owned_by: &str) -> Option<Engine> {
     match owned_by {
         "vllm" => Some(Engine::Vllm),
@@ -117,11 +103,8 @@ pub struct MetricsSample {
     pub kv_cache_usage: f32,
     /// `waiting`, averaged over `COMPLETION_RATE_WINDOW`.
     ///
-    /// What the policy engine's `queuedPrompts` predicate reads. The raw
-    /// `waiting` above stays the picker's input: the picker predicts the TTFT
-    /// of a request being dispatched RIGHT NOW, for which the instantaneous
-    /// depth is the correct term. Only the admission decision — "is this
-    /// worker under sustained pressure" — wants the mean.
+    /// What the policy's `queuedPrompts` predicate reads. The picker uses the
+    /// instantaneous `waiting`, since it predicts a dispatch happening now.
     pub waiting_mean: f32,
     /// `kv_cache_usage`, averaged over the same window. What `kvCacheUsage`
     /// reads. Still a 0.0..1.0 ratio.
@@ -131,18 +114,13 @@ pub struct MetricsSample {
     /// per-sec rate is derived from the delta against the previous sample.
     pub completions_total: u64,
     /// Successfully-completed requests per second, averaged over a sliding
-    /// window (~30s — see `COMPLETION_RATE_WINDOW`). A single-tick delta
-    /// reads `0` for most ticks under low load (the underlying counter only
-    /// ticks when a request finishes), so we take the slope across the
-    /// window instead. `0.0` until we have at least two samples or when
-    /// the completion counter is unavailable on this engine version.
+    /// window (see `COMPLETION_RATE_WINDOW`), since a single-tick delta is
+    /// usually 0 under low load. `0.0` until there are two samples, or when
+    /// the engine lacks the counter.
     pub completion_rate_per_sec: f32,
     /// Cumulative prefix-cache hit counter (vLLM
-    /// `prefix_cache_hits_total`). `0` when the engine doesn't expose
-    /// this metric (older vLLM versions, SGLang — SGLang publishes
-    /// only the derived rate, not the raw counts). Retained for
-    /// volume context: a 50% rate over 10k queries is materially
-    /// different from 50% over 5.
+    /// `prefix_cache_hits_total`). `0` when the engine doesn't expose it
+    /// (older vLLM, SGLang).
     pub prefix_cache_hits_total: u64,
     /// Cumulative prefix-cache query counter (vLLM
     /// `prefix_cache_queries_total`). Pair with `prefix_cache_hits_total`
@@ -150,10 +128,9 @@ pub struct MetricsSample {
     /// this metric.
     pub prefix_cache_queries_total: u64,
     /// Engine-reported prefix-cache hit rate, 0..1. Sourced from:
-    ///   - vLLM counter pair: `Δhits / Δqueries` over the same 30s
-    ///     sliding window used by `completion_rate_per_sec`;
-    ///   - SGLang gauge `sglang:cache_hit_rate` (already a ratio,
-    ///     surfaced verbatim — SGLang chooses its own averaging).
+    ///   - vLLM counter pair: `Δhits / Δqueries` over the same window as
+    ///     `completion_rate_per_sec`;
+    ///   - SGLang gauge `sglang:cache_hit_rate`, verbatim.
     ///
     /// `0.0` when neither source is present (older engine, cold start
     /// before two samples accumulated, or zero queries in the window).
@@ -161,12 +138,10 @@ pub struct MetricsSample {
     pub scraped_at: Option<Instant>,
 }
 
-/// One entry from `/v1/models`'s `data[]`. Only the fields the predictor /
-/// router actually use are retained.
+/// One entry from `/v1/models`'s `data[]`, with only the fields we use.
 #[derive(Clone, Debug, Default)]
 pub struct ModelEntry {
-    /// Mirrors the proto `ServedModel.name` field; sourced from
-    /// `/v1/models` `data[*].id`.
+    /// `data[*].id`.
     pub name: String,
     /// `data[*].max_model_len`. `None` when the engine omitted it (some
     /// embedding-only models don't carry it).
@@ -177,90 +152,59 @@ pub struct ModelEntry {
 #[derive(Clone, Debug, Default)]
 pub struct ModelsInfo {
     pub models: Vec<ModelEntry>,
-    /// Engine identity from `data[*].owned_by` (vLLM emits `"vllm"`, SGLang
-    /// emits `"sglang"`). `None` until the first successful refresh, or
-    /// when no `data[]` entry is present. Purely informational — no
-    /// routing decisions key off this value. Consumed by the dashboard /
-    /// score-handler in subsequent phases.
+    /// Engine identity from `data[*].owned_by`. `None` until the first
+    /// successful refresh. Informational only; nothing reads it yet.
     #[allow(dead_code)]
     pub detected_engine: Option<Engine>,
-    /// Wall-clock timestamp of the last successful refresh. Written by the
-    /// poller; not currently surfaced but kept for a future
-    /// "models_age_ms"-style staleness signal.
+    /// When the last successful refresh happened. Not read yet.
     #[allow(dead_code)]
     pub fetched_at: Option<Instant>,
 }
 
-/// Sliding-window samples of `completions_total` per worker. Used to derive
-/// `completion_rate_per_sec` as a slope across the window rather than from a
-/// single 1-tick delta — the latter reads `0` for most ticks under low load
-/// (the counter only ticks up when a request finishes) and produces a
-/// flickering "rate / no rate" display in the dashboard.
+/// Sliding-window samples of `completions_total` per worker, for
+/// `completion_rate_per_sec`.
 #[derive(Clone, Debug, Default)]
 struct CompletionHistory {
     /// `(scraped_at, completions_total)` from each successful scrape. Bounded
-    /// by both count and age — see `COMPLETION_RATE_WINDOW`.
+    /// by both count and age; see `COMPLETION_RATE_WINDOW`.
     samples: std::collections::VecDeque<(Instant, u64)>,
 }
 
-/// Per-worker sliding-window history of vLLM's prefix-cache counters.
-/// Parallel to `CompletionHistory` — same eviction policy, same
-/// `COMPLETION_RATE_WINDOW`, but tracks TWO counters (hits + queries)
-/// per sample so the derived hit rate is `Δhits / Δqueries` over the
-/// window.
+/// Per-worker sliding-window history of vLLM's prefix-cache counters, like
+/// `CompletionHistory`, so the hit rate is `Δhits / Δqueries` over the window.
 #[derive(Clone, Debug, Default)]
 struct PrefixCacheHistory {
     /// `(scraped_at, hits_total, queries_total)` from each scrape that
-    /// found the vLLM counter pair. Empty for SGLang workers and
-    /// pre-0.6 vLLM (those populate the rate via a different code path
-    /// or leave it at 0).
+    /// found the vLLM counter pair. Empty for SGLang and pre-0.6 vLLM.
     samples: std::collections::VecDeque<(Instant, u64, u64)>,
 }
 
-/// Per-worker sliding-window history of the two SATURATION gauges.
+/// Per-worker sliding-window history of the two saturation gauges, which are
+/// averaged rather than differentiated.
 ///
-/// Third sibling of `CompletionHistory` / `PrefixCacheHistory`, and different
-/// in kind: those derive a rate from counter deltas, this averages a gauge.
-/// A gauge needs the window for a different reason — not to avoid reading zero
-/// between sparse events, but because `num_requests_waiting` is BURSTY. It
-/// spikes for a few seconds and clears, so a policy thresholding the
-/// instantaneous value drops a worker on a transient that has already passed,
-/// and (under `onEmpty: Reject`) can refuse a request over a blip. Averaging
-/// makes the threshold mean "sustained pressure".
-///
-/// `kv_cache_usage` is already smooth and barely changes under averaging; it
-/// shares the window for consistency, so the two attributes a policy compares
-/// are measured the same way.
+/// `num_requests_waiting` is bursty, so a policy threshold on the
+/// instantaneous value would react to transients; the mean makes it mean
+/// sustained pressure. `kv_cache_usage` shares the window for consistency.
 #[derive(Clone, Debug, Default)]
 struct GaugeHistory {
-    /// `(scraped_at, waiting, kv_cache_usage)`. Same eviction policy and the
-    /// same `COMPLETION_RATE_WINDOW` as its siblings — one source of truth for
-    /// the window length.
+    /// `(scraped_at, waiting, kv_cache_usage)`, over `COMPLETION_RATE_WINDOW`.
     samples: std::collections::VecDeque<(Instant, u32, f32)>,
 }
 
-/// Sliding window over which `completion_rate_per_sec` is averaged. 30s is a
-/// reasonable compromise: long enough that 1 req every 10s registers (~0.1
-/// req/s) instead of "0 most ticks, 1 spike, 0 again," and short enough that
-/// the displayed rate still tracks real load changes within ~tens of seconds.
+/// Sliding window for the windowed rates and means. Long enough that 1 req
+/// every 10s registers (~0.1 req/s), short enough to track load changes.
 const COMPLETION_RATE_WINDOW: Duration = Duration::from_secs(30);
 
 pub struct MetricsRegistry {
     by_worker: DashMap<u64, MetricsSample>,
-    /// Sibling map for `/v1/models` data. Refreshed on a slower cadence than
-    /// `by_worker` (~30s vs 1s). Cloned out on read so the gRPC handler
-    /// doesn't hold a DashMap ref across an await.
+    /// `/v1/models` data, refreshed less often than `by_worker`. Cloned out on
+    /// read so no DashMap ref is held across an await.
     models_by_worker: DashMap<u64, ModelsInfo>,
-    /// Sibling map of completion-counter history for sliding-window rate.
-    /// Updated by the poller; read internally to compute the rate before
-    /// the new sample is inserted into `by_worker`.
+    /// Completion-counter history, for the windowed rate.
     completion_history: DashMap<u64, CompletionHistory>,
-    /// Sibling map of vLLM prefix-cache counter history. Used to derive
-    /// the windowed `prefix_cache_hit_rate` for engines that publish
-    /// the counter pair. SGLang's gauge skips this map entirely.
+    /// vLLM prefix-cache counter history, for the windowed hit rate.
     prefix_cache_history: DashMap<u64, PrefixCacheHistory>,
-    /// Sibling map of the saturation gauges' history, for the windowed means
-    /// the policy engine thresholds on.
+    /// Saturation gauge history, for the windowed means.
     gauge_history: DashMap<u64, GaugeHistory>,
     startup: Instant,
 }
@@ -278,10 +222,9 @@ impl MetricsRegistry {
     }
 
     /// Push the latest scrape sample into the per-worker history and return
-    /// the windowed `completion_rate_per_sec`. Slope is taken over the actual
-    /// time range present in the window — so a single sample yields 0.0 (we
-    /// don't have two points to differentiate), two samples spaced 30s apart
-    /// yield `(c2 - c1) / 30`, and so on.
+    /// the windowed `completion_rate_per_sec`: the slope over the samples in
+    /// the window, so a single sample yields 0.0 and two samples 30s apart
+    /// yield `(c2 - c1) / 30`.
     fn record_and_compute_rate(&self, worker_id_num: u64, now: Instant, counter: u64) -> f32 {
         let mut entry = self.completion_history.entry(worker_id_num).or_default();
         let hist = entry.value_mut();
@@ -303,19 +246,14 @@ impl MetricsRegistry {
         if dt <= 0.0 {
             return 0.0;
         }
-        // saturating_sub guards against engine restarts (counter resets);
-        // we just see a one-window dip toward zero, which is fine.
+        // saturating_sub handles counter resets on engine restart.
         let delta = c1.saturating_sub(c0);
         (delta as f64 / dt) as f32
     }
 
     /// Push the latest scrape into the per-worker prefix-cache history
-    /// and return the windowed hit rate. Slope-over-slope: `Δhits /
-    /// Δqueries` across whatever samples are present in the window.
-    /// `0.0` until we have at least two samples, or when no queries
-    /// occurred in the window (`Δqueries == 0`). Same window /
-    /// eviction policy as `record_and_compute_rate` — single source
-    /// of truth for the sliding-window length.
+    /// and return the windowed hit rate, `Δhits / Δqueries`. `0.0` until there
+    /// are two samples, or when no queries occurred in the window.
     fn record_and_compute_hit_rate(
         &self,
         worker_id_num: u64,
@@ -342,25 +280,18 @@ impl MetricsRegistry {
         if dq == 0 {
             return 0.0;
         }
-        // Clamp to [0, 1] — defensive against counter quirks (e.g. a
-        // hits-without-corresponding-queries metric bug).
+        // Clamp to [0, 1] against counter quirks.
         ((dh as f64 / dq as f64) as f32).clamp(0.0, 1.0)
     }
 
     /// Push this scrape's saturation gauges into the per-worker history and
     /// return their means over the window.
     ///
-    /// A MEAN, deliberately, not a max: a max would pin the value at the peak
-    /// for the whole window, so one blip would extend an exclusion for 30s
-    /// rather than damp it — the opposite of the point. Not a p50 either,
-    /// which would erase a spike present for under half the window even when
-    /// it is real.
+    /// A mean rather than a max (which would extend a blip across the
+    /// window) or a median (which would erase a real but short spike).
     ///
-    /// Unlike its rate-computing siblings, a single sample is already a valid
-    /// answer (the mean of one value), so there is no two-sample floor and no
-    /// `0.0` warm-up. That matters: a freshly discovered worker would
-    /// otherwise read "no queue, no cache pressure" for its first tick
-    /// regardless of the truth.
+    /// A single sample is a valid mean, so there is no `0.0` warm-up that
+    /// would make a new worker look idle.
     fn record_and_compute_means(
         &self,
         worker_id_num: u64,
@@ -389,16 +320,13 @@ impl MetricsRegistry {
     }
 
     /// The last successful scrape, or `None` if this worker has never been
-    /// scraped. A sample is stored only on success, so absence means "nothing
-    /// known" — which [`Self::latest`] flattens into an all-zero sample that
-    /// reads as an idle worker with an empty cache. Anything that decides on
-    /// these values, rather than displaying them, wants this instead.
+    /// scraped. Unlike [`Self::latest`], which returns an all-zero (idle)
+    /// sample, so use this for decisions.
     pub fn sample(&self, worker_id_num: u64) -> Option<MetricsSample> {
         self.by_worker.get(&worker_id_num).map(|e| *e.value())
     }
 
-    /// Record `sample` as this worker's latest scrape. Test-only: in production
-    /// a sample arrives only through the poller, after a successful scrape.
+    /// Record `sample` as this worker's latest scrape. Test-only.
     #[cfg(test)]
     pub(crate) fn record_sample_for_test(&self, worker_id_num: u64, sample: MetricsSample) {
         self.by_worker.insert(worker_id_num, sample);
@@ -414,10 +342,8 @@ impl MetricsRegistry {
             .unwrap_or_default()
     }
 
-    /// Drop all per-worker state for a removed worker. Called by the
-    /// coordinator on a `WorkerChange::Removed` event so the sibling maps
-    /// don't accumulate stale entries across pod churn.
-    // Wired up in Phase C; static-mode startup never removes workers.
+    /// Drop all per-worker state for a removed worker, so a replacement
+    /// doesn't inherit its history.
     #[allow(dead_code)]
     pub fn forget(&self, worker_id_num: u64) {
         self.by_worker.remove(&worker_id_num);
@@ -429,8 +355,7 @@ impl MetricsRegistry {
 
     /// Milliseconds since the last successful scrape for this worker. If the
     /// worker has never been scraped (no `metrics_url`, or every attempt has
-    /// failed), returns the time elapsed since kinference started — i.e. a
-    /// steadily growing untrustworthy signal.
+    /// failed), returns the time elapsed since kinference started.
     pub fn age_ms_for(&self, worker_id_num: u64) -> u64 {
         let now = Instant::now();
         match self
@@ -444,16 +369,11 @@ impl MetricsRegistry {
     }
 }
 
-/// Kick a one-shot `/v1/models` fetch as soon as a worker is registered,
-/// in parallel with the recurring metrics poller. Without this, a
-/// freshly-Added worker isn't routable on its live model set until the
-/// next periodic refresh tick (default ~30s) — the cold window is mostly
-/// wasted time. The warmup pushes the served-model set into the reactive
-/// `WorkerRegistry::by_model` index and (best-effort) records the
-/// detected engine on the `WorkerEntry`.
+/// Kick a one-shot `/v1/models` fetch as soon as a worker is registered, so
+/// it is routable before the poller's first periodic refresh. Records the
+/// served models and the detected engine.
 ///
-/// Fire-and-forget: any failure here just means we wait for the periodic
-/// poller's next tick. No retries; we WARN once if the fetch errors.
+/// Fire-and-forget: on failure, the periodic refresh catches up.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_one_shot_warmup(
     cfg: WorkerConfig,
@@ -496,11 +416,8 @@ pub fn spawn_one_shot_warmup(
                     "warmup: /v1/models scrape succeeded"
                 );
                 match workers.set_served_models(cfg.worker_id_num, &names) {
-                    // Widened/Narrowed are ROUTABLE outcomes, not faults: the
-                    // fleet gained or is mid-rollout on a model (a LoRA adapter,
-                    // typically). Index what this worker actually serves either
-                    // way — evicting here walked an adapter rollout pod by pod
-                    // and emptied the pool.
+                    // Widened/Narrowed are routable, e.g. a LoRA adapter
+                    // rollout: index what this worker serves rather than evict.
                     crate::workers::ServedModelsVerdict::Widened { added } => {
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
@@ -558,9 +475,8 @@ pub fn spawn_one_shot_warmup(
                 if let Some(eng) = detected_engine {
                     workers.set_engine(cfg.worker_id_num, eng);
                 }
-                // Trigger background tokenizer warmup for every served
-                // model. `get_or_load` is idempotent — repeated calls
-                // for the same model after first load are cache hits.
+                // Background tokenizer warmup for every served model;
+                // `get_or_load` is idempotent.
                 if let Some(local_reg) = local_tokenizer.as_ref() {
                     for name in &names {
                         let reg = local_reg.clone();
@@ -635,8 +551,7 @@ pub fn spawn_metrics_poller(
             }
         };
 
-        // Clamp to >= 1ms — `Duration::from_millis(0)` would spin
-        // the recv loop with no delay.
+        // At least 1ms, or the loop would spin.
         let poll_ms = poll_ms.max(1);
         let mut tick = tokio::time::interval(Duration::from_millis(poll_ms));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -644,30 +559,18 @@ pub fn spawn_metrics_poller(
         let mut first_scrape = true;
         let mut warned_about_label = false;
 
-        // Local view of which model_name to use as the /metrics label
-        // filter. Initialized from config (set in static mode, empty in K8s
-        // mode). Updated below from each /v1/models success: single-model
-        // workers get filtered by the discovered name; multi-LoRA workers
-        // leave it empty so the scraper aggregates across all loaded
-        // models. Stays in sync without needing to read WorkerRegistry on
-        // the hot path.
+        // The model_name label filter for /metrics: from config at first,
+        // then from each /v1/models refresh (empty for multi-model workers,
+        // which aggregates across models).
         let mut current_model_name: String = cfg.model_name.clone();
 
-        // /v1/models refresh cadence, expressed as "every N metrics
-        // ticks." Refresh on n=0 (first tick) and every N thereafter.
-        // models_refresh_secs is in seconds; convert to the poll-tick
-        // domain (one tick = poll_ms milliseconds).
+        // /v1/models refresh cadence in poll ticks: on the first tick and
+        // every N after.
         let refresh_every: u64 = ((models_refresh_secs * 1000) / poll_ms).max(1);
         let mut n: u64 = 0;
         let mut warned_about_models = false;
-        // Models this poller has already attempted a tokenizer warmup for.
-        // The recurring `/v1/models` refresh exists to catch models that
-        // appear AFTER registration (LoRA hot-load), so we warm each name
-        // at most once. Without this, a model whose tokenizer can't load
-        // (not on a mount, un-fetchable Hub id) would re-attempt — and
-        // re-warn — the failing load on every refresh. Score requests
-        // still load on demand + fall back to HTTP, so skipping the
-        // recurring re-attempt loses nothing.
+        // Models already warmed, so a tokenizer that can't load isn't retried
+        // (and re-warned) on every refresh. Requests still load on demand.
         let mut warmup_attempted: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
@@ -685,23 +588,17 @@ pub fn spawn_metrics_poller(
                 _ = tick.tick() => {}
             }
 
-            // /v1/models refresh — only if http_url is set, only every N
-            // ticks. Sequential within the same task; bounded by reqwest
-            // timeout so a slow response can't stall the metrics tick more
-            // than 3s.
+            // /v1/models refresh, if http_url is set, every N ticks. Bounded by
+            // the client timeout.
             if let Some(http_url) = cfg.http_url.as_deref()
                 && n.is_multiple_of(refresh_every)
             {
                 match fetch_models(&client, http_url).await {
                     Ok((models, detected_engine)) => {
-                        // Push the served-model set into the reactive
-                        // by_model index so requests for these names
-                        // route here. Also forward the detected
-                        // engine for display.
+                        // Index the served models so requests route here.
                         let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
                         match workers.set_served_models(cfg.worker_id_num, &names) {
-                            // See the warmup path: a changed model set is
-                            // only fatal when it CONFLICTS.
+                            // As in the warmup path: only a conflict is fatal.
                             crate::workers::ServedModelsVerdict::Widened { added } => {
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
@@ -762,13 +659,8 @@ pub fn spawn_metrics_poller(
                         if let Some(eng) = detected_engine {
                             workers.set_engine(cfg.worker_id_num, eng);
                         }
-                        // Background tokenizer warmup for models we
-                        // haven't tried yet — catches models that
-                        // appear after registration (LoRA hot-load).
-                        // Each name is attempted at most once per
-                        // poller (see `warmup_attempted`), so a model
-                        // whose tokenizer can't load doesn't re-warn
-                        // on every refresh.
+                        // Tokenizer warmup for newly seen models, e.g. a
+                        // hot-loaded LoRA adapter.
                         if let Some(local_reg) = local_tokenizer.as_ref() {
                             for name in &names {
                                 if !warmup_attempted.insert(name.clone()) {
@@ -788,10 +680,8 @@ pub fn spawn_metrics_poller(
                                 });
                             }
                         }
-                        // Refresh the local /metrics filter. Single
-                        // model: filter by that name (precise). Zero
-                        // models (engine still loading) or multi-LoRA:
-                        // empty filter, take any sample.
+                        // Single model: filter by its name. Otherwise no
+                        // filter.
                         current_model_name = if names.len() == 1 {
                             names[0].clone()
                         } else {
@@ -834,10 +724,7 @@ pub fn spawn_metrics_poller(
             {
                 Ok(mut sample) => {
                     first_scrape = false;
-                    // Push this scrape into the per-worker history and read
-                    // back the windowed rate (slope across up to the last
-                    // 30s of samples). Smoother than a 1-tick delta and
-                    // doesn't flicker to 0 between sparse completions.
+                    // Record this scrape and read back the windowed values.
                     if let Some(now) = sample.scraped_at {
                         let (qm, km) = registry.record_and_compute_means(
                             cfg.worker_id_num,
@@ -852,14 +739,9 @@ pub fn spawn_metrics_poller(
                             now,
                             sample.completions_total,
                         );
-                        // If the engine published the vLLM counter pair
-                        // (queries > 0), derive the windowed hit rate
-                        // from them — overriding any SGLang gauge value
-                        // scrape_once may have stamped onto the sample.
-                        // Counters take precedence because they're
-                        // authoritative within our chosen 30s window;
-                        // the gauge's averaging is engine-internal and
-                        // not necessarily aligned.
+                        // The vLLM counter pair, when present, takes
+                        // precedence over a gauge value, since it uses our
+                        // window.
                         if sample.prefix_cache_queries_total > 0 {
                             sample.prefix_cache_hit_rate = registry.record_and_compute_hit_rate(
                                 cfg.worker_id_num,
@@ -872,14 +754,7 @@ pub fn spawn_metrics_poller(
                     registry.by_worker.insert(cfg.worker_id_num, sample);
                 }
                 Err(err) => {
-                    // `{err:#}` (anyhow alternate Display) prints the
-                    // full cause chain on one line, e.g.
-                    //   GET http://...: error sending request for url:
-                    //     connection reset by peer
-                    // The cause (timeout / refused / reset / DNS) is
-                    // the load-bearing part for diagnosing port-forward
-                    // hiccups; the bare context "GET <url>" alone is
-                    // useless.
+                    // `{err:#}` prints the full cause chain on one line.
                     tracing::warn!(
                         worker_id = cfg.worker_id_str,
                         error = %format_args!("{err:#}"),
@@ -909,9 +784,7 @@ async fn scrape_once(
         anyhow::bail!("HTTP {}", resp.status());
     }
     let body = resp.text().await.context("read body")?;
-    // Workaround for prometheus-parse rejecting colons in metric names. Both
-    // engines historically use a colon prefix; v0.5.4+ SGLang already emits
-    // underscores so the second replace is a no-op there.
+    // prometheus-parse rejects colons in metric names.
     let body = body.replace("vllm:", "vllm_").replace("sglang:", "sglang_");
     let scrape = prometheus_parse::Scrape::parse(body.lines().map(|l| Ok(l.to_owned())))
         .context("parsing Prometheus body")?;
@@ -948,10 +821,8 @@ async fn scrape_once(
                 .iter()
                 .filter(|s| s.metric == *name)
                 .find(|s| match names.model_label {
-                    // Skip the label filter when we don't have a model_name
-                    // yet (typical in K8s mode before the first /v1/models
-                    // succeeds, or for multi-LoRA workers where we
-                    // intentionally aggregate across all loaded models).
+                    // No filter without a model_name (before the first
+                    // /v1/models refresh, or for multi-model workers).
                     Some(label) if !model_name.is_empty() => {
                         s.labels.get(label) == Some(model_name)
                     }
@@ -984,10 +855,7 @@ async fn scrape_once(
             let mut sum = 0.0;
             let mut found = false;
             for s in scrape.samples.iter().filter(|s| s.metric == *name) {
-                // Same "skip filter when model_name is unknown" semantics
-                // as the gauge picker above. For a multi-LoRA worker
-                // running with model_name empty, we sum across all loaded
-                // models — the right behavior for an aggregate counter.
+                // As above: no filter without a model_name.
                 if let Some(label) = names.model_label
                     && !model_name.is_empty()
                     && s.labels.get(label) != Some(model_name)
@@ -1012,23 +880,15 @@ async fn scrape_once(
     };
     let completions_total = pick_sum(names.completions).unwrap_or(0.0).max(0.0) as u64;
 
-    // Prefix-cache hit-rate inputs. vLLM (≥ 0.6) emits a counter pair;
-    // we read both and let the poller derive the windowed ratio. SGLang
-    // emits a single gauge `sglang:cache_hit_rate` that's already a
-    // 0..1 ratio — the poller reads that directly via the sample, no
-    // history needed. Either pair-of-counters OR the gauge is present;
-    // never both. `pick_sum` reuses the model_label filter and the
-    // multi-label aggregation we already need.
+    // Prefix-cache hit-rate inputs: vLLM (≥ 0.6) emits a counter pair, from
+    // which the poller derives the windowed ratio. SGLang's gauge is read
+    // below.
     let prefix_cache_hits_total = pick_sum(names.prefix_cache_hits).unwrap_or(0.0).max(0.0) as u64;
     let prefix_cache_queries_total =
         pick_sum(names.prefix_cache_queries).unwrap_or(0.0).max(0.0) as u64;
 
-    // Only warn about a model_name label mismatch when:
-    //  - the engine expects a model_name label at all (vLLM/SGLang do; some
-    //    label-less engines wouldn't),
-    //  - AND we have a filter to compare against (in K8s mode the filter
-    //    starts empty and gets populated by /v1/models; the empty-filter
-    //    path takes any sample and doesn't warrant a warning).
+    // Warn about a model_name label mismatch only when there is a filter to
+    // mismatch.
     if !*warned_about_label
         && names.model_label.is_some()
         && !model_name.is_empty()
@@ -1047,13 +907,8 @@ async fn scrape_once(
         *warned_about_label = true;
     }
 
-    // SGLang gauge fallback for the hit rate: a Gauge | Counter | Untyped
-    // match arm, so any future engine that publishes the rate directly Just
-    // Works.
-    // Read here so we can stamp it onto the sample; the poller may
-    // overwrite this with the windowed-counter rate if the vLLM
-    // counter pair was present (it takes precedence — counters are
-    // authoritative within the monitor's window choice).
+    // SGLang's hit-rate gauge. The poller overrides it with the windowed
+    // counter rate when the vLLM pair is present.
     let sglang_hit_rate_gauge = names
         .prefix_cache_hit_rate_gauge
         .iter()
@@ -1079,31 +934,22 @@ async fn scrape_once(
         swapped: swapped.unwrap_or(0.0).max(0.0) as u32,
         kv_cache_usage: kv_cache.unwrap_or(0.0).max(0.0) as f32,
         completions_total,
-        // Rate is computed by the poller from the delta against the previous
-        // sample; we leave it zero here.
+        // Filled in by the poller.
         completion_rate_per_sec: 0.0,
-        // Likewise the windowed means: a single scrape has no history to
-        // average over, so the poller fills these in from `gauge_history`
-        // once this sample joins it.
+        // Likewise the windowed means.
         waiting_mean: 0.0,
         kv_cache_usage_mean: 0.0,
         prefix_cache_hits_total,
         prefix_cache_queries_total,
-        // SGLang's already-derived rate. If the vLLM counter pair was
-        // also present (hits + queries > 0), the poller overwrites
-        // this with the windowed value computed from the history.
+        // SGLang's rate; the poller may override it (see above).
         prefix_cache_hit_rate: sglang_hit_rate_gauge,
         scraped_at: Some(Instant::now()),
     })
 }
 
-/// Fetch `/v1/models` from the engine's OpenAI-compat HTTP server and parse
-/// out `id` + `max_model_len` + `owned_by` per entry. Ignores unknown
-/// fields (created, permission, etc.) and tolerates missing
-/// `max_model_len` (`Option<u32>::None`).
-///
-/// `owned_by` is used to identify the engine (vLLM vs SGLang). All entries
-/// in a single response share the same owner — pick the first non-empty.
+/// Fetch `/v1/models` from the engine and parse `id`, `max_model_len` and
+/// `owned_by` per entry. `max_model_len` may be missing. The engine is taken
+/// from the first non-empty `owned_by`.
 async fn fetch_models(
     client: &reqwest::Client,
     http_url: &str,
