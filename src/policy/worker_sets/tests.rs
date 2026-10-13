@@ -57,9 +57,8 @@ fn a_complete_set_resolves_against_its_profile() {
     );
 }
 
-/// R13. Two same-named Services in different namespaces are different
-/// fleets; collapsing them into one pool merges their prefix models
-/// silently, and every request still succeeds while the routing is wrong.
+/// Same-named Services in different namespaces are different fleets, and
+/// must not be merged into one pool.
 #[test]
 fn same_named_sets_in_two_namespaces_stay_separate() {
     let (out, rejected) = desired_pools(
@@ -79,10 +78,8 @@ fn same_named_sets_in_two_namespaces_stay_separate() {
     assert_eq!(b.discovery.namespace.as_deref(), Some("b"));
 }
 
-/// The fix for an unknown profile is editing the ROUTER's TOML; for a
-/// missing one it is editing the CR. Different actions, so different
-/// reasons — and the unknown case lists what is defined, because it is
-/// almost always a typo.
+/// An unknown profile (fixed in the router's TOML) and a missing one (fixed
+/// in the CR) get different reasons. The unknown case lists what is defined.
 #[test]
 fn an_unknown_profile_is_rejected_and_lists_the_defined_ones() {
     let mut spec = full_spec();
@@ -103,10 +100,8 @@ fn an_unknown_profile_is_rejected_and_lists_the_defined_ones() {
     assert_eq!(rejected[0].reason.as_condition_reason(), "UnknownProfile");
 }
 
-/// The whole reason these fields are `Option` in Rust: an object missing
-/// them must be REJECTED individually. If it failed deserialization the
-/// whole list page would fail, and discovery would be down for every set in
-/// the namespace, not just this one.
+/// An object missing required fields is rejected individually rather than
+/// failing deserialization of the whole list page.
 #[test]
 fn a_set_missing_required_fields_is_rejected_without_taking_the_others_down() {
     let mut no_profile = full_spec();
@@ -146,21 +141,15 @@ fn a_set_missing_required_fields_is_rejected_without_taking_the_others_down() {
     );
 }
 
-/// The outage this closed, at the level the parser sees it.
-///
-/// `ModelAlias.name` was a bare `String`. When the schema changed under a
-/// running router the API server pruned the field it no longer declared,
-/// and because `watcher` deserializes list pages WHOLESALE, every worker set
-/// in the namespace failed as one page — discovery down until the binary
-/// caught up, on objects that were individually fine. It must PARSE.
+/// A model row without a `name` must still parse, since `watcher`
+/// deserializes list pages wholesale.
 #[test]
 fn a_models_row_missing_its_name_parses_rather_than_failing_the_page() {
     let spec: InferenceWorkerSetSpec = serde_json::from_value(serde_json::json!({
         "serviceRef": {"name": "vllm", "port": "http"},
         "profile": "h100",
         "kvBlockSize": 16,
-        // What pruning leaves behind when a schema drops the field a row was
-        // keyed on: the row survives, its identity does not.
+        // What the API server leaves after pruning an undeclared field.
         "models": [{"aliases": ["qwen-2.5"]}]
     }))
     .expect("must parse: failing here fails every set in the list page");
@@ -168,8 +157,7 @@ fn a_models_row_missing_its_name_parses_rather_than_failing_the_page() {
     assert!(spec.models[0].name.is_none());
 }
 
-/// ...and is then refused, because an alias mapped onto nothing is a routing
-/// lie: the name a client writes would silently resolve to no model.
+/// ...and is then refused, since its aliases would resolve to no model.
 #[test]
 fn a_models_row_missing_its_name_is_rejected() {
     let mut spec = full_spec();
@@ -187,8 +175,7 @@ fn a_models_row_missing_its_name_is_rejected() {
     assert_eq!(rejected[0].reason.as_condition_reason(), "ModelMissingName");
 }
 
-/// A row with a name and no aliases is the ordinary case and must survive —
-/// `aliases` is optional, and `name` alone is routable.
+/// A row with a name and no aliases is routable.
 #[test]
 fn a_models_row_with_no_aliases_is_fine() {
     let mut spec = full_spec();
@@ -205,10 +192,8 @@ fn a_models_row_with_no_aliases_is_fine() {
     assert_eq!(out.len(), 1);
 }
 
-/// The hole this closed: `KvEvents.port` was the one non-`Option` leaf in the
-/// spec, so `kvEvents: {}` failed the whole object — and `watcher`
-/// deserializes list pages WHOLESALE, so one such object took worker-set
-/// discovery down for the namespace. It must PARSE.
+/// `kvEvents: {}` must parse, since `watcher` deserializes list pages
+/// wholesale.
 #[test]
 fn an_empty_kv_events_block_parses_rather_than_failing_the_page() {
     let spec: InferenceWorkerSetSpec = serde_json::from_value(serde_json::json!({
@@ -222,9 +207,8 @@ fn an_empty_kv_events_block_parses_rather_than_failing_the_page() {
     assert!(spec.kv_events.unwrap().port.is_none(), "but says no port");
 }
 
-/// ...and is then refused, rather than read either silent way: connecting to
-/// a default socket that never speaks, or downgrading to "publishes nothing"
-/// and reporting a healthy pool with a permanently empty prefix model.
+/// ...and is then refused, rather than defaulted to a port or to "publishes
+/// nothing", either of which yields a pool with an empty prefix model.
 #[test]
 fn a_kv_events_block_with_no_port_is_rejected() {
     let mut spec = full_spec();
@@ -255,9 +239,7 @@ fn a_kv_events_block_with_no_port_is_rejected() {
 }
 
 /// End to end for the portless-`kvEvents` case: `desired_pools` refuses it,
-/// `rejection_index` projects the reason, and `bind` hands back `Incomplete`
-/// — the same shape as a provider missing its `backendRef`, because in both
-/// the object simply does not say enough to route to.
+/// `rejection_index` projects the reason, and `bind` returns `Incomplete`.
 #[test]
 fn a_portless_kv_events_block_binds_as_incomplete() {
     use crate::policy::crd::{Destination, InferencePool, InferencePoolSpec};
@@ -295,24 +277,23 @@ fn a_portless_kv_events_block_binds_as_incomplete() {
         &[],
         &[],
         &[],
-        // The pool map is what `desired_pools` actually built: empty.
+        // What `desired_pools` built: empty.
         &PoolIndex::new(),
         &rejection_index(&rejections),
     );
 
-    // On the pool: reported, not silently dropped.
+    // Reported on the pool.
     let p = idx.lookup("infra", "chat").unwrap();
     assert_eq!(p.unresolved.len(), 1);
     assert_eq!(p.unresolved[0].reason, UnresolvedReason::Incomplete);
 
-    // And on the set's own entry, which is where an operator looks.
+    // And on the set's own entry.
     let e = idx.worker_sets().next().unwrap();
     assert_eq!(e.bound.as_ref().err(), Some(&UnresolvedReason::Incomplete));
 }
 
-/// Omitting the block entirely stays legal — that is the supported way to say
-/// these engines publish nothing, and it must not be confused with the case
-/// above.
+/// Omitting the block entirely is legal: it says these engines publish
+/// nothing.
 #[test]
 fn an_omitted_kv_events_block_is_not_a_rejection() {
     let mut spec = full_spec();
@@ -356,9 +337,8 @@ fn declared_ports_reach_discovery_by_name_or_number() {
     assert_eq!(ports.zmq, Some(PortRef::Name("kv-pub".into())));
 }
 
-/// Unset ports must stay unset rather than becoming a number, so discovery
-/// keeps its by-name-then-default chain — which is what makes an ordinary
-/// vLLM Service work with no port fields at all.
+/// Unset ports stay unset, so discovery falls back to port names and then
+/// defaults.
 #[test]
 fn unset_ports_leave_the_conventional_resolution_alone() {
     let mut spec = full_spec();
@@ -378,10 +358,9 @@ fn unset_ports_leave_the_conventional_resolution_alone() {
     assert!(!ports.kv_events_declared_absent);
 }
 
-/// An absent `kvEvents` is a DECLARATION — these engines don't publish —
-/// not a gap to fill with a default. Connecting anyway would look healthy
-/// forever, because ZMQ `connect` always succeeds: the socket would sit
-/// silent and the worker would never finish its initial sync.
+/// An absent `kvEvents` declares that these engines don't publish, rather
+/// than falling back to a default port. ZMQ `connect` always succeeds, so a
+/// silent socket would go unnoticed.
 #[test]
 fn an_absent_kv_events_block_is_honored_rather_than_defaulted() {
     let (out, _) = desired_pools(
@@ -397,9 +376,7 @@ fn an_absent_kv_events_block_is_honored_rather_than_defaulted() {
 #[test]
 fn model_discovery_sets_the_interval_and_the_static_list() {
     let mut spec = full_spec();
-    // Two upstream models sharing one alias — the interchangeable case, which
-    // under the new shape is two rows with distinct `name`s rather than two
-    // rows with a duplicated one.
+    // Two upstream models sharing one alias.
     spec.models = vec![
         crate::policy::crd::ModelAlias {
             name: Some("meta-llama/Llama-3.3-70B-Instruct".into()),
@@ -434,8 +411,7 @@ fn model_discovery_sets_the_interval_and_the_static_list() {
     );
 }
 
-/// Endpoint mode is the default and must not produce a static list, or the
-/// pool would stop discovering models it was meant to poll for.
+/// Endpoint mode is the default and produces no static list.
 #[test]
 fn endpoint_mode_leaves_discovery_on() {
     let mut spec = full_spec();
@@ -448,8 +424,8 @@ fn endpoint_mode_leaves_discovery_on() {
     assert_eq!(out.values().next().unwrap().static_models, None);
 }
 
-/// A bad interval is a tuning knob gone wrong, not a reason to refuse to
-/// route: fall back to the fleet default rather than rejecting the set.
+/// A bad interval falls back to the fleet default rather than rejecting the
+/// set.
 #[test]
 fn an_unparseable_interval_falls_back_instead_of_rejecting() {
     let mut spec = full_spec();
@@ -466,8 +442,7 @@ fn an_unparseable_interval_falls_back_instead_of_rejecting() {
     assert_eq!(out.values().next().unwrap().models_refresh_secs, None);
 }
 
-/// A port number that cannot be a port must not be truncated into a
-/// different, valid-looking one.
+/// An out-of-range port number is dropped, not truncated.
 #[test]
 fn an_out_of_range_port_is_dropped_not_truncated() {
     let mut spec = full_spec();
@@ -480,9 +455,8 @@ fn an_out_of_range_port_is_dropped_not_truncated() {
     assert_eq!(out.values().next().unwrap().discovery.ports.metrics, None);
 }
 
-/// Order-independence: the desired set must not depend on the order the
-/// watch delivered objects, or two replicas build differently-ordered
-/// fleets and rank tied candidates differently.
+/// The desired set doesn't depend on the order the watch delivered objects
+/// in.
 #[test]
 fn the_desired_set_is_order_independent() {
     let forward = desired_pools(
@@ -507,11 +481,7 @@ fn the_desired_set_is_order_independent() {
     );
 }
 
-// --- watch → reconcile, driven against hand-seeded reflector stores. ---
-//
-// Same approach as `policy::store`'s tests and `discovery::kubernetes`'s:
-// a `reflector::Store` is populated by hand, so the interesting behavior is
-// exercised without a cluster or an HTTP mock.
+// --- watch to reconcile, against hand-seeded reflector stores ---
 
 fn watcher_with(
     sets: &[InferenceWorkerSet],
@@ -571,15 +541,8 @@ async fn a_listed_store_materializes_its_sets() {
     assert_eq!(registry.snapshot().iter().next().unwrap().name, "infra/a");
 }
 
-/// The gate, at pool granularity. `desired_pools` is TOTAL, so reconciling
-/// against a store that has not finished its initial list retires EVERY
-/// pool in the fleet — and then rebuilds them a moment later, having thrown
-/// away every prefix cache in between. A watch reconnect must be invisible,
-/// not a fleet-wide cache flush.
-///
-/// This test asserts the consequence directly: an empty store, reconciled,
-/// really does retract everything. The production guard is that
-/// `run_once` does not call this until it has seen `InitDone`.
+/// `desired_pools` is total, so reconciling an empty store retracts every
+/// pool. This is why `run_once` doesn't reconcile before `InitDone`.
 #[tokio::test]
 async fn reconciling_against_an_empty_store_would_retract_every_pool() {
     let (mut w, registry) = watcher_with(
@@ -620,8 +583,7 @@ async fn one_rejected_set_does_not_disturb_the_others() {
     );
 }
 
-/// Re-reconciling an unchanged store must be a no-op, or every watch event
-/// on an unrelated object would churn the whole fleet.
+/// Re-reconciling an unchanged store is a no-op.
 #[tokio::test]
 async fn re_reconciling_an_unchanged_store_keeps_the_same_pools() {
     let (mut w, registry) = watcher_with(&[iws("infra", "a", full_spec())], vec![profile("h100")]);

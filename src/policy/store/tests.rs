@@ -1,5 +1,4 @@
-//! The watch side: event classification and the reflector stores that feed
-//! `resolve`. Resolution itself is tested in `resolve`'s own tests.
+//! Event classification and the reflector stores that feed `resolve`.
 use super::*;
 use crate::policy::crd::{Destination, InferencePoolSpec, InferenceWorkerSetSpec, ServiceRef};
 use crate::policy::resolve::RejectionIndex;
@@ -40,7 +39,7 @@ fn pool(name: &str, dests: Vec<Destination>) -> InferencePool {
     }
 }
 
-/// Prove the reflector-store path works end to end, not just `resolve`.
+/// The reflector-store path works end to end, not just `resolve`.
 #[test]
 fn seeding_a_reflector_store_feeds_resolve() {
     let (store, mut writer) = reflector::store::<InferenceWorkerSet>();
@@ -78,9 +77,8 @@ fn seeding_a_reflector_store_feeds_resolve() {
     );
 }
 
-/// `InitDone` is what promotes a fresh store from partial to whole. The run
-/// loop gates publishing on it, so misclassifying it would either publish a
-/// snapshot with every pool missing, or never publish at all.
+/// The run loop gates publishing on `InitDone`; misclassifying it would
+/// publish a snapshot missing every pool, or never publish.
 #[test]
 fn only_init_done_reports_listed() {
     let ev = |e: watcher::Event<InferencePool>| {
@@ -111,12 +109,6 @@ fn api_err(code: u16) -> kube::Error {
 }
 
 /// A missing CRD must not hold the publish gate shut.
-///
-/// Before this, an uninstalled optional CRD errored forever, its `listed`
-/// flag never flipped, and the all-kinds gate then blocked EVERY publish — so
-/// a cluster without the Gateway API CRDs silently had no policy routing at
-/// all, with only a repeating warning to say so. Two of the six watched kinds
-/// are genuinely optional, so it was a real configuration to fall into.
 #[test]
 fn a_404_on_the_initial_list_reads_as_an_empty_store() {
     assert!(crd_not_installed(&watcher::Error::InitialListFailed(
@@ -127,10 +119,7 @@ fn a_404_on_the_initial_list_reads_as_an_empty_store() {
     )));
 }
 
-/// Everything else stays a retry. A 403 is bad RBAC and a 500 is a bad
-/// moment; both are fixable without a manifest change and must NOT be read as
-/// "there are no objects" — for ReferenceGrant that would turn a permissions
-/// problem into a silently permissive one.
+/// Everything else is retried rather than read as "no objects".
 #[test]
 fn other_failures_are_still_transient() {
     for code in [401, 403, 409, 429, 500, 503] {

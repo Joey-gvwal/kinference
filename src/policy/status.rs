@@ -1,25 +1,16 @@
-//! The controller side: publishing `status` on the kinference.buoyant.io resources.
+//! Publishing `status` on the kinference.buoyant.io resources.
 //!
-//! kinference is the router-controller for these kinds, so it owns their status. That
-//! matters beyond observability: a conforming gateway **must not program a route
-//! until the referenced pool reports `Accepted=True`**, so nothing routes until
-//! this runs.
+//! A conforming gateway does not program a route until the referenced pool
+//! reports `Accepted=True`, so nothing routes until this runs.
 //!
-//! Two hazards shape the design.
+//! - We watch the objects we patch, so every write wakes our own watch. Status
+//!   is patched only when it differs from what we last wrote; that is what
+//!   keeps the loop from writing forever.
+//! - `lastTransitionTime` is reused while `(type, status, reason)` is unchanged,
+//!   so a rewrite doesn't look like a transition.
 //!
-//! 1. **Write amplification / self-triggering.** We watch the same objects we
-//!    patch, so an unconditional periodic write would wake our own watch, which
-//!    rebuilds the snapshot, which writes again — forever, at whatever the tick
-//!    rate is. The fix is comparing the desired status against what we last
-//!    wrote and patching only on a real change. That comparison is what makes
-//!    the loop terminate, not an optimization.
-//! 2. **Condition churn.** `lastTransitionTime` must only move when the
-//!    condition actually transitions. We reuse the previous timestamp whenever
-//!    `(type, status, reason)` is unchanged; otherwise every write would look
-//!    like a state change to anything watching.
-//!
-//! Status computation is pure over `(snapshot, PoolFacts)` so it is testable
-//! without a cluster; only the patching is async.
+//! Status computation is pure over `(snapshot, PoolFacts)`; only the patching
+//! is async.
 
 #![allow(dead_code)]
 
@@ -52,18 +43,13 @@ pub const CONTROLLER_NAME: &str = "kinference.buoyant.io/router";
 /// What one worker set's pool actually has right now, from the live registries.
 #[derive(Debug, Clone, Default)]
 pub struct PoolFacts {
-    /// Endpoints that passed the readiness gate (models resolved AND initial KV
-    /// sync done) — the same definition `/readyz` uses.
+    /// Endpoints that passed the readiness gate (models resolved and initial KV
+    /// sync done), as `/readyz` defines it.
     pub ready_endpoints: i64,
-    /// Endpoints kinference has actually decoded a KV cache event from.
-    ///
-    /// Counted independently of readiness, and it has to be: readiness keys on
-    /// the SUB socket reaching steady state, which a ZMQ `connect()` reports
-    /// even when nothing is publishing. So a set can be fully ready and
-    /// serving while its prefix model is empty — the exact condition
-    /// `status.kvEvents` exists to make visible.
+    /// Endpoints kinference has decoded a KV cache event from. Independent of
+    /// readiness, since a ZMQ `connect()` succeeds even when nothing publishes.
     pub event_endpoints: i64,
-    /// Discovered models, keyed by the UPSTREAM name the engine reports.
+    /// Discovered models, keyed by the upstream name the engine reports.
     pub models: Vec<ModelFact>,
 }
 
@@ -71,19 +57,16 @@ pub struct PoolFacts {
 pub struct ModelFact {
     pub upstream: String,
     pub ready_endpoints: i64,
-    /// Effective window across ready endpoints. A range, because a rollout that
-    /// changes `--max-model-len` leaves endpoints disagreeing.
+    /// Context window range across ready endpoints, which may disagree
+    /// mid-rollout.
     pub ctx_min: Option<i64>,
     pub ctx_max: Option<i64>,
 }
 
-/// Gather live facts for every pool. Cheap: one registry snapshot per pool plus
-/// a metrics lookup per worker.
+/// Gather live facts for every pool.
 ///
-/// Takes a slice rather than the registry so the caller decides WHEN the
-/// snapshot is taken. That matters: every fact in one status write must come
-/// from one view of the fleet, or a pool can be counted in `destinationCount`
-/// and missing from `models` in the same object.
+/// Takes a slice rather than the registry so that all facts in one status
+/// write come from the same pool snapshot.
 pub fn gather_facts(pools: &[Arc<Pool>], metrics: &MetricsRegistry) -> HashMap<PoolId, PoolFacts> {
     let mut out = HashMap::new();
     for pool in pools {
@@ -92,10 +75,8 @@ pub fn gather_facts(pools: &[Arc<Pool>], metrics: &MetricsRegistry) -> HashMap<P
         // upstream model -> (count, min, max)
         let mut per_model: BTreeMap<String, (i64, Option<i64>, Option<i64>)> = BTreeMap::new();
         for (num, entry) in pool.registry.iter_snapshot() {
-            // Counted before the readiness gate: an endpoint publishing events
-            // while still waiting on its first `/v1/models` scrape is genuinely
-            // subscribed, and reporting otherwise would look like a dead
-            // publisher during every rollout.
+            // Counted before the readiness gate, so endpoints awaiting their
+            // first `/v1/models` scrape don't look like dead publishers.
             if entry.kv_events_observed {
                 event_endpoints += 1;
             }
@@ -169,10 +150,9 @@ fn condition(
 
 /// Join the STATE tokens for a printer column.
 ///
-/// One string rather than a list because a `[*]` printer column renders only the
-/// first array element, so a list loses every token after the first with no
-/// trace. `primary` is always present, which is what keeps a blank column
-/// meaning "no status was written at all" rather than "nothing to report".
+/// One string because a `[*]` printer column renders only the first array
+/// element. `primary` is always present, so a blank column means no status was
+/// written.
 fn state(primary: &str, qualifiers: &[(bool, &str)]) -> Option<String> {
     let mut out = String::from(primary);
     for (present, tok) in qualifiers {
@@ -194,19 +174,15 @@ pub fn desired_pool_status(
     facts: &HashMap<PoolId, PoolFacts>,
     previous: Option<&InferencePoolStatus>,
 ) -> InferencePoolStatus {
-    // Aggregate what this route can actually reach, across destinations. This
-    // is the field to check first when debugging, and no single worker set can
-    // answer it.
-    //
-    // Value is (destinations serving the model, min context window, max
-    // context window); the windows stay `None` when no destination declares one.
+    // What this pool can reach, across destinations: (destinations serving the
+    // model, min context window, max context window). The windows stay `None`
+    // when no destination declares one.
     type ModelAgg = (Vec<String>, Option<i64>, Option<i64>);
     let mut by_model: BTreeMap<String, ModelAgg> = BTreeMap::new();
     for dest in &resolved.destinations {
-        // A provider reports what it DECLARES rather than what it was observed
-        // to serve — there is nothing to scrape. That makes this field the one
-        // place a canonical-name mismatch between a provider and a worker set
-        // becomes visible, since nothing validates that they agree.
+        // A provider reports what it declares, since there is nothing to
+        // scrape. This is where a model-name mismatch between a provider and a
+        // worker set becomes visible.
         if let Some(prov) = dest.as_provider() {
             for m in &prov.models {
                 let (Some(name), Some(window)) = (m.name.clone(), m.context_window) else {
@@ -238,16 +214,9 @@ pub fn desired_pool_status(
             continue;
         };
         for m in &f.models {
-            // A pool answers "what can a client ask for", so it keys on the
-            // client-facing name — the opposite of the worker set, which reports
-            // what it observed. Every alias gets its OWN entry rather than one
-            // entry under an arbitrarily-chosen alias: two names for one
-            // upstream model are two things a client can legitimately send, and
-            // collapsing them hides one. `servedBy` and the context window
-            // duplicate across them, which is accurate — it is the same fleet.
-            //
-            // An upstream with no alias falls back to itself, which is exactly
-            // the unaliased behavior.
+            // A pool reports what a client can ask for, so it keys on
+            // client-facing names: one entry per alias, or the upstream name
+            // when there are none.
             let names = {
                 let a = dest.aliases_for(&m.upstream);
                 if a.is_empty() {
@@ -283,16 +252,14 @@ pub fn desired_pool_status(
         })
         .collect();
 
-    // Two indirection hops, two ways to dangle: a destination that doesn't
-    // resolve, or a policyRef naming a missing policy.
+    // Either a destination didn't resolve, or the policyRef dangles.
     let refs_ok = resolved.unresolved.is_empty() && resolved.dangling_policy.is_none();
     let refs_reason = if !resolved.unresolved.is_empty() {
         "UnresolvedDestinations"
     } else {
         match &resolved.dangling_policy {
             Some(DanglingPolicy::NotFound { .. }) => "PolicyNotFound",
-            // Its own reason, because it sends the operator somewhere else: the
-            // policy may well exist, and the thing to fix is the ref.
+            // The policy may exist; the ref is what needs fixing.
             Some(DanglingPolicy::WrongKind { .. }) => "PolicyRefWrongKind",
             None => "ResolvedRefs",
         }
@@ -310,9 +277,7 @@ pub fn desired_pool_status(
         (None, n) => format!("{n} destination(s) did not resolve"),
     };
 
-    // Built once, then written BOTH top-level and per-parent: the pool-level
-    // answer and the per-parent handshake are the same judgement, and computing
-    // them twice would let them drift.
+    // Written both top-level and per parent.
     let accepted_ok = !resolved.destinations.is_empty();
     let accepted_reason = if accepted_ok {
         "Accepted"
@@ -338,9 +303,8 @@ pub fn desired_pool_status(
                 parent_ref: p.clone(),
                 controller_name: Some(CONTROLLER_NAME.to_string()),
                 conditions: vec![
-                    // Accepted reflects "the router has this pool and can route
-                    // it" — the handshake the gateway waits on. Unresolved
-                    // destinations don't retract it: a pool with one good
+                    // The handshake the gateway waits on. Unresolved
+                    // destinations don't retract it, since a pool with one good
                     // destination still routes.
                     condition(
                         "Accepted",
@@ -365,9 +329,8 @@ pub fn desired_pool_status(
 
     let own = previous.map(|s| s.conditions.as_slice());
     InferencePoolStatus {
-        // The two dangle reasons are qualifiers because the pool still ROUTES
-        // through either: an unresolved destination leaves the others usable,
-        // and a bad policyRef fails open to serve-as-asked.
+        // Qualifiers, since the pool still routes: other destinations stay
+        // usable, and a bad policyRef fails open.
         state: state(
             accepted_reason,
             &[
@@ -423,10 +386,8 @@ pub fn desired_pool_status(
 
 /// Status for a worker set the router refused to materialize.
 ///
-/// Everything derived from a pool is cleared, not omitted: this object may have
-/// been healthy a moment ago, and leaving a stale `ready: 3` next to
-/// `Accepted=False` is worse than saying nothing — it reads as "still serving,
-/// just unhappy" when in fact no traffic can reach it.
+/// Everything derived from a pool is cleared rather than omitted, so stale
+/// counts from before the rejection don't linger.
 pub fn rejected_worker_set_status(
     reason: &super::rejection::RejectReason,
     referenced_by: &[String],
@@ -434,14 +395,12 @@ pub fn rejected_worker_set_status(
 ) -> InferenceWorkerSetStatus {
     let prev = previous.map(|s| s.conditions.as_slice());
     InferenceWorkerSetStatus {
-        // The rejection IS the verdict, so it leads. No `NotReady` qualifier —
-        // a refused set has no endpoints by construction, and saying so twice
-        // would read as two problems.
+        // No `NotReady` qualifier: a refused set has no endpoints by
+        // construction.
         state: state(reason.as_condition_reason(), &[]),
         models: Vec::new(),
-        // NOT cleared with the rest. Who names this set is a fact about the
-        // POOLS, unaffected by this object being broken — and it is what tells
-        // an operator which pool just lost a destination.
+        // Kept: it comes from the pools, and shows which pool lost a
+        // destination.
         referenced_by: referenced_by.to_vec(),
         endpoints: Some(EndpointCounts { ready: Some(0) }),
         kv_events: None,
@@ -468,21 +427,12 @@ pub fn rejected_worker_set_status(
 
 /// Desired `InferenceProvider` status.
 ///
-/// Everything here comes from the caller. That is not a shortcut — it is what the
-/// split means: kinference never dials the vendor, never reads the `GatewayBackend`,
-/// and holds no credential, so a provider's own object can only say what it has
-/// been told.
+/// Health comes entirely from the caller's reports: kinference never dials the
+/// vendor, reads the `GatewayBackend`, or holds a credential.
 ///
-/// The two conditions are deliberately different questions, and which one fires
-/// decides where an operator goes next:
-///
-/// - `ResolvedRefs=False` means **this object is wrong** — a `backendRef` that
-///   does not resolve, or credentials the vendor rejected. Go edit a manifest.
-/// - `Ready=False` means **the far end is unwell** — 5xx, or no response. Nothing
-///   here to fix.
-///
-/// Getting that backwards wastes real time: sending someone to re-check a Secret
-/// during a vendor outage, or leaving a typo looking like somebody else's problem.
+/// - `ResolvedRefs=False`: the configuration is wrong (a `backendRef` that
+///   doesn't resolve, or rejected credentials).
+/// - `Ready=False`: the vendor is failing (5xx, or no response).
 pub fn desired_provider_status(
     health: &ProviderHealth,
     previous: Option<&InferenceProviderStatus>,
@@ -510,10 +460,8 @@ pub fn desired_provider_status(
             None,
             find(prev, "ResolvedRefs"),
         ),
-        // True is the honest answer and a weak one: it means the
-        // InferenceProvider is well-formed and permitted to name its backend,
-        // NOT that the backend exists. Nothing kinference can see distinguishes the
-        // two, which is exactly why the caller's report is load-bearing.
+        // Only means the ref is well-formed and permitted, not that the backend
+        // exists; kinference can't see that.
         None => condition(
             "ResolvedRefs",
             true,
@@ -540,8 +488,7 @@ pub fn desired_provider_status(
             find(prev, "Ready"),
         )
     } else if let Some((_, detail)) = upstream_error {
-        // Not suppressed, so it is still serving — but a recent upstream error is
-        // worth surfacing rather than hiding behind a bare `Ready=True`.
+        // Not suppressed, so still serving, but surface the error.
         condition(
             "Ready",
             true,
@@ -561,14 +508,8 @@ pub fn desired_provider_status(
         )
     };
 
-    // Written on the HEALTHY path too, not only by `rejected_provider_status`.
-    // Omitting it here did not leave a stale `Accepted=False` behind — status is
-    // a merge patch and `conditions` is replaced wholesale — it did something
-    // quieter and worse: a provider the operator FIXED lost the condition
-    // entirely instead of flipping to True, and a provider that was never broken
-    // never had one. So the question "is this object admitted" had no answer for
-    // exactly the providers that were fine, which is the same blank-status shape
-    // that hid an unattached policy and an unreferenced worker set.
+    // Written on the healthy path too, so a fixed provider flips to True
+    // instead of losing the condition.
     let accepted = condition(
         "Accepted",
         true,
@@ -579,9 +520,8 @@ pub fn desired_provider_status(
     );
 
     InferenceProviderStatus {
-        // `Suppressed` is the one an operator needs at a glance: the provider is
-        // well-formed and still producing NO candidates. The backend tokens come
-        // from the caller's reports, which is the only channel that can see them.
+        // `Suppressed`: well-formed but producing no candidates. The backend
+        // tokens come from the caller's reports.
         state: state(
             "Accepted",
             &[
@@ -596,20 +536,15 @@ pub fn desired_provider_status(
                 (health.suppressed, "Suppressed"),
             ],
         ),
-        // `Accepted` first, matching every other kind: it is the condition a
-        // printer column reads, and the one an operator checks before the rest.
+        // `Accepted` first, as in every other kind.
         conditions: vec![accepted, refs, ready],
     }
 }
 
-/// Desired `InferenceProvider` status for one kinference REFUSED.
+/// Desired `InferenceProvider` status for one kinference refused.
 ///
-/// `observed` is cleared rather than left stale: a provider producing no
-/// candidates has no live latency, and leaving the last p95 in place would let a
-/// refused destination keep advertising a figure a policy could rank on.
-///
-/// `Accepted=False` rather than `ResolvedRefs=False` — nothing was resolved far
-/// enough to have a ref problem. The spec itself is the thing to fix.
+/// `Accepted=False` rather than `ResolvedRefs=False`: the spec itself is what
+/// needs fixing.
 pub fn rejected_provider_status(
     reason: super::resolve::UnresolvedReason,
     previous: Option<&InferenceProviderStatus>,
@@ -672,9 +607,7 @@ pub fn desired_worker_set_status(
         .models
         .iter()
         .map(|m| WorkerSetModelStatus {
-            // Keyed on what the engines actually reported. Aliases hang off it
-            // rather than replacing it, so an undeclared model still reports
-            // cleanly and a multi-alias one loses nothing.
+            // Keyed on what the engines reported, with aliases alongside.
             upstream_name: m.upstream.clone(),
             aliases: dest.aliases_for(&m.upstream),
             ready_endpoints: Some(m.ready_endpoints),
@@ -685,16 +618,11 @@ pub fn desired_worker_set_status(
         })
         .collect();
     let prev = previous.map(|s| s.conditions.as_slice());
-    // Reaching here means the serviceRef resolved to a pool kinference watches; an
-    // unresolvable one never becomes a destination and is reported on the POOL
-    // instead, as `unresolvedDestinations`.
+    // An unresolvable serviceRef never gets here; it is reported on the pool
+    // as `unresolvedDestinations`.
     let ready = f.ready_endpoints > 0;
-    // Deliberately NOT folded into `Accepted`, the way an unreferenced POLICY is.
-    // A policy that no pool names does nothing at all, so `Accepted=False` is the
-    // truth there. A worker set that no pool names still serves every `Pick` that
-    // names no pool, so saying `Accepted=False` would report a set that is
-    // carrying traffic as one nothing can reach. Separate question, separate
-    // condition.
+    // Not folded into `Accepted` as for an unreferenced policy: a worker set no
+    // pool names still serves every `Pick` that names no pool.
     let referenced = !referenced_by.is_empty();
     let referenced_msg = if referenced {
         format!("destination of pool(s) {}", referenced_by.join(", "))
@@ -709,8 +637,8 @@ pub fn desired_worker_set_status(
         )
     };
     InferenceWorkerSetStatus {
-        // `Unreferenced` is a qualifier, not a verdict: the set is accepted and
-        // serving, it just has no pool-scoped policy over it.
+        // `Unreferenced` is a qualifier: the set is accepted and serving, just
+        // without a pool-scoped policy over it.
         state: state(
             "Accepted",
             &[(!ready, "NotReady"), (!referenced, "Unreferenced")],
@@ -720,9 +648,8 @@ pub fn desired_worker_set_status(
         endpoints: Some(EndpointCounts {
             ready: Some(f.ready_endpoints),
         }),
-        // Always reported, including `configured: false` — the whole point is
-        // that a missing event stream is otherwise invisible, so omitting the
-        // block for the case that needs it most would defeat it.
+        // Always reported, including `configured: false`, since a missing event
+        // stream is otherwise invisible.
         kv_events: Some(KvEventsStatus {
             configured: Some(dest.kv_events_declared),
             subscribed_endpoints: Some(f.event_endpoints),
@@ -768,10 +695,9 @@ pub fn desired_worker_set_status(
 /// explains.
 ///
 /// Normally the brief window between the object appearing and the next
-/// reconcile. Persistent means `serviceRef` names a Service that does not exist.
-/// A pool naming this set would report that under `unresolvedDestinations` — but
-/// an unreferenced set is in no pool, so without this the object says nothing at
-/// all and the operator has only the router's logs.
+/// reconcile; if it persists, `serviceRef` names a Service that does not exist.
+/// Needed because an unreferenced set appears in no pool's
+/// `unresolvedDestinations`.
 pub fn unbound_worker_set_status(
     reason: UnresolvedReason,
     referenced_by: &[String],
@@ -808,15 +734,9 @@ pub fn unbound_worker_set_status(
 
 /// Desired `InferencePolicy` status.
 ///
-/// Written for EVERY policy in scope, not only the ones a pool references. An
-/// unreferenced policy is still compiled and still reports its warnings — that
-/// is the state you want to inspect before attaching it — and the
-/// `Accepted` condition is what says whether anything routes through it.
-///
-/// Reaching policies only through pools was how an unattached policy ended up
-/// with a permanently blank `RULES` column, indistinguishable from one that had
-/// failed to compile; and a DETACHED policy kept its last-written count forever,
-/// so several dead policies read exactly like several live ones.
+/// Written for every policy in scope, not only those a pool references, so an
+/// unattached policy still reports its warnings. `Accepted` says whether any
+/// pool routes through it.
 pub fn desired_policy_status(
     resolved: &ResolvedPolicy,
     previous: Option<&InferencePolicyStatus>,
@@ -824,10 +744,8 @@ pub fn desired_policy_status(
     let policy = &resolved.policy;
     let generation = resolved.generation;
     let prev = previous.map(|s| s.conditions.as_slice());
-    // Compile warnings and name warnings, reported as one list: an operator
-    // asking "what is wrong with this policy" should not need to know which
-    // stage noticed. Warnings never make a policy unusable — each describes a
-    // part that does less than it says, and the rest still applies.
+    // Compile and name warnings, as one list. Warnings never make a policy
+    // unusable.
     let warnings: Vec<String> = resolved.all_warnings().map(ToString::to_string).collect();
     let compiled = if warnings.is_empty() {
         format!("{} rule(s) compiled", policy.rules.len())
@@ -838,10 +756,7 @@ pub fn desired_policy_status(
             warnings.len()
         )
     };
-    // `Accepted` here answers "does anything route through this", which is the
-    // question a policy object cannot otherwise answer. Compiling cleanly is not
-    // the same as being in force, and conflating them is what made a detached
-    // policy look live.
+    // `Accepted` means in force on some pool, not just compiled.
     let accepted = !resolved.referenced_by.is_empty();
     let (reason, msg) = if accepted {
         (
@@ -862,10 +777,7 @@ pub fn desired_policy_status(
             ),
         )
     };
-    // Joined here rather than left as a list: a `[*]` printer column renders only
-    // the first element, so an array would print `NotReferenced` and drop
-    // `HasWarnings` without a trace. Ordered most-decisive first, and never
-    // empty — a blank column has to keep meaning "no status written at all".
+    // Joined into one string, as in `state()`.
     let mut state = vec![if accepted { "InForce" } else { "NotReferenced" }];
     if !warnings.is_empty() {
         state.push("HasWarnings");
@@ -893,15 +805,9 @@ const STATUS_WARNING_MAX_CHARS: usize = 2048;
 
 /// Fit warnings inside what the CRD schema admits.
 ///
-/// Going over EITHER limit makes the API server reject the whole status patch,
-/// not just the warnings — so `state`, `referencedBy` and the conditions all go
-/// stale, the writer retries every tick, and the only trace is a WARN log line.
-/// A policy may have 32 rules, each able to raise several warnings, so an
-/// ordinary policy can reach this; it is not a pathological case.
-///
-/// So: keep the first 31, then say how many were cut and where the full list
-/// lives. Each entry is truncated on a character boundary — the schema counts
-/// characters, and slicing bytes could split a multi-byte one.
+/// Exceeding either limit makes the API server reject the whole status patch.
+/// Keeps the first 31, then a note saying how many were cut. Entries are
+/// truncated by character, as the schema counts characters.
 fn fit_status_warnings(all: Vec<String>) -> Vec<String> {
     let clip = |w: String| {
         if w.chars().count() <= STATUS_WARNING_MAX_CHARS {
@@ -930,13 +836,8 @@ type CacheKey = (&'static str, String, String, Option<String>);
 
 /// The status writer's last-written cache key: kind, namespace, name, UID.
 ///
-/// The UID is part of it, and that is the point. Keyed on name alone, a
-/// delete-and-recreate under the same name inherited its predecessor's cache
-/// entry: the recreated object starts with EMPTY status, the writer computes the
-/// same value it had cached, sees a hit, and skips the patch — leaving the object
-/// blank until its content happened to change or the process restarted. The cache
-/// is in-memory and never reconciled against the API server, so nothing else
-/// would have noticed.
+/// Includes the UID so a recreated object, which starts with empty status,
+/// doesn't hit its predecessor's entry and get skipped.
 fn cache_key(kind: &'static str, ns: &str, name: &str, uid: Option<&str>) -> CacheKey {
     (
         kind,
@@ -950,30 +851,22 @@ fn cache_key(kind: &'static str, ns: &str, name: &str, uid: Option<&str>) -> Cac
 pub struct StatusWriter {
     client: kube::Client,
     store: Arc<PolicyStore>,
-    /// The live pool set. Held as the registry rather than a startup snapshot:
-    /// status is a report about what kinference can route to right now, so a writer
-    /// describing the pools that existed at boot is worse than one that
-    /// describes nothing.
     pools: Arc<crate::pool::PoolRegistry>,
-    /// Worker sets that produced no pool. They appear in no `PolicyIndex`, so
-    /// without this the object an operator is actually looking at says nothing
-    /// about why nothing routes to it.
+    /// Worker sets that produced no pool, which appear in no `PolicyIndex`.
     rejections: Arc<super::worker_sets::RejectionStore>,
     metrics: Arc<MetricsRegistry>,
-    /// Caller-reported provider health. The only source for a provider's status,
-    /// since kinference observes nothing about one directly.
+    /// Caller-reported provider health, the only source for a provider's
+    /// status.
     provider_health: Arc<super::provider_health::ProviderHealthStore>,
-    /// Last status we wrote, per `(kind, namespace, name)`. Both the loop-breaker
-    /// and the source of stable `lastTransitionTime`s.
+    /// Last status we wrote, per [`cache_key`]. Both the loop-breaker and the
+    /// source of stable `lastTransitionTime`s.
     last: Mutex<HashMap<CacheKey, serde_json::Value>>,
     /// Whether this replica may write. Always `true` when leader election is
-    /// disabled (the caller hands over a channel pre-set to `true` and spawns no
-    /// elector), so single-replica behavior is unchanged.
+    /// disabled.
     leader: watch::Receiver<bool>,
     prom: Arc<crate::prom::PromMetrics>,
-    /// Policy warnings already logged, as `ns/name: warning`. A warning is
-    /// logged once, when it first appears, rather than every tick — the same
-    /// contract as `binding::warn_new`.
+    /// Policy warnings already logged, as `ns/name: warning`, so each is logged
+    /// once when it first appears.
     warned: Mutex<HashSet<String>>,
 }
 
@@ -1011,9 +904,8 @@ impl StatusWriter {
                     tracing::debug!("policy status writer: cancelled");
                     return;
                 }
-                // Awaiting the transition rather than polling `borrow()` each
-                // tick is what makes promotion observable at the moment it
-                // happens, which the cache reset below depends on.
+                // Awaited rather than polled, so the cache is reset on every
+                // promotion.
                 r = self.leader.changed() => {
                     match r {
                         Ok(()) => {
@@ -1025,10 +917,8 @@ impl StatusWriter {
                                 self.on_demotion();
                             }
                         }
-                        // Elector gone. Hold the current state rather than
-                        // assuming either way: promoting ourselves could create
-                        // a second writer, and demoting could leave nobody
-                        // writing at all.
+                        // Elector gone. Hold the current state: promoting could
+                        // create a second writer, and demoting could leave none.
                         Err(_) => {
                             tracing::error!(
                                 "policy status writer: leader channel closed; \
@@ -1043,8 +933,7 @@ impl StatusWriter {
                         continue;
                     }
                     if let Err(e) = self.reconcile_once().await {
-                        // Never fatal: status is reporting, and losing it must
-                        // not take routing down with it.
+                        // Never fatal to routing.
                         tracing::warn!(error = %e, "policy status writer: reconcile failed");
                     }
                 }
@@ -1054,17 +943,10 @@ impl StatusWriter {
 
     /// Drop the last-written cache on becoming leader.
     ///
-    /// The cache is this replica's private record of what IT wrote. After a
-    /// failover that record describes the world before the previous leader took
-    /// over, so trusting it means comparing desired status against a stale
-    /// baseline and skipping patches that are genuinely needed — status silently
-    /// frozen, with no error anywhere to point at it. Clearing means "I don't
-    /// know what my predecessor left; re-assert everything", which costs one
-    /// extra round of patches per promotion and is the only safe assumption.
-    ///
-    /// It also resets `lastTransitionTime` provenance: with no `previous` to
-    /// carry forward, the next write stamps fresh timestamps. That is correct —
-    /// this replica genuinely has not observed those conditions before.
+    /// The cache records what this replica wrote, which may predate whatever
+    /// the previous leader wrote since; trusting it would skip needed patches.
+    /// Clearing it re-asserts everything, and the next write stamps fresh
+    /// `lastTransitionTime`s.
     fn on_promotion(&self) {
         let dropped = {
             let mut last = self.last.lock().expect("status cache poisoned");
@@ -1081,9 +963,8 @@ impl StatusWriter {
     /// Withdraw the policy warning counts on losing the lease.
     ///
     /// Only `reconcile_once` sets `kinference_policy_warnings`, and a follower
-    /// never runs it, so nothing else would clear them: a demoted replica kept
-    /// exporting the counts it had at demotion, beside the new leader's, and a
-    /// warning fixed after a failover stayed visible on it indefinitely.
+    /// never runs it, so a demoted replica would otherwise keep exporting stale
+    /// counts.
     fn on_demotion(&self) {
         self.prom.set_policy_warnings(&[]);
         tracing::info!("policy status writer: demoted; stopping writes");
@@ -1091,15 +972,13 @@ impl StatusWriter {
 
     async fn reconcile_once(&self) -> anyhow::Result<()> {
         let snapshot = self.store.snapshot();
-        // NOT `snapshot.is_empty()`, which asks only about POOLS. Worker sets
-        // and policies are patched outside the pool loop now, so a cluster with
-        // worker sets but no pool still has objects to describe — and bailing
-        // here was one of the two ways an unreferenced set ended up statusless.
+        // Not `snapshot.is_empty()`, which only counts pools: worker sets and
+        // policies need status even with no pools.
         if !snapshot.listed() {
             return Ok(());
         }
-        // One snapshot for the whole reconcile: every CR patched below then
-        // describes the same fleet.
+        // One snapshot for the whole reconcile, so every CR describes the same
+        // fleet.
         let facts = gather_facts(self.pools.snapshot().as_slice(), &self.metrics);
 
         for resolved in snapshot.pools() {
@@ -1121,11 +1000,6 @@ impl StatusWriter {
             .await;
 
             // --- providers -------------------------------------------------
-            //
-            // Everything here is second-hand. kinference never reads the
-            // GatewayBackend, so a provider's own object is the only place the
-            // caller's reports become visible to an operator — and it is where
-            // they will look when requests to a vendor start failing.
             for prov in resolved.destinations.iter().filter_map(|d| d.as_provider()) {
                 let key = crate::policy::engine::ObjectKey::new(&prov.namespace, &prov.name);
                 let prev = self.previous::<InferenceProviderStatus>(
@@ -1148,11 +1022,8 @@ impl StatusWriter {
 
             // --- rejected providers ----------------------------------------
             //
-            // A rejected provider never becomes a destination, so the loop above
-            // never sees it. The pool reports it under
-            // `unresolvedDestinations`, but the operator is looking at the
-            // PROVIDER, and a blank status there reads as "nothing happened"
-            // rather than "refused, and here is why".
+            // Never destinations, so the loop above misses them. Names starting
+            // with `<` are placeholders (`<unset>`, `<selector>`), not objects.
             for u in resolved
                 .unresolved
                 .iter()
@@ -1178,17 +1049,10 @@ impl StatusWriter {
 
         // --- worker sets --------------------------------------------------
         //
-        // Outside the pool loop, and over the SETS rather than over pool
-        // destinations. Reaching them through pools meant a set no pool named
-        // was never patched at all — not written as zero, never written — so a
-        // set serving traffic happily was indistinguishable from an object kinference
-        // had never seen, and the one set with a ready endpoint could be the one
-        // with a blank row. A set's endpoints, models and event subscription are
-        // facts about the SET; none of them need a pool to be true.
-        //
-        // Three outcomes, each answering a different operator question: rejected
-        // (this object is wrong), unbound (kinference has no pool for it), bound
-        // (here is what it serves, and whether a pool routes to it).
+        // Over the sets themselves rather than pool destinations, so sets no
+        // pool names still get status. Rejected: the object is wrong. Unbound:
+        // kinference has no pool for it. Bound: what it serves, and whether a
+        // pool routes to it.
         let rejected = self.rejections.snapshot();
         for entry in snapshot.worker_sets() {
             let prev = self.previous::<InferenceWorkerSetStatus>(
@@ -1197,10 +1061,8 @@ impl StatusWriter {
                 &entry.name,
                 entry.uid.as_deref(),
             );
-            // A rejection wins over the bind failure it causes: it names the
-            // unknown profile or the unusable block size, where the bind error
-            // can only say the pool is missing. Same object, and the specific
-            // message is the one worth writing.
+            // A rejection wins over the bind failure it causes, since it names
+            // the actual problem.
             let rejection = rejected.iter().find(|r| {
                 r.key.name == entry.name
                     && r.key.namespace.as_deref().unwrap_or_default() == entry.namespace
@@ -1235,12 +1097,7 @@ impl StatusWriter {
 
         // --- policies -----------------------------------------------------
         //
-        // Outside the pool loop, deliberately. A policy no pool references would
-        // never be reached from in there, and that was the whole bug: an
-        // unattached policy sat with a blank RULES column forever, and a DETACHED
-        // one kept its last-written count, so a dead policy was indistinguishable
-        // from a live one. Iterating the policies themselves means every one gets
-        // an answer, and `Accepted` carries which it is.
+        // Over the policies themselves, so unreferenced ones get status too.
         self.report_policy_warnings(&snapshot);
         for resolved in snapshot.policies() {
             let prev = self.previous::<InferencePolicyStatus>(
@@ -1265,10 +1122,7 @@ impl StatusWriter {
     /// Log warnings that are new since the last pass, and publish per-policy
     /// counts to `kinference_policy_warnings`.
     ///
-    /// Logged because the people most likely to have just introduced a warning
-    /// are watching `kubectl apply` and the logs, not the status subresource.
-    /// Once per appearance, because a WARN line repeated every ten seconds is
-    /// one nobody reads.
+    /// Each warning is logged once, when it first appears.
     fn report_policy_warnings(&self, snapshot: &super::resolve::PolicyIndex) {
         let mut current: HashSet<String> = HashSet::new();
         let mut rows: Vec<(String, &'static str, i64)> = Vec::new();
@@ -1303,10 +1157,8 @@ impl StatusWriter {
         serde_json::from_value(v.clone()).ok()
     }
 
-    /// Patch `status` if it differs from what we last wrote.
-    ///
-    /// The comparison is load-bearing: we watch what we patch, so writing
-    /// unconditionally would drive an endless rebuild/write cycle.
+    /// Patch `status` if it differs from what we last wrote. See the module
+    /// docs for why this comparison matters.
     async fn patch<K>(
         &self,
         kind: &'static str,
@@ -1352,11 +1204,10 @@ impl StatusWriter {
     }
 }
 
-/// Convenience for `main`: build the writer with its own client.
+/// Build the writer with its own client and spawn it.
 ///
-/// `leader` gates writing. When leader election is disabled the caller passes a
-/// channel pre-set to `true`, so this replica always writes and behavior matches
-/// the single-replica case exactly.
+/// `leader` gates writing; with election disabled, pass a channel set to
+/// `true`.
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
     namespace_hint: Option<&str>,
@@ -1370,12 +1221,10 @@ pub async fn spawn(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let _ = namespace_hint;
-    // Same reasoning as `PolicyWatcher::new`: status is CRD-only, so kubeconfig
-    // is safe here even though discovery rejects it.
+    // Honors kubeconfig, like `PolicyWatcher`.
     let cfg = kube::Config::infer().await?;
     let client = kube::Client::try_from(cfg)?;
-    // Seed the gauge so a follower reports 0 from the start rather than being
-    // absent from /metrics until its first transition.
+    // Seed the gauge so a follower reports 0 before its first transition.
     prom.set_leader(*leader.borrow());
     let writer = StatusWriter::new(
         client,

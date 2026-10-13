@@ -14,9 +14,8 @@ fn dest(name: &str, aliases: &[(&str, &str)]) -> ResolvedWorkerSet {
         kv_events_declared: false,
         aliases: aliases
             .iter()
-            // Fixtures still pass (canonical, upstream); under the new shape
-            // the canonical is an ALIAS of the upstream, so every existing
-            // case asks the same question.
+            // Fixtures pass (canonical, upstream); the canonical name becomes
+            // an alias of the upstream.
             .map(|(n, u)| ModelAlias {
                 name: Some(u.to_string()),
                 aliases: if n == u { vec![] } else { vec![n.to_string()] },
@@ -49,8 +48,7 @@ fn facts(
     m
 }
 
-/// A `ResolvedPolicy` wrapper for the status tests. `referenced_by` non-empty
-/// by default, since that is the case most of these assert about.
+/// A `ResolvedPolicy` wrapper for the status tests, referenced by one pool.
 fn rp(policy: CompiledPolicy) -> ResolvedPolicy {
     ResolvedPolicy {
         uid: None,
@@ -58,8 +56,7 @@ fn rp(policy: CompiledPolicy) -> ResolvedPolicy {
         name: "chat-policy".into(),
         generation: Some(7),
         policy: Arc::new(policy),
-        // Status never reads the raw spec; these fixtures start from a
-        // `CompiledPolicy`, so there is no spec to carry.
+        // Status never reads the raw spec.
         spec: Default::default(),
         referenced_by: vec!["chat".into()],
         reference_warnings: Vec::new(),
@@ -97,10 +94,8 @@ fn resolved(dests: Vec<ResolvedWorkerSet>, unresolved: Vec<Unresolved>) -> Resol
     }
 }
 
-/// A rejected worker set has to say so on ITS OWN object. It appears in no
-/// policy snapshot, so without this the operator sees either nothing or —
-/// worse — a stale `Accepted=True` with a ready count from before the
-/// break, which reads as "serving, just unhappy".
+/// A rejected worker set reports the rejection on its own object, with
+/// pool-derived fields cleared.
 fn pcond<'a>(s: &'a InferenceProviderStatus, ty: &str) -> &'a Condition {
     s.conditions
         .iter()
@@ -108,13 +103,8 @@ fn pcond<'a>(s: &'a InferenceProviderStatus, ty: &str) -> &'a Condition {
         .expect("condition present")
 }
 
-/// No condition message may carry a run of spaces.
-///
-/// These are read in `kubectl describe` and `-o yaml`, so a squashed line
-/// continuation shows up verbatim as `the caller's to              report`.
-/// Six of them had exactly that, and nothing caught it — the strings compile,
-/// the tests that assert on them use `contains`, and only a human reading
-/// live output notices.
+/// No condition message may carry a run of spaces, as left by a broken line
+/// continuation in a string literal.
 #[test]
 fn no_condition_message_has_a_double_space() {
     let d = dest("workers-h100", &[]);
@@ -179,15 +169,13 @@ fn no_condition_message_has_a_double_space() {
     }
 }
 
-/// One column, every kind, same grammar: primary verdict then qualifiers.
-/// A `[*]` column renders only the first array element, so each of these
-/// would lose everything after the comma if `state` were a list.
+/// Every kind's `state` is the primary verdict, then comma-separated
+/// qualifiers.
 #[test]
 fn state_tokens_compose_across_the_kinds() {
     let d = dest("workers-h100", &[]);
 
-    // Worker set: accepted, but idle AND in no pool. Neither is a fault, and
-    // a column reading only `Accepted` showed none of it.
+    // Worker set: accepted, but idle and in no pool.
     let idle = desired_worker_set_status(&d, &facts(0, &[]), &[], None, None);
     assert_eq!(
         idle.state.as_deref(),
@@ -197,9 +185,7 @@ fn state_tokens_compose_across_the_kinds() {
     let serving = desired_worker_set_status(&d, &facts(3, &[]), &["chat".to_string()], None, None);
     assert_eq!(serving.state.as_deref(), Some("Accepted"));
 
-    // A rejection IS the verdict, so it leads and stands alone — a refused
-    // set has no endpoints by construction, and `NotReady` too would read as
-    // a second, separate problem.
+    // A rejection stands alone, without `NotReady`.
     let broken = rejected_worker_set_status(
         &crate::policy::rejection::RejectReason::MissingKvBlockSize,
         &[],
@@ -207,8 +193,8 @@ fn state_tokens_compose_across_the_kinds() {
     );
     assert_eq!(broken.state.as_deref(), Some("MissingKvBlockSize"));
 
-    // Pool: routes fine, but a destination dangles and the policyRef names
-    // the wrong kind. Both are qualifiers because it still serves.
+    // Pool: a destination dangles and the policyRef names the wrong kind.
+    // Both are qualifiers since it still serves.
     let mut r = resolved(vec![dest("workers-h100", &[])], vec![]);
     r.unresolved = vec![Unresolved {
         kind: "InferenceWorkerSet".into(),
@@ -227,8 +213,7 @@ fn state_tokens_compose_across_the_kinds() {
         Some("Accepted,UnresolvedDestinations,PolicyRefWrongKind")
     );
 
-    // Provider: well-formed and still producing nothing. `Suppressed` is the
-    // token an operator needs, and it is invisible in the Accepted condition.
+    // Provider: well-formed but producing nothing.
     let suppressed = desired_provider_status(
         &ProviderHealth {
             suppressed: true,
@@ -242,8 +227,7 @@ fn state_tokens_compose_across_the_kinds() {
     );
 }
 
-/// Never empty, on any kind — that is what keeps a blank column meaning "no
-/// status was written at all" rather than "nothing to report".
+/// Never empty on any kind, so a blank column means no status was written.
 #[test]
 fn state_always_carries_at_least_one_token() {
     let d = dest("workers-h100", &[]);
@@ -273,10 +257,7 @@ fn state_always_carries_at_least_one_token() {
     }
 }
 
-/// A healthy provider must carry `Accepted=True`. Without it, a provider the
-/// operator FIXED lost the condition entirely rather than flipping — status
-/// is a merge patch, so the array is replaced wholesale — and one that was
-/// never broken never had it at all. Every other kind answers this question.
+/// A healthy provider carries `Accepted=True`.
 #[test]
 fn a_healthy_provider_reports_accepted() {
     let s = desired_provider_status(
@@ -296,8 +277,7 @@ fn a_healthy_provider_reports_accepted() {
     assert_eq!(pcond(&s, "Ready").status, "True");
 }
 
-/// And the round trip: rejected then fixed must land on True, not on a
-/// missing condition.
+/// Rejected then fixed lands on True, not on a missing condition.
 #[test]
 fn a_provider_that_recovers_flips_accepted_to_true() {
     let broken = rejected_provider_status(UnresolvedReason::Incomplete, None);
@@ -319,10 +299,8 @@ fn cond<'a>(s: &'a InferenceWorkerSetStatus, ty: &str) -> &'a Condition {
         .expect("condition present")
 }
 
-/// The heart of it: a set no pool names is ACCEPTED, not rejected. It still
-/// serves every `Pick` that names no pool, so `Accepted=False` would report
-/// a set carrying traffic as one nothing can reach — which is why this does
-/// not copy the unreferenced-POLICY shape, where `Accepted=False` is true.
+/// A set no pool names is accepted, since it still serves every `Pick` that
+/// names no pool. Unlike an unreferenced policy.
 #[test]
 fn an_unreferenced_worker_set_is_accepted_but_not_referenced() {
     let d = dest("workers-h100", &[]);
@@ -364,9 +342,7 @@ fn a_referenced_worker_set_names_the_pools_routing_to_it() {
     );
 }
 
-/// Unreferenced and unready are independent. The `dummy` case was the one
-/// set with a READY endpoint and the only one with no status at all, so a
-/// test that let them move together would not have caught it.
+/// Unreferenced and unready are independent.
 #[test]
 fn referenced_and_ready_are_independent() {
     let d = dest("workers-h100", &[]);
@@ -390,8 +366,7 @@ fn an_unbound_worker_set_reports_the_reason_it_did_not_bind() {
     assert!(s.models.is_empty());
 }
 
-/// A broken object does not erase who was pointing at it — that is the pool
-/// an operator now has to go fix.
+/// A rejected set keeps `referencedBy`.
 #[test]
 fn a_rejected_worker_set_still_reports_who_named_it() {
     let reason = crate::policy::rejection::RejectReason::MissingKvBlockSize;
@@ -400,8 +375,8 @@ fn a_rejected_worker_set_still_reports_who_named_it() {
     assert_eq!(cond(&s, "Accepted").status, "False");
 }
 
-/// Same inputs, same bytes — the writer breaks its patch loop on a
-/// last-written comparison, so an unstable message would rewrite forever.
+/// Same inputs, same bytes, or the writer's last-written comparison never
+/// breaks the patch loop.
 #[test]
 fn unreferenced_status_is_stable_across_reconciles() {
     let d = dest("workers-h100", &[]);
@@ -439,9 +414,7 @@ fn a_rejected_worker_set_reports_why_and_clears_its_counts() {
     assert!(st.models.is_empty());
 }
 
-/// `lastTransitionTime` is stable while the condition is unchanged — the
-/// same loop-breaker every other condition here relies on, or a permanently
-/// broken worker set rewrites its status every tick.
+/// A persistent rejection keeps its `lastTransitionTime`.
 #[test]
 fn a_persistent_rejection_does_not_rewrite_its_transition_time() {
     let reason = crate::policy::rejection::RejectReason::MissingKvBlockSize;
@@ -483,8 +456,7 @@ fn pool_status_reports_count_models_and_accepted() {
 
 #[test]
 fn pool_status_reports_models_under_their_canonical_names() {
-    // The alias table is the whole reason status must translate: a client
-    // asks for `bar`, the engine reports the upstream model.
+    // A client asks for `bar`; the engine reports the upstream model.
     let r = resolved(
         vec![dest(
             "workers-h100",
@@ -500,10 +472,8 @@ fn pool_status_reports_models_under_their_canonical_names() {
     assert_eq!(s.models[0].name, "bar");
 }
 
-/// A pool answers "what can a client ask for", so every alias is its own
-/// askable name and gets its own entry. `servedBy` duplicates across them,
-/// which is accurate — it is one fleet reachable under two names. The old
-/// inverse lookup collapsed them into whichever alias sorted first.
+/// Every alias gets its own pool model entry, with `servedBy` duplicated
+/// across them.
 #[test]
 fn a_pool_lists_every_alias_as_its_own_askable_model() {
     let r = resolved(
@@ -528,8 +498,7 @@ fn a_pool_lists_every_alias_as_its_own_askable_model() {
     }
 }
 
-/// Unaliased models still report under the upstream name, so enabling the
-/// alias expansion did not change the common case.
+/// Unaliased models report under the upstream name.
 #[test]
 fn a_pool_falls_back_to_the_upstream_name_when_nothing_is_aliased() {
     let r = resolved(vec![dest("workers-h100", &[])], vec![]);
@@ -600,7 +569,6 @@ fn no_destinations_means_not_accepted() {
 
 #[test]
 fn last_transition_time_is_stable_while_the_condition_holds() {
-    // Otherwise every tick looks like a state change to anything watching.
     let r = resolved(vec![dest("good", &[])], vec![]);
     let first = desired_pool_status(&r, &facts(1, &[]), None);
     let t0 = first.parents[0].conditions[0].last_transition_time.clone();
@@ -610,10 +578,7 @@ fn last_transition_time_is_stable_while_the_condition_holds() {
 
 #[test]
 fn last_transition_time_moves_when_the_condition_flips() {
-    // Seeded with an obviously old timestamp: `metav1.Time` is
-    // second-granularity, so comparing against a just-generated one would
-    // pass or fail depending on which side of a second boundary the test
-    // ran. Anchoring to a fixed past value tests the invariant directly.
+    // A fixed past timestamp, since `metav1.Time` has second granularity.
     const OLD: &str = "2020-01-01T00:00:00Z";
     let good = resolved(vec![dest("good", &[])], vec![]);
     let mut first = desired_pool_status(&good, &facts(1, &[]), None);
@@ -635,8 +600,8 @@ fn last_transition_time_moves_when_the_condition_flips() {
     );
 }
 
-/// A `StatusWriter` whose client is never used — `Config::new` performs no
-/// I/O, so this needs no cluster. Lets the cache logic be tested directly.
+/// A `StatusWriter` whose client is never used. Needs a runtime, since
+/// `kube::Client::try_from` spawns a tower buffer worker.
 fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
     let cfg = kube::Config::new("http://127.0.0.1:1".parse().unwrap());
     let client = kube::Client::try_from(cfg).expect("dummy client");
@@ -654,25 +619,7 @@ fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
     (w, tx)
 }
 
-/// Promotion must drop the last-written cache.
-///
-/// That cache is this replica's private record of what IT wrote. After a
-/// failover it describes the world as of before the previous leader took
-/// over, so trusting it means comparing desired status against a stale
-/// baseline and skipping patches that are genuinely needed. The symptom is
-/// the nastiest kind: status silently frozen, with nothing logged and no
-/// error to point at.
-// `kube::Client::try_from` spawns a tower buffer worker, so this needs a
-// runtime even though no request is ever issued.
-/// The bug this key fixes, at the level the writer sees it.
-///
-/// Delete a CR and re-apply it under the same name while the router keeps
-/// running: the recreated object starts with EMPTY status, but the writer had
-/// cached what it wrote for the PREDECESSOR. Keyed on name alone the computed
-/// status matched the cache, the patch was skipped, and the object sat blank
-/// until its content happened to change or the process restarted. The cache is
-/// in-memory and never reconciled against the API server, so nothing else
-/// noticed.
+/// A recreated object (new UID) misses the cache, even with identical status.
 #[tokio::test]
 async fn a_recreated_object_is_a_cache_miss_even_with_identical_status() {
     let (w, _tx) = writer_with_leader(true);
@@ -694,7 +641,7 @@ async fn a_recreated_object_is_a_cache_miss_even_with_identical_status() {
         "the original is still cached"
     );
 
-    // Same namespace, same name, same computed status — different object.
+    // Same namespace, name and status, but a different object.
     assert!(
         w.previous::<InferencePoolStatus>("InferencePool", "infra", "chat", Some("uid-2"))
             .is_none(),
@@ -710,6 +657,8 @@ async fn a_recreated_object_is_a_cache_miss_even_with_identical_status() {
     );
 }
 
+/// Promotion drops the last-written cache, which may be stale after a
+/// failover.
 #[tokio::test]
 async fn promotion_drops_the_last_written_cache_so_status_is_re_asserted() {
     let (w, _tx) = writer_with_leader(false);
@@ -736,13 +685,10 @@ async fn promotion_drops_the_last_written_cache_so_status_is_re_asserted() {
     );
 }
 
-/// Demotion must withdraw `kinference_policy_warnings`. Only the leader's
-/// reconcile sets it, so otherwise a demoted replica keeps exporting the
-/// counts it had when it lost the lease, beside the new leader's.
+/// Demotion withdraws `kinference_policy_warnings`.
 ///
-/// Driven through `run`, so it also fails if the loop stops calling
-/// `on_demotion`. The store is never listed, so no reconcile clears the
-/// gauge on the demotion's behalf.
+/// Driven through `run`, so it also checks the loop calls `on_demotion`. The
+/// store is never listed, so no reconcile clears the gauge instead.
 #[tokio::test]
 async fn demotion_withdraws_the_policy_warning_counts() {
     let (w, tx) = writer_with_leader(true);
@@ -769,9 +715,7 @@ async fn demotion_withdraws_the_policy_warning_counts() {
     );
 }
 
-/// The gauge must be seeded at construction, not only on the first
-/// transition — otherwise a follower is absent from /metrics entirely, and
-/// "no pod reports kinference_leader" is exactly the alert condition.
+/// A follower's leader gauge is present at 0, not absent. `spawn` seeds it.
 #[test]
 fn leader_gauge_distinguishes_follower_from_absent() {
     let prom = crate::prom::PromMetrics::new();
@@ -786,13 +730,8 @@ fn leader_gauge_distinguishes_follower_from_absent() {
 
 /// Emptying a status list must be expressible on the wire.
 ///
-/// We patch with `Patch::Merge`, where an omitted key means "leave it
-/// alone". So `skip_serializing_if = "Vec::is_empty"` on a status list makes
-/// clearing it impossible: the field simply vanishes from the patch and the
-/// stale value survives. Found on a live cluster — after a dangling
-/// destination was fixed, `unresolvedDestinations` kept naming it even
-/// though `ResolvedRefs` had already flipped back to True, so the object
-/// contradicted itself.
+/// Status is patched with `Patch::Merge`, where an omitted key is left
+/// alone, so an empty list must serialize as `[]` rather than be skipped.
 #[test]
 fn emptied_status_lists_serialize_so_a_merge_patch_can_clear_them() {
     // A pool that was unresolved and is now fully resolved.
@@ -816,9 +755,8 @@ fn emptied_status_lists_serialize_so_a_merge_patch_can_clear_them() {
     let ws = desired_worker_set_status(&dest("workers-h100", &[]), &facts(0, &[]), &[], None, None);
     let wj = serde_json::to_value(&ws).unwrap();
     assert_eq!(wj.get("models"), Some(&serde_json::json!([])));
-    // Same contract: a set that was a pool destination and has just been
-    // removed from every pool must be able to say so. Omitting the key would
-    // leave it listed under a pool that no longer routes to it.
+    // A set just removed from every pool must be able to clear
+    // `referencedBy`.
     assert_eq!(
         wj.get("referencedBy"),
         Some(&serde_json::json!([])),
@@ -837,7 +775,7 @@ fn emptied_status_lists_serialize_so_a_merge_patch_can_clear_them() {
 
 #[test]
 fn identical_inputs_produce_identical_status_so_no_patch_is_issued() {
-    // This equality is what stops the write→watch→rebuild→write loop.
+    // This equality is what stops the write/watch/rebuild loop.
     let r = resolved(vec![dest("good", &[])], vec![]);
     let a = desired_pool_status(&r, &facts(2, &[("m", 2, Some(8), Some(8))]), None);
     let b = desired_pool_status(&r, &facts(2, &[("m", 2, Some(8), Some(8))]), Some(&a));
@@ -847,10 +785,8 @@ fn identical_inputs_produce_identical_status_so_no_patch_is_issued() {
     );
 }
 
-/// The reason the entry is keyed on the upstream rather than a name: two
-/// aliases for one upstream model are BOTH reported. The old singular `name`
-/// held a lossy inverse lookup and silently dropped every alias but the
-/// first, so `qwen-simple` existed on the wire and appeared nowhere.
+/// Entries are keyed on the upstream model, so all of its aliases are
+/// reported.
 #[test]
 fn every_alias_for_a_model_is_reported() {
     let d = dest(
@@ -876,9 +812,8 @@ fn every_alias_for_a_model_is_reported() {
     );
 }
 
-/// A model nobody declared an alias for reports just its upstream name —
-/// `aliases` is skipped when empty, so the common case stays terse instead
-/// of echoing the same string into two fields.
+/// A model with no aliases reports just its upstream name; `aliases` is
+/// skipped when empty.
 #[test]
 fn an_undeclared_model_reports_no_aliases() {
     let d = dest("workers-h100", &[]);
@@ -898,10 +833,9 @@ fn an_undeclared_model_reports_no_aliases() {
     );
 }
 
-/// Several models on one fleet — LoRA adapters, or several
-/// `--served-model-name` values — get an entry each, and `readyEndpoints`
-/// makes a partial rollout visible. This is the cardinality the old shape
-/// degraded worst at: three entries, three independent inverse lookups.
+/// Several models on one fleet (LoRA adapters, or several
+/// `--served-model-name` values) get an entry each, and `readyEndpoints`
+/// shows a partial rollout.
 #[test]
 fn each_observed_model_gets_its_own_entry_with_its_own_endpoint_count() {
     let d = dest("workers-h100", &[("base", "Qwen/Qwen2.5-32B")]);
@@ -946,7 +880,7 @@ fn worker_set_status_counts_ready_endpoints_and_models() {
         None,
     );
     assert_eq!(s.endpoints.unwrap().ready, Some(3));
-    // Keyed on the OBSERVED model; the declared name is a secondary list.
+    // Keyed on the observed model, with declared aliases alongside.
     assert_eq!(s.models[0].upstream_name, "upstream/bar-fp8");
     assert_eq!(s.models[0].aliases, ["bar"]);
     assert_eq!(s.models[0].ready_endpoints, Some(3));
@@ -960,10 +894,9 @@ fn worker_set_status_counts_ready_endpoints_and_models() {
     );
 }
 
-/// The condition `status.kvEvents` exists to expose: a worker set that is
-/// fully ready and serving traffic while its prefix model is empty. Nothing
-/// else surfaces it — readiness keys on the SUB socket reaching steady
-/// state, and ZMQ reports that whether or not a publisher exists.
+/// `status.kvEvents` exposes a worker set that is ready and serving while its
+/// prefix model is empty, which readiness can't detect since ZMQ connects
+/// whether or not a publisher exists.
 #[test]
 fn kv_events_status_separates_declared_from_actually_flowing() {
     // Declared, and events arriving from all three: the healthy case.
@@ -975,9 +908,8 @@ fn kv_events_status_separates_declared_from_actually_flowing() {
     assert_eq!(kv.configured, Some(true));
     assert_eq!(kv.subscribed_endpoints, Some(3));
 
-    // Declared, ready, serving — but no endpoint has ever delivered an
-    // event. `Ready=True` and `subscribedEndpoints: 0` together are the
-    // signature of a misconfigured publisher port.
+    // Declared and ready, but no endpoint has delivered an event: likely a
+    // misconfigured publisher port.
     f.get_mut(&PoolId::from_raw(0)).unwrap().event_endpoints = 0;
     let s = desired_worker_set_status(&d, &f, &[], None, None);
     assert_eq!(s.kv_events.unwrap().subscribed_endpoints, Some(0));
@@ -991,8 +923,7 @@ fn kv_events_status_separates_declared_from_actually_flowing() {
         "no prefix model degrades ranking; it does not take the set out of service"
     );
 
-    // Not declared: still reported, because `configured: false` is the
-    // whole message. Omitting the block for this case would defeat it.
+    // Not declared: still reported, as `configured: false`.
     let plain = dest("workers-a100", &[]);
     let s = desired_worker_set_status(&plain, &facts(1, &[]), &[], None, None);
     assert_eq!(s.kv_events.unwrap().configured, Some(false));
@@ -1028,15 +959,10 @@ fn policy_status_composes_state_tokens_and_reports_an_inert_tag() {
     .unwrap();
     let p = CompiledPolicy::compile("chat-policy", &spec);
     let s = desired_policy_status(&rp(p), None);
-    // Two ORTHOGONAL facts in one column, joined because a `[*]` column would
-    // render only the first token. This fixture is referenced, so it is in
-    // force AND carrying warnings — which is exactly why `HasWarnings` is not
-    // in the `Accepted` condition's reason: acceptance is unaffected by them.
+    // In force and carrying warnings. Warnings don't affect `Accepted`.
     assert_eq!(s.state.as_deref(), Some("InForce,HasWarnings"));
-    // `tag` is untyped, so a typo matches nothing silently. With the
-    // per-rule `emittableTags` gone, this WARNING is the only thing that
-    // tells an author `pii-detected` is not a tag any classifier emits —
-    // which makes it the load-bearing half of what status still reports.
+    // `tag` is untyped, so this warning is what tells an author that
+    // `pii-detected` is not a tag any classifier emits.
     let inert = s
         .warnings
         .iter()
@@ -1088,7 +1014,7 @@ fn two_destinations_serving_one_model_both_appear_in_served_by() {
     let s = desired_pool_status(&r, &f, None);
     assert_eq!(s.models.len(), 1);
     assert_eq!(s.models[0].served_by, vec!["workers-h100", "workers-a100"]);
-    // The range spans both destinations — the operator sees the spread.
+    // The range spans both destinations.
     let cw = s.models[0].context_window.as_ref().unwrap();
     assert_eq!((cw.min, cw.max), (Some(4096), Some(8192)));
 }
@@ -1106,18 +1032,13 @@ fn one_rule() -> CompiledPolicy {
     CompiledPolicy::compile("p", &spec)
 }
 
-/// The bug this replaces: an unattached policy got no status at all, so its
-/// RULES column stayed blank — which reads as "failed to compile" when it
-/// means "nothing points at me".
+/// An unattached policy still gets status, with `Accepted=False`.
 #[test]
 fn an_unreferenced_policy_reports_why_rather_than_nothing() {
     let s = desired_policy_status(&rp_unreferenced(one_rule()), None);
 
-    // `state` is published for a draft too, so the column fills in and you can
-    // see where the policy stands BEFORE attaching it. Warnings likewise —
-    // those are most useful while it is still a draft. A clean draft carries
-    // exactly one token, never an empty string, so a blank column keeps
-    // meaning "no status was written at all".
+    // `state` and warnings are published before the policy is attached. A
+    // clean draft carries exactly one token.
     assert_eq!(s.state.as_deref(), Some("NotReferenced"));
     assert!(s.warnings.is_empty(), "so no HasWarnings token");
 
@@ -1130,7 +1051,7 @@ fn an_unreferenced_policy_reports_why_rather_than_nothing() {
         "the message must say what is wrong: {}",
         c.message
     );
-    // And how to fix it, since the fix is a patch command nobody remembers.
+    // And how to attach it.
     assert!(c.message.contains("policyRef"), "{}", c.message);
 }
 
@@ -1147,30 +1068,25 @@ fn a_referenced_policy_names_the_pools_it_serves() {
     );
 }
 
-/// Detaching must actively flip the condition, not leave the old one standing.
-/// A frozen `Accepted=True` on three detached policies was the misleading part.
+/// Detaching flips the condition rather than leaving `Accepted=True`.
 #[test]
 fn detaching_flips_accepted_rather_than_freezing_it() {
     let mut attached = desired_policy_status(&rp(one_rule()), None);
     assert_eq!(attached.conditions[0].status, "True");
 
-    // Backdate it, so "did the timestamp move" is answerable. Asserting
-    // against a freshly-minted one cannot work: `lastTransitionTime` is
-    // second-resolution, and both calls land in the same second.
+    // Backdated, since `lastTransitionTime` has second resolution.
     attached.conditions[0].last_transition_time = "2020-01-01T00:00:00Z".to_string();
 
     let detached = desired_policy_status(&rp_unreferenced(one_rule()), Some(&attached));
     assert_eq!(detached.conditions[0].status, "False");
     assert_eq!(detached.conditions[0].reason, "NotReferenced");
-    // A real state change, so the stale timestamp is NOT carried forward —
-    // that is what makes the transition visible in `kubectl describe`.
+    // A real state change, so the timestamp is not carried forward.
     assert_ne!(
         detached.conditions[0].last_transition_time,
         "2020-01-01T00:00:00Z"
     );
 
-    // And the converse: an unchanged condition keeps its timestamp, which is
-    // what stops every tick from looking like a fresh transition.
+    // An unchanged condition keeps its timestamp.
     let still_attached = desired_policy_status(&rp(one_rule()), Some(&attached));
     assert_eq!(
         still_attached.conditions[0].last_transition_time,
@@ -1178,16 +1094,14 @@ fn detaching_flips_accepted_rather_than_freezing_it() {
     );
 }
 
-/// observedGeneration was never published for policies, so there was no way to
-/// tell whether the status you were reading described the edit you just made.
+/// Policy conditions carry `observedGeneration`.
 #[test]
 fn the_policy_status_reports_the_generation_it_describes() {
     let s = desired_policy_status(&rp(one_rule()), None);
     assert_eq!(s.conditions[0].observed_generation, Some(7));
 }
 
-/// Unchanged state must produce a byte-identical status, or the writer's
-/// last-written comparison never breaks the write loop.
+/// Unchanged state produces a byte-identical status.
 #[test]
 fn an_unchanged_policy_produces_an_identical_status() {
     let first = desired_policy_status(&rp_unreferenced(one_rule()), None);
@@ -1198,11 +1112,7 @@ fn an_unchanged_policy_produces_an_identical_status() {
     );
 }
 
-/// A refused provider must say so on its OWN object.
-///
-/// It never becomes a destination, so nothing else writes to it — and a blank
-/// status reads as "nothing happened" rather than "refused, and here is why".
-/// Same blind spot the unreferenced-policy case had.
+/// A refused provider reports the refusal on its own object.
 #[test]
 fn a_refused_provider_reports_the_reason_and_the_fix() {
     let s = rejected_provider_status(
@@ -1213,7 +1123,7 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
     assert_eq!(accepted.r#type, "Accepted");
     assert_eq!(accepted.status, "False");
     assert_eq!(accepted.reason, "UnsupportedApiFormat");
-    // The message has to carry the way out, not just the verdict.
+    // The message says how to fix it.
     assert!(
         accepted.message.contains("Only OpenAI"),
         "{}",
@@ -1228,10 +1138,8 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
     assert_eq!(s.conditions[1].r#type, "Ready");
     assert_eq!(s.conditions[1].status, "False");
 
-    // A refused provider's status carries NOTHING beyond its verdict. Pinned
-    // by key set rather than field-by-field, so a field that starts leaking
-    // stale data through the refusal path fails here — which is what the old
-    // `observed.is_none()` assertion was really guarding.
+    // A refused provider's status carries nothing beyond its verdict. Checked
+    // by key set, so any new field leaking through fails here.
     let keys: Vec<String> = serde_json::to_value(&s)
         .unwrap()
         .as_object()
@@ -1258,8 +1166,7 @@ fn every_refusal_reason_gets_its_own_message() {
             .clone()
     })
     .collect();
-    // Distinct guidance per reason — a shared "it failed" would send the
-    // operator to the wrong file.
+    // Distinct guidance per reason.
     let unique: std::collections::BTreeSet<&String> = msgs.iter().collect();
     assert_eq!(unique.len(), msgs.len(), "{msgs:?}");
 }
@@ -1277,8 +1184,8 @@ fn warning(i: usize) -> PolicyWarning {
 }
 
 /// The CRD caps `status.warnings` at 32 entries of 2048 characters, and going
-/// over rejects the WHOLE patch — state and conditions included. A long list is
-/// cut to 31 plus a pointer to the rest; an over-long entry is clipped.
+/// over rejects the whole patch. A long list is cut to 31 plus a pointer to the
+/// rest; an over-long entry is clipped.
 #[test]
 fn status_warnings_fit_the_crd_limits() {
     let mut compiled = CompiledPolicy::serve_as_asked("p");
@@ -1341,8 +1248,7 @@ fn status_warnings_carry_code_and_path() {
     );
 }
 
-/// A name warning alone is enough for `HasWarnings`: a policy whose spec
-/// compiles clean but names a backend its pool lacks is not healthy.
+/// A name warning alone is enough for `HasWarnings`.
 #[test]
 fn reference_warnings_alone_raise_has_warnings() {
     let mut r = rp(CompiledPolicy::serve_as_asked("p"));

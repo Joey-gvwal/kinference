@@ -1,65 +1,42 @@
 //! The controller side: publishing a `BackendBinding` per `InferencePool`.
 //!
-//! A gateway cannot resolve an `InferencePool` backendRef — it has no schema
-//! for the kind and never reads the object. What it does understand is a
-//! `BackendBinding` (`gateway.linkerd.io/v1alpha1`): an object that CLAIMS a
-//! foreign `(group, kind, name)` and states what that ref resolves to in native
+//! A gateway has no schema for `InferencePool`, so it can't resolve one as a
+//! backendRef. A `BackendBinding` (`gateway.linkerd.io/v1alpha1`) claims a
+//! foreign `(group, kind, name)` and states what it resolves to in native
 //! kinds. kinference already resolves every pool down to Services and
-//! `GatewayBackend`s in order to route, so it is the only component that can
-//! write that translation down — and, being the router-controller for the kind,
-//! the one that should.
+//! `GatewayBackend`s, so it writes that translation.
 //!
-//! One binding per pool, in the pool's own namespace, named after it. The
-//! namespace is not a convenience: the gateway matches a claim against route
-//! refs in the BINDING's namespace, and a route naming a pool defaults the
-//! ref's namespace to its own — so a binding anywhere else answers for nothing.
+//! One binding per pool, named after it and in its namespace: the gateway
+//! matches a claim against route refs in the binding's namespace.
 //!
-//! What each destination becomes:
+//! Each destination becomes:
 //!
-//! - an `InferenceWorkerSet` — its `serviceRef` name, as a core `Service`, on
-//!   the port that ref resolves to.
-//! - an `InferenceProvider` — its `backendRef`, as a `GatewayBackend`, with no
-//!   port: that one is in the backend's `baseURL`, and the schema REJECTS a ref
-//!   that also gives one.
+//! - an `InferenceWorkerSet`: its `serviceRef` as a core `Service`, on the port
+//!   that ref resolves to.
+//! - an `InferenceProvider`: its `backendRef` as a `GatewayBackend`, with no
+//!   port, since the port is in the backend's `baseURL` and the schema rejects
+//!   a ref that also gives one.
 //!
-//! The Service port is read off the Service itself
-//! ([`super::services::ServiceIndex`]) rather than passed through from
-//! `serviceRef.port`, because the two are not the same question: the ref may
-//! name a port (`http`, the legible spelling a worker set should use) or omit
-//! one entirely, and only `spec.ports[]` turns either into the number a
-//! backendRef must carry. A ref kinference cannot resolve to a number is LEFT OUT of
-//! the binding with a warning naming the reason, rather than written portless:
-//! a portless Service ref resolves to no endpoints, so it would be an entry
-//! that programs a route and then fails every request through it, and rather
-//! than guessed at, because guessing sends chat traffic to the metrics port.
-//! For the same reason nothing is published at all until the Service watch has
-//! listed — an empty index cannot tell a missing Service from an unread one,
-//! and a tick that acted on it would strip the port off every binding in the
-//! cluster.
+//! The Service port number is read off the Service itself
+//! ([`super::services::ServiceIndex`]), since `serviceRef.port` may be a name
+//! or absent. A ref that doesn't resolve to a number is left out of the binding
+//! with a warning: a portless Service ref resolves to no endpoints, and
+//! guessing could send traffic to the metrics port. Likewise nothing is
+//! published until the Service watch has listed.
 //!
 //! The binding also lists an `Extension`
-//! (`[policy] backend_binding_extension`, `chat-picker` by default), which the
-//! gateway prepends to the filter chain of every rule that routes to the pool;
-//! that extension asks kinference per request and names the endpoint. The refs say
-//! WHICH backends the pool spans and where to dial them; the extension says
-//! which one this request goes to.
+//! (`[policy] backend_binding_extension`), which the gateway prepends to the
+//! filter chain of every rule routing to the pool; it asks kinference which
+//! endpoint each request goes to.
 //!
-//! Destinations come from the resolved snapshot rather than from
-//! `spec.destinations`, so a binding lists exactly what kinference itself would pick
-//! among: a worker set that bound to no pool, a provider missing its
-//! `backendRef` and a destination naming nothing are all absent here for the
-//! same reason they produce no candidate. A pool whose destinations ALL fail
-//! keeps an empty binding rather than losing it — the gateway then reports
-//! `Accepted=False` on an object that exists, which is a far shorter path to
-//! the cause than a ref that resolves through nothing.
+//! Destinations come from the resolved snapshot rather than
+//! `spec.destinations`, so a binding lists exactly what kinference would pick
+//! among. A pool whose destinations all fail keeps an empty binding, so the
+//! gateway reports `Accepted=False` on it.
 //!
-//! Two hazards, and neither is the status writer's:
-//!
-//! 1. **Clobbering.** These are ordinary objects in a user's namespace. A
-//!    binding this writer did not create is never touched, whatever its name.
-//! 2. **Write amplification.** Every write is compared against the LIVE object
-//!    listed this tick, not against a private record of what we last wrote, so
-//!    an out-of-band edit is corrected rather than cached over.
+//! A binding this writer did not create is never touched. Writes are compared
+//! against the live object listed this tick, so out-of-band edits are
+//! corrected.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -80,49 +57,34 @@ use super::resolve::{
 use super::services::{ServiceIndex, UnresolvedPort};
 use super::store::PolicyStore;
 
-/// Server-side-apply field manager. Every field this writer sets is owned by
-/// this name, so a field it STOPS setting is removed on the next apply — which
-/// is what makes "keep in sync" mean removal as well as addition.
+/// Server-side-apply field manager. A field this writer stops setting is
+/// removed on the next apply.
 const FIELD_MANAGER: &str = "kinference";
 
-/// Marks a binding as this writer's. Its absence is what protects an operator's
-/// own binding from being adopted, overwritten or pruned.
+/// Marks a binding as this writer's; others are never updated or pruned.
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "kinference";
 
-/// The pool a binding was derived from. Redundant with `spec.claim.name` and
-/// worth the duplication: it is what makes `kubectl get backendbindings -l` a
-/// usable question.
+/// The pool a binding was derived from. Duplicates `spec.claim.name` so
+/// bindings can be selected by label.
 const POOL_LABEL: &str = "kinference.buoyant.io/inference-pool";
 
-/// The kind bindings written here claim. The group is [`POLICY_GROUP`], shared
-/// by every `kinference.buoyant.io` kind.
+/// The kind bindings written here claim, in group [`POLICY_GROUP`].
 const POOL_KIND: &str = "InferencePool";
 
-/// A pool's desired binding, plus the destinations that did not make it into
-/// it.
-///
-/// The two travel together because they come from one pass over the pool and
-/// mean nothing apart: a ref missing from `binding` is only intelligible
-/// alongside the reason it is missing, and the reason is only actionable while
-/// the binding it belongs to is in hand.
+/// A pool's desired binding, plus the destinations left out of it.
 pub struct Desired {
     pub binding: BackendBinding,
     /// `(destination name, why)` for every worker set left out because its
-    /// Service port did not resolve. Reported, never written: see the module
-    /// header on why a portless ref is worse than an absent one.
+    /// Service port did not resolve.
     pub omitted: Vec<(String, UnresolvedPort)>,
 }
 
 /// The `BackendBinding` a pool should have, metadata included.
 ///
-/// `extension` is the picker `Extension` the operator configured, `None` when
-/// they cleared it. `services` supplies the Service port numbers; pass a
-/// [`ServiceIndex`] that has listed, or every worker set comes back omitted as
-/// [`UnresolvedPort::NotListed`].
-///
-/// Pure over the resolved pool and the index, so the whole translation is
-/// testable without a cluster; only applying it is async.
+/// `extension` is the picker `Extension`, `None` when the operator cleared it.
+/// `services` supplies the Service port numbers; if it hasn't listed, every
+/// worker set is omitted as [`UnresolvedPort::NotListed`].
 pub fn desired_binding(
     pool: &ResolvedPool,
     extension: Option<&str>,
@@ -133,13 +95,9 @@ pub fn desired_binding(
 
     for dest in &pool.destinations {
         match dest {
-            // A worker set is a Service — group and kind stay unset, which IS
-            // the core Service in a backendRef.
-            //
-            // The Service is looked up in the WORKER SET's namespace, not the
-            // pool's: a cross-namespace destination names a Service beside
-            // itself, and resolving the ref against the pool's namespace would
-            // read a same-named Service in the wrong place.
+            // Unset group and kind mean a core Service. It is looked up in the
+            // worker set's namespace, not the pool's, since a cross-namespace
+            // destination names a Service beside itself.
             ResolvedDestination::Local(ws) => {
                 let port = match services.port_number(
                     &ws.namespace,
@@ -163,10 +121,8 @@ pub fn desired_binding(
                     },
                 });
             }
-            // A provider is the `GatewayBackend` it names. kinference never reads
-            // that object — it holds the vendor credential — and does not need
-            // to: the binding hands the gateway a reference, and the gateway
-            // resolves it.
+            // kinference never reads the `GatewayBackend`, which holds the
+            // vendor credential; the gateway resolves the reference.
             ResolvedDestination::Provider(prov) => backend_refs.push(BindingBackendRef {
                 name: prov.name.clone(),
                 target: BindingObjectReference {
@@ -188,10 +144,8 @@ pub fn desired_binding(
                 (MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string()),
                 (POOL_LABEL.to_string(), pool.name.clone()),
             ])),
-            // Garbage collection does the deleting whenever the API server can:
-            // the binding is meaningless without the pool it translates. The
-            // reconcile's own pruning is the fallback for the pool whose UID
-            // the snapshot never carried.
+            // Garbage collection deletes the binding with its pool. The
+            // reconcile's pruning covers pools whose UID is unknown.
             owner_references: pool.uid.as_ref().map(|uid| {
                 vec![OwnerReference {
                     api_version: InferencePool::api_version(&()).to_string(),
@@ -199,9 +153,8 @@ pub fn desired_binding(
                     name: pool.name.clone(),
                     uid: uid.clone(),
                     controller: Some(true),
-                    // Not set: blocking the pool's deletion on this object
-                    // would need `pools/finalizers`, and a binding that
-                    // outlives its pool for one GC cycle harms nothing.
+                    // Would need `pools/finalizers` RBAC, and a binding that
+                    // outlives its pool for one GC cycle is harmless.
                     block_owner_deletion: None,
                 }]
             }),
@@ -214,11 +167,8 @@ pub fn desired_binding(
                 name: pool.name.clone(),
             },
             backend_refs,
-            // The picker. One entry, or none where the operator cleared the
-            // name — and the empty list is as meaningful as the populated one:
-            // this writer owns the field under server-side apply, so clearing
-            // the config removes the extension from every binding rather than
-            // leaving the old name behind.
+            // Empty when the operator cleared the name; since this writer owns
+            // the field, that removes the extension from existing bindings.
             extensions: extension.map(|e| vec![e.to_string()]).unwrap_or_default(),
         },
         status: None,
@@ -227,18 +177,14 @@ pub fn desired_binding(
     Desired { binding, omitted }
 }
 
-/// The binding's name: the pool's own.
-///
-/// One binding per pool and pool names are unique in a namespace, so this
-/// cannot collide with another pool's. It CAN collide with an operator's own
-/// binding of the same name, which is why every write checks ownership first.
+/// The binding's name: the pool's own. It may collide with an operator's own
+/// binding, which is why every write checks ownership first.
 pub fn binding_name(pool: &ResolvedPool) -> String {
     pool.name.clone()
 }
 
-/// A target's namespace, omitted when it is the binding's own — the default the
-/// CRD documents. Writing it out anyway would work, but it makes two identical
-/// bindings compare unequal depending on how the destination was spelled.
+/// A target's namespace, omitted when it is the binding's own, so equivalent
+/// bindings compare equal.
 fn qualify(binding_ns: &str, target_ns: &str) -> Option<String> {
     (binding_ns != target_ns).then(|| target_ns.to_string())
 }
@@ -250,10 +196,8 @@ fn is_ours(binding: &BackendBinding) -> bool {
 
 /// Whether the live object already says what it should.
 ///
-/// Compares the spec, the two labels and the owner reference — everything this
-/// writer sets. Anything else on the object (an operator's annotation, another
-/// controller's field) is not ours and not compared, so it never provokes a
-/// write.
+/// Compares only what this writer sets: the spec, the two labels and the owner
+/// reference.
 fn in_sync(current: &BackendBinding, desired: &BackendBinding) -> bool {
     let spec_matches =
         serde_json::to_value(&current.spec).ok() == serde_json::to_value(&desired.spec).ok();
@@ -262,9 +206,7 @@ fn in_sync(current: &BackendBinding, desired: &BackendBinding) -> bool {
         .iter()
         .all(|(k, v)| current.labels().get(k) == Some(v));
     let owners_match = match desired.metadata.owner_references.as_ref() {
-        // Compare by UID: a recreated pool is a different owner under the same
-        // name, and a binding still pointing at the dead one is GC'd out from
-        // under us the moment the API server notices.
+        // By UID: a binding owned by a since-recreated pool would be GC'd.
         Some(want) => want.iter().all(|w| {
             current
                 .metadata
@@ -281,21 +223,18 @@ fn in_sync(current: &BackendBinding, desired: &BackendBinding) -> bool {
 /// Creates, updates and prunes the `BackendBinding`s, on a tick.
 pub struct BindingWriter {
     client: kube::Client,
-    /// Watch scope, mirroring `PolicyWatcher`'s: `None` is every namespace.
-    /// Bindings are listed in the same scope the pools were resolved in, or
-    /// pruning would judge a binding against a snapshot that never contained
-    /// its pool.
+    /// Must match `PolicyWatcher`'s scope, or pruning would judge bindings
+    /// against a snapshot that never contained their pools. `None` is every
+    /// namespace.
     namespace: Option<String>,
     store: Arc<PolicyStore>,
-    /// The picker `Extension` every published binding lists. `None` where the
-    /// operator cleared it; see `PolicyConfig::backend_binding_extension`.
+    /// See `PolicyConfig::backend_binding_extension`.
     extension: Option<String>,
-    /// Whether this replica may write. Same gate as the status writer, for the
-    /// same reason: N writers of one object thrash it.
+    /// Whether this replica may write.
     leader: watch::Receiver<bool>,
-    /// Conditions already reported, so a standing complaint is logged once
-    /// rather than every tick. Replaced wholesale each reconcile, which is what
-    /// lets a resolved-then-recurring problem be reported twice.
+    /// Warnings logged at the last reconcile, so a standing one is logged once.
+    /// Replaced each reconcile, so a problem that clears and recurs is logged
+    /// again.
     warned: Mutex<HashSet<String>>,
 }
 
@@ -339,9 +278,7 @@ impl BindingWriter {
                                 );
                             }
                         }
-                        // Elector gone. Hold the last known state rather than
-                        // assuming either way — the same call the status
-                        // writer makes, and for the same reasons.
+                        // Elector gone; hold the last known state.
                         Err(_) => tracing::error!(
                             "backend binding writer: leader channel closed; \
                              holding the last known leadership state"
@@ -353,8 +290,7 @@ impl BindingWriter {
                         continue;
                     }
                     if let Err(e) = self.reconcile_once().await {
-                        // Never fatal. A pool that cannot be published as a
-                        // binding still routes for anything already programmed.
+                        // Never fatal; already-programmed routes keep working.
                         tracing::warn!(error = %e, "backend binding writer: reconcile failed");
                     }
                 }
@@ -377,13 +313,10 @@ impl BindingWriter {
             return Ok(());
         }
 
-        // The Service watch rides outside the publish gate (see
-        // `super::services`), so a snapshot can be complete while the index is
-        // not. Writing on that view would publish every binding portless and
-        // then correct it a tick later — a route programmed against no
-        // endpoints in between — so hold instead, and say so: this is also what
-        // a missing `services` RBAC grant looks like, and nothing else in kinference
-        // would report it.
+        // The Service watch is outside the publish gate, so the snapshot can be
+        // listed while the Service index is not. Hold rather than drop every
+        // worker set from the bindings. A missing `services` RBAC grant also
+        // ends up here, hence the warning.
         if !snapshot.services().listed() {
             self.warn_new(HashSet::from([
                 "backend bindings: waiting for the Service watch to list before \
@@ -401,10 +334,6 @@ impl BindingWriter {
                 let Desired { binding, omitted } =
                     desired_binding(pool, self.extension.as_deref(), snapshot.services());
                 for (dest, why) in omitted {
-                    // Named per destination rather than per pool: the fix is a
-                    // field on one worker set's `serviceRef`, and a message
-                    // that only named the pool would send the operator looking
-                    // through all of them.
                     port_warnings.insert(format!(
                         "backend bindings: {}/{}: destination {dest} is left out — \
                          its Service port did not resolve ({}: {why})",
@@ -420,9 +349,8 @@ impl BindingWriter {
         let existing = match self.api().list(&ListParams::default()).await {
             Ok(list) => list.items,
             Err(kube::Error::Api(e)) if e.code == 404 => {
-                // The CRD is not installed. Expected wherever kinference runs
-                // without this gateway, and not an error — but silence would
-                // leave "my routes never program" with nothing to go on.
+                // The CRD is not installed. Expected without this gateway, but
+                // worth a warning.
                 self.warn_new(HashSet::from([
                     "backend bindings: the BackendBinding CRD is not installed; \
                      not publishing any (install the gateway's \
@@ -447,10 +375,8 @@ impl BindingWriter {
         for (key, want) in &desired {
             if let Some(current) = by_key.get(key) {
                 if !is_ours(current) {
-                    // Someone else's object under the name we want. Refuse
-                    // rather than adopt: it may claim something entirely
-                    // different, and taking it over would break whatever
-                    // depends on it with no trace of what happened.
+                    // Someone else's object under the name we want; never
+                    // adopt it.
                     warnings.insert(format!(
                         "backend bindings: {}/{} exists and is not managed by kinference; \
                          leaving it alone — the pool's routes will not resolve until it \
@@ -470,11 +396,9 @@ impl BindingWriter {
                 }
             }
             let api: Api<BackendBinding> = Api::namespaced(self.client.clone(), &key.0);
-            // Server-side apply, so create and update are one path and the
-            // fields this writer owns are exactly the ones it sets. `force`
-            // takes back a field another manager grabbed — the alternative is a
-            // conflict error every ten seconds and a binding that never
-            // converges.
+            // Server-side apply covers both create and update. `force` takes
+            // back fields another manager grabbed; otherwise the apply would
+            // conflict on every tick and never converge.
             match api
                 .patch(
                     &key.1,
@@ -488,8 +412,8 @@ impl BindingWriter {
                     tracing::debug!(namespace = %key.0, name = %key.1, "backend binding: applied");
                 }
                 Err(e) => {
-                    // Logged, not returned: one namespace's RBAC gap must not
-                    // stop the rest of the cluster from being published.
+                    // Logged, not returned, so one namespace's failure doesn't
+                    // block the rest.
                     tracing::warn!(
                         namespace = %key.0,
                         name = %key.1,
@@ -500,9 +424,8 @@ impl BindingWriter {
             }
         }
 
-        // Prune. Owner-reference GC already covers the deleted pool wherever
-        // the UID was known; this catches the rest — a pool that left the watch
-        // scope, or one whose binding was created before its UID was.
+        // Prune what owner-reference GC doesn't cover: pools that left the
+        // watch scope, or whose binding was created before their UID was known.
         for binding in &existing {
             let Some(ns) = binding.namespace() else {
                 continue;
@@ -511,7 +434,6 @@ impl BindingWriter {
             if !is_ours(binding) || desired.contains_key(&(ns.clone(), name.clone())) {
                 continue;
             }
-            // Already on its way out; deleting again just logs noise.
             if binding.meta().deletion_timestamp.is_some() {
                 continue;
             }
@@ -549,19 +471,17 @@ impl BindingWriter {
     }
 }
 
-/// The gateway's verdict on a binding, when it refused it. `None` while the
-/// gateway has said nothing — which is also what a cluster with no gateway
-/// looks like, and is not a problem to report.
+/// The gateway's reason for refusing a binding, if it did.
 fn rejected_reason(binding: &BackendBinding) -> Option<String> {
     let conditions = &binding.status.as_ref()?.conditions;
     let accepted = conditions.iter().find(|c| c.r#type == "Accepted")?;
     (accepted.status == "False").then(|| format!("{}: {}", accepted.reason, accepted.message))
 }
 
-/// Convenience for `main`: build the writer with its own client.
+/// Build the writer with its own client and spawn it.
 ///
-/// `leader` gates writing, exactly as it does for the status writer: with
-/// election disabled the caller passes a channel pre-set to `true`.
+/// `leader` gates writing; with election disabled, pass a channel set to
+/// `true`.
 pub async fn spawn(
     namespace: Option<String>,
     store: Arc<PolicyStore>,
@@ -569,8 +489,7 @@ pub async fn spawn(
     leader: watch::Receiver<bool>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // Same client policy as the rest of the controller side: CRDs only, so a
-    // kubeconfig is as good as an in-cluster token.
+    // Honors kubeconfig, like `PolicyWatcher`.
     let cfg = kube::Config::infer().await?;
     let client = kube::Client::try_from(cfg)?;
     let writer = BindingWriter::new(client, namespace, store, extension, leader);
