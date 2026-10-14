@@ -120,8 +120,8 @@ fn abandoned_push_releases_on_drop() {
         let mut r = s.reservation();
         r.charge(4096).unwrap();
         assert_eq!(s.stats().1, 4096);
-        // Dropped without commit — the "broke or went idle before any id
-        // was handed out" case, reclaimed without TTL.
+        // Dropped without commit (the push broke or went idle before an id
+        // was handed out), reclaimed without TTL.
     }
     assert_eq!(s.stats(), (0, 0));
 }

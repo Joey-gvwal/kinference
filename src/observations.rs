@@ -1,23 +1,12 @@
-//! `PendingObservations` — server-side stash of per-pick state needed
-//! at observation time.
+//! Server-side stash of per-pick state needed at observation time.
 //!
-//! `Pick()` stashes a
-//! `PendingObservation` keyed by the server-minted `request_id`. The
-//! caller later closes the loop by reporting observed TTFT — gRPC via
-//! `ReportFirstToken()`. At that
-//! point `take(request_id)` returns the stash and `finalize` builds the
-//! per-request CSV row + clears the `InflightPrefixes` entry.
+//! `Pick()` stashes a `PendingObservation` keyed by the server-minted
+//! `request_id`. When the caller reports the observed TTFT via
+//! `ReportFirstToken()`, `take(request_id)` returns it and
+//! `finalize_observation` writes the CSV row and releases the inflight state.
 //!
-//! The fields here are what a CSV row needs
-//! pre-refactor — that struct lived inside `StreamState` and died with
-//! the stream. Lifting the data into a shared `DashMap` keyed by
-//! `request_id` lets gRPC drive the same observation pipeline.
-//!
-//! Leaks are bounded by the background sweep task in `main.rs`, which
-//! drops entries older than `ttl` every tick. The TTL backstops two
-//! lifecycle bugs: (a) gRPC clients that never call `ReportFirstToken()` and
-//! (b) streams that close mid-prefill without a TTFT
-//! observation. Without sweep the table would grow unbounded.
+//! The sweep task in `server.rs` evicts entries older than `ttl`, bounding
+//! leaks from callers that never report.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,20 +21,13 @@ use crate::picker::WorkerScore;
 /// The per-pool state a completed pick must release: decrement the endpoint's
 /// shadow count, and forget its in-flight prefix.
 ///
-/// Carried on the record rather than looked up by `PoolId` at release time.
-/// The record already snapshots the pool's *config* at pick time for exactly
-/// this reason — that a decision should not depend on state re-read much later —
-/// and these are the same idea applied to its *handles*.
+/// Carried on the record rather than looked up by `PoolId` at release time, so
+/// the release path needs no lookup and works whether or not the pool still
+/// exists.
 ///
-/// It makes the release path total: no lookup, no `Option`, no panic, and no
-/// dependence on whether the pool still exists.
-///
-/// Note these are the two registries, deliberately, not an `Arc<Pool>`. A pool
-/// torn down mid-request is therefore reclaimed promptly — OS thread, radix
-/// tree and all — while only these two small maps outlive it, for exactly as
-/// long as some observation still needs them. Pinning the whole pool instead
-/// would keep an indexer thread alive per stray observation for up to
-/// `observation_ttl` (600s by default).
+/// The two registries rather than an `Arc<Pool>`, so a pool torn down
+/// mid-request (indexer thread, radix tree) is reclaimed promptly; only these
+/// two small maps outlive it, for as long as an observation needs them.
 #[derive(Clone)]
 pub struct InflightHandles {
     pub inflight: std::sync::Arc<crate::inflight_registry::InflightRegistry>,
@@ -69,45 +51,24 @@ impl std::fmt::Debug for InflightHandles {
     }
 }
 
-/// Snapshot of everything the caller needs to build a per-request
-/// observation row when the corresponding `ReportFirstToken()` (or, for
-/// arrives.
+/// Everything needed to build a per-request observation row when the
+/// corresponding `ReportFirstToken()` arrives.
 ///
-/// Constructed inside `KinferenceService::pick_and_record` at the
-/// successful end of the pick critical section. Consumed by
-/// `KinferenceService::finalize_observation` to produce the CSV row
-/// + clean up `InflightPrefixes` state.
-///
-/// Mirrors the pre-refactor `SelectionRecord` struct in
-/// the removed ext_proc front-end. The field set was load-bearing for the
-/// 42-column CSV layout, so we preserve it verbatim here.
+/// Built by `KinferenceService::pick_and_record` at the end of the pick
+/// critical section; consumed by `KinferenceService::finalize_observation`.
 #[derive(Debug, Clone)]
 pub struct PendingObservation {
-    /// Server-minted identifier for this pick. Echoed back via
-    /// `ObserveRequest.request_id` (gRPC) and used as the
-    /// `InflightPrefixes` key.
+    /// Server-minted identifier for this pick (the `response_id` on the
+    /// wire), also the `InflightPrefixes` key.
     pub request_id: u64,
-    /// The pool this pick was routed to. A LABEL only — for the CSV row and
-    /// log lines — so a value whose pool has since gone is harmless.
-    ///
-    /// LABELS, not handles: the release path carries `inflight` instead, so
-    /// these are only ever read to write a CSV row. They used to be a `PoolId`
-    /// the release path resolved up to `observation_ttl` (600s) after the pick
-    /// — see [`InflightHandles`] for why that went away. Names rather than the
-    /// id because the CSV is read by people and by
-    /// `analysis/analyze-latency.py`, both of which want the strings.
+    /// The worker set this pick was routed to. A label for the CSV row and
+    /// logs only; the release path uses `inflight`.
     pub workerset: String,
     /// The `[[profile]]` whose coefficients produced this row's prediction.
-    /// Without it a fleet sharing one profile across sets cannot tell whether a
-    /// residual is the tuning's fault or the set's.
     pub profile: String,
     /// The two things the release path actually touches, carried directly.
     pub inflight: InflightHandles,
-    /// Wall-clock at which the pick was made. Used by `finalize_observation`
-    /// to compute observed_ttft_ms when the caller reports a timestamp
-    /// rather than a duration (where the
-    /// caller doesn't pass it explicitly — TTFT == first ResponseBody
-    /// chunk timestamp). Also drives TTL eviction in `sweep_expired`.
+    /// When the pick was made. Drives TTL eviction in `take_expired`.
     pub picked_at: Instant,
     /// The worker selected by the picker. Carries the layered
     /// expected-overlap value (`matched_blocks` after layering), block
@@ -138,73 +99,46 @@ pub struct PendingObservation {
     pub inflight_overlap_blocks: Vec<u32>,
     /// Snapshot of `expected_overlap_alpha` at pick time.
     pub expected_overlap_alpha: f32,
-    /// Snapshot of the latency-model coefficients at pick time —
-    /// emitted into the CSV so each row carries the exact predictor
-    /// state that produced its prediction. Cheap to clone.
+    /// Snapshot of the latency-model coefficients at pick time, so each CSV
+    /// row carries the predictor state that produced it.
     pub predictor_cfg: PredictorConfig,
-    /// Snapshot of the routing-policy knobs at pick time. Same
-    /// "self-contained CSV row" rationale.
+    /// Snapshot of the picker knobs at pick time, likewise.
     pub picker_cfg: PickerConfig,
-    /// Caller-supplied identifier for log correlation —
-    /// `x-request-id` header or gRPC's `client_request_id`. Empty
-    /// when neither was set.
+    /// The caller's `client_request_id`, for log correlation.
     pub external_request_id: Option<String>,
     /// True when the cache-replication override swapped the picker's
     /// normal pick for a cold-idle alternative (see
-    /// `picker::cache_replication_override`). Emitted in the CSV so
-    /// offline analysis can split residuals by "did replication fire"
-    /// and check whether replication-driven picks are systematically
-    /// worse than baseline picks.
+    /// `picker::cache_replication_override`), so offline analysis can split
+    /// residuals by it.
     pub replication_fired: bool,
     /// The model this request resolved to (post-`auto`). The label for
     /// per-model observation metrics (e.g. the TTFT histogram); may differ
     /// from the client-supplied model string when `auto` was resolved.
     pub model: String,
     /// Whether the request asked for a streaming response (`stream: true`).
-    /// For non-streaming requests the caller's first-byte report only
-    /// arrives at full completion, so the reported "TTFT" is actually total
-    /// latency — meaningless for the prefill-latency model.
-    /// `finalize_observation` therefore skips the CSV row + residual log for
-    /// non-streaming picks (but still releases inflight/prefix state).
+    /// For non-streaming requests the reported "TTFT" is total latency, so
+    /// `finalize_observation` skips the CSV row (but still releases state).
     pub streaming: bool,
     /// QoS class from the Pick request. The `qos` label on the TTFT
     /// histogram, recorded from this record at `ReportFirstToken`.
     pub qos: Qos,
-    /// Tenant from the Pick request, RAW — the `tenant` label on the TTFT
-    /// histogram, recorded from this record at `ReportFirstToken`.
-    ///
-    /// Carried here rather than read back from `RequestLabels` at record time,
-    /// even though that map is still alive at `ReportFirstToken` today. That
-    /// ordering is a property of well-behaved callers, not an invariant:
-    /// `abort_request` and the TTL sweep both consume the entry, so an abort or
-    /// an expiry followed by a late report would drop the tenant from TTFT
-    /// alone — a per-tenant gap in one metric and not the others.
+    /// Tenant from the Pick request, raw: the `tenant` label on the TTFT
+    /// histogram. Carried here rather than read from `RequestLabels`, whose
+    /// entry an abort or TTL sweep may already have consumed.
     pub tenant: String,
 }
 
-/// Shared, in-memory stash of pending observations. Inserted at pick
-/// time (`pick_and_record`), consumed at observe time
-/// (`finalize_observation` / `abort_observation`). TTL eviction via
-/// `sweep_expired` runs from main as a backstop against leaked
-/// entries.
-///
-/// Backed by a `DashMap<u64, PendingObservation>`: O(1) insert/take,
-/// concurrent-safe across Pick() and ReportFirstToken() RPCs without an outer
-/// lock. The sweep traverses with `retain` which holds per-shard
-/// write locks briefly — fine at our scale (≤ few thousand entries
-/// peak).
+/// In-memory stash of pending observations. Inserted by `pick_and_record`,
+/// consumed by `finalize_observation` or `abort_observation`, and TTL-swept
+/// as a backstop.
 pub struct PendingObservations {
     by_id: DashMap<u64, PendingObservation>,
     ttl: Duration,
 }
 
 impl PendingObservations {
-    /// Construct with the given TTL. Entries older than `ttl` at
-    /// sweep time are evicted; pick `ttl` larger than the longest
-    /// reasonable TTFT (engine warmup + queue + prefill) plus a
-    /// safety margin. 30s mirrors the InflightPrefixes sweep — same
-    /// "long enough to never hit on a live request, short enough
-    /// that a stuck stream's leak doesn't accumulate" reasoning.
+    /// Construct with the given TTL, which must exceed the longest response
+    /// time a caller may take to report (see `observation_ttl_secs`).
     pub fn new(ttl: Duration) -> Self {
         Self {
             by_id: DashMap::new(),
@@ -212,29 +146,21 @@ impl PendingObservations {
         }
     }
 
-    /// Stash a pending observation keyed by `request_id`. Overwrites
-    /// any existing entry with the same id — under normal operation
-    /// `request_id` comes from a monotonic counter so collisions
-    /// don't happen.
+    /// Stash a pending observation keyed by `request_id`, overwriting any
+    /// existing entry (ids are random 64-bit, so collisions don't happen).
     pub fn insert(&self, obs: PendingObservation) {
         self.by_id.insert(obs.request_id, obs);
     }
 
-    /// Remove and return the entry for `request_id`, if present.
-    /// Called from `finalize_observation` (success) and
-    /// `abort_observation` (EOF fallback). `None` means the
-    /// `request_id` was unknown (already evicted by sweep, never
-    /// inserted, or already consumed).
+    /// Remove and return the entry for `request_id`. `None` means it was
+    /// unknown (swept, never inserted, or already consumed).
     pub fn take(&self, request_id: u64) -> Option<PendingObservation> {
         self.by_id.remove(&request_id).map(|(_, v)| v)
     }
 
-    /// Remove and return every entry whose `picked_at` is older than
-    /// `ttl`. Returns the evicted records so the caller can release each
-    /// one's inflight / inflight-prefix state (see
-    /// `KinferenceService::sweep_expired_observations`) — dropping them silently
-    /// would leak the workers' "occupied" bookkeeping. Called periodically
-    /// from the sweep task in main.rs.
+    /// Remove and return every entry older than `ttl`, so the caller can
+    /// release each one's inflight state (see
+    /// `KinferenceService::sweep_expired_observations`).
     pub fn take_expired(&self) -> Vec<PendingObservation> {
         let cutoff = Instant::now() - self.ttl;
         let expired: Vec<u64> = self
@@ -256,43 +182,33 @@ impl PendingObservations {
     }
 }
 
-/// Build the wire-shaped Arc that main.rs hands to both
-/// `KinferenceService` and (in the future) any other consumer.
+/// Arc constructor, used by `server.rs`.
 pub fn shared(ttl: Duration) -> Arc<PendingObservations> {
     Arc::new(PendingObservations::new(ttl))
 }
 
-/// Per-request metric labels (`model`, `qos`) needed at `ReportFinalToken`.
-/// The `PendingObservation` carries these too, but it's consumed at
-/// `ReportFirstToken`; this lighter side map survives until the terminal
-/// `ReportFinalToken` (or the TTL sweep) so the token + ITL metrics can be
-/// labeled consistently. Same lifecycle shape as `PendingObservations`, but
-/// nothing inflight is tied to it, so eviction is a plain drop.
+/// Per-request metric labels needed at `ReportFinalToken`. The
+/// `PendingObservation` is consumed earlier, at `ReportFirstToken`, so this
+/// side map survives until `ReportFinalToken` or the TTL sweep. Nothing
+/// inflight is tied to it, so eviction is a plain drop.
 #[derive(Debug, Clone)]
 pub struct RequestMeta {
     pub model: String,
     pub qos: Qos,
-    /// Tenant from the `Pick` request, RAW — the allowlist is applied by
-    /// `crate::prom` at record time, not here, so nothing can bypass it.
-    /// Empty means the caller sent none, which buckets under the default label.
+    /// Tenant from the `Pick` request, raw; `crate::prom` applies the
+    /// allowlist. Empty buckets under the default label.
     pub tenant: String,
     /// Whether the request asked for a streaming response.
     ///
-    /// Needed by the PROVIDER path specifically. A local pick keeps this on its
-    /// `PendingObservation`, but a provider pick has none, so this map is the
-    /// only place it survives — and without it the provider path cannot tell a
-    /// real time-to-first-token from a non-streaming response's total latency.
+    /// Needed by the provider path, which has no `PendingObservation`, to tell
+    /// a real TTFT from a non-streaming response's total latency.
     pub streaming: bool,
     pub picked_at: Instant,
     /// The `InferenceProvider` this pick went to, when it went off-cluster.
     ///
-    /// Lives here rather than in `PendingObservation` for two reasons. That type
-    /// is a CSV row built from per-endpoint scoring state — a radix match, a
-    /// prediction breakdown, a worker's load metrics — none of which a provider
-    /// has, so a provider would arrive there as a dozen meaningless defaults.
-    /// And this map's lifetime is the one that fits: it survives to
-    /// `ReportFinalToken`, which is exactly when a provider pick's feedback
-    /// finishes arriving.
+    /// Here rather than in `PendingObservation`, which is built from
+    /// per-endpoint scoring state a provider doesn't have, and because this
+    /// map lives until `ReportFinalToken`.
     pub provider: Option<crate::policy::engine::ObjectKey>,
 }
 
@@ -331,14 +247,9 @@ impl RequestLabels {
 
     /// What a provider pick's feedback needs, without consuming the entry.
     ///
-    /// A peek rather than a take because provider feedback arrives in stages —
-    /// `ReportFirstToken` carries the TTFT and the upstream status, `Abort`
-    /// carries a dispatch failure, and either may come before the terminal
-    /// report that clears this.
-    ///
-    /// Returned together rather than as separate lookups: the callers want
-    /// different subsets, and two lookups would let one request's fields come
-    /// from different map states.
+    /// A peek rather than a take, since provider feedback (`ReportFirstToken`,
+    /// `Abort`) may arrive before the terminal report that clears this. One
+    /// lookup, so all fields come from the same map state.
     pub fn provider_pick_for(&self, response_id: u64) -> Option<ProviderPickLabels> {
         self.by_id.get(&response_id).and_then(|m| {
             m.provider.clone().map(|provider| ProviderPickLabels {
@@ -365,13 +276,10 @@ pub fn shared_request_labels(ttl: Duration) -> Arc<RequestLabels> {
     Arc::new(RequestLabels::new(ttl))
 }
 
-/// Header row matching the column contract on `format_csv_row` —
-/// comma-joined column names, no trailing newline (the sink appends
-/// it). `ObservationSink` writes this exactly once when it creates a
-/// fresh CSV (file didn't exist OR was empty); existing files are
-/// not touched so concatenation across runs stays clean.
+/// Header row for `format_csv_row`'s columns, with no trailing newline (the
+/// sink appends it). `ObservationSink` writes it once, to a new or empty file.
 ///
-/// Must stay in lockstep with `format_csv_row` below. The
+/// Must stay in lockstep with `format_csv_row`; the
 /// `csv_header_matches_format_csv_row_arity` test pins that.
 pub const CSV_HEADER: &str = "unix_ms,name,endpoint,status,upstream_error,\
 predicted_ms,base_ms,q_ms,q_rate_ms_per_entry,prefill_ms,cache_ms,\
@@ -391,22 +299,18 @@ replication_threshold_pct,replication_warm_target,replication_warm_threshold_fra
 replication_fired,\
 workerset,profile";
 
-/// Format one CSV row. 52 columns, headerless.
+/// Format one CSV row, 52 columns, without the header (see [`CSV_HEADER`]).
 ///
-/// The format is APPEND-ONLY: every column keeps its position forever, and new
-/// ones go on the end, so a `latency.csv` accumulated across kinference versions
-/// stays parseable by column index. Cols 0-39 match the original 40-column
-/// layout; 40-49 added the rest of the `[predictor]` and `[picker]` snapshots
-/// plus `replication_fired`; 50-51 add the worker set and profile a row came
-/// from.
+/// The format is append-only: every column keeps its position, and new ones
+/// go on the end, so a CSV accumulated across kinference versions stays
+/// parseable by column index.
 ///
-/// Column order (positional — the CSV has no header row, so this
-/// docstring is the column contract):
+/// Column order:
 ///   0:  unix_ms
 ///   1:  name
 ///   2:  endpoint
 ///   3:  status
-///   4:  upstream_error              (empty — no transport-error analog wired)
+///   4:  upstream_error              always empty
 ///   5:  predicted_ms
 ///   6:  base_ms
 ///   7:  q_ms                        queue cost
@@ -550,13 +454,13 @@ pub fn format_csv_row(
         x_request_id,
         p.q_running_ms,
         p.decode_contention_ms,
-        // PredictorConfig: q_running U-shape + capacity + decode-contention (cols 41-44).
+        // PredictorConfig: q_running U-shape + capacity + decode-contention (cols 41-45).
         pred.q_running_penalty_peak_ms,
         pred.q_running_penalty_peak_qr,
         pred.q_running_penalty_falloff_qr,
         pred.inflight_concurrent_capacity,
         pred.forward_pass_ms,
-        // PickerConfig: replication (cols 45-47).
+        // PickerConfig: replication (cols 46-48).
         pkr.replication_threshold_pct,
         pkr.replication_warm_target,
         pkr.replication_warm_threshold_fraction,

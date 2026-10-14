@@ -2,14 +2,10 @@ use super::ObservationSink;
 use crate::observations::CSV_HEADER;
 
 /// `KINFERENCE_OBSERVATIONS_CSV` is process-global and cargo runs tests in
-/// threads, so the three tests below have to take turns: without this one
-/// test's `remove_var` lands between another's `set_var` and its
-/// `from_env()`, and the sink comes back disabled. That was an intermittent
-/// failure in roughly one run in five.
+/// threads, so the three tests below take turns.
 static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Ignores poisoning — a panicking test leaves the env var set, which the
-/// next test overwrites anyway, so there is no state to protect.
+/// Ignores poisoning: the next test overwrites the env var anyway.
 fn env_guard() -> std::sync::MutexGuard<'static, ()> {
     ENV.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -55,9 +51,7 @@ fn observation_sink_appends_silently_to_existing_file() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&tmp);
-    // Pre-seed the file with content. The sink should NOT prepend
-    // a header on open (would corrupt the existing schema /
-    // double-header an in-progress run).
+    // Pre-seed the file. The sink must not prepend a header.
     std::fs::write(&tmp, "pre-existing-row\n").expect("seed");
 
     unsafe {

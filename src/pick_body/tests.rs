@@ -1,25 +1,21 @@
 use super::*;
 use serde_json::json;
 
-/// The second of the two model decisions. A policy crossing worker sets
-/// picks a different model AFTER the body was already serialized, and
-/// forwarding it unchanged sent Qwen's model id to a Gemma endpoint, which
-/// 404s — the request succeeds all the way through kinference and fails upstream.
+/// A policy can pick a different model after the body was serialized, and
+/// the body must then name the new one.
 #[test]
 fn rewrite_model_replaces_the_model_and_preserves_everything_else() {
     let body = br#"{"model":"Qwen/Qwen2.5-32B-Instruct-AWQ","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#;
     let out = rewrite_model(body, "google/gemma-4-12B-it").expect("a JSON object rewrites");
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["model"], "google/gemma-4-12B-it");
-    // Everything the caller sent must survive — this runs after scoring, so
-    // dropping a field here changes what the engine actually executes.
+    // Every other field the caller sent survives.
     assert_eq!(v["max_tokens"], 16);
     assert_eq!(v["stream"], true);
     assert_eq!(v["messages"][0]["content"], "hi");
 }
 
-/// A body we cannot parse must be left alone, not mangled. The caller turns
-/// `None` into a refusal rather than forwarding a mismatched model.
+/// A body we cannot parse is left alone; the caller refuses the request.
 #[test]
 fn rewrite_model_refuses_a_non_object_body() {
     assert!(rewrite_model(b"not json", "m").is_none());
@@ -137,9 +133,7 @@ fn non_object_body_is_left_unchanged() {
     assert_eq!(obj, json!([1, 2, 3]));
 }
 
-/// The engine parses bodies with Pydantic, whose lax bool accepts far more
-/// than JSON's `true`. Kinference must agree with it or it measures a different
-/// request than the one the engine serves — silently, since nothing errors.
+/// `stream_flag` matches Pydantic's lax bool, as the engine does.
 #[test]
 fn stream_flag_matches_pydantic_lax_bool() {
     let t = |raw: &str| stream_flag(&serde_json::from_str::<Value>(raw).unwrap());
@@ -161,9 +155,8 @@ fn stream_flag_matches_pydantic_lax_bool() {
         assert!(t(raw), "{raw} should read as streaming");
     }
 
-    // Falsy, absent, and malformed. Note `2` is NOT truthy: Pydantic rejects
-    // non-0/1 integers rather than treating them as C-style truthiness, and
-    // guessing `true` there would invent a streaming request.
+    // Falsy, absent, and malformed. `2` is not truthy: Pydantic rejects
+    // integers other than 0 and 1.
     for raw in [
         r#"{"stream":false}"#,
         r#"{"stream":"false"}"#,
@@ -184,9 +177,7 @@ fn stream_flag_matches_pydantic_lax_bool() {
     }
 }
 
-/// The regression this fixes: a string-valued `stream` used to skip the
-/// injection entirely, so the engine streamed while the response carried no
-/// usage block and every token counter stayed flat.
+/// A string-valued `stream` still gets `include_usage` injected.
 #[test]
 fn string_valued_stream_still_gets_include_usage() {
     for raw in [
