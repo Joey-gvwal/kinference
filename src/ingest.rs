@@ -1,37 +1,22 @@
 //! Per-worker ZMQ ingest listener for vLLM KV-cache events.
 //!
-//! One [`spawn_worker_listener`] task per configured worker. Each task
-//! owns its sockets, parses vLLM's wire-format events through
-//! `dynamo_kv_router::zmq_wire`, and feeds them into the shared
-//! [`KvIndexer`] (radix tree) plus our local bookkeeping
-//! ([`InflightPrefixes`], [`PromMetrics`], [`WorkerRegistry`]) inside a
-//! single [`apply_frame`] call.
+//! One [`spawn_worker_listener`] task per worker. Each task owns its sockets,
+//! parses vLLM's wire-format events through `dynamo_kv_router::zmq_wire`, and
+//! feeds them into the shared [`KvIndexer`] (radix tree) and our bookkeeping
+//! ([`InflightPrefixes`], [`PromMetrics`], [`WorkerRegistry`]) in
+//! [`apply_frame`].
 //!
-//! ## Design — drain-inline gap handling
+//! Modelled after dynamo's `standalone_indexer` listener
+//! (`lib/kv-router/src/standalone_indexer/listener.rs`): the SUB socket and
+//! the DEALER replay socket live in one task, and gap recovery is synchronous
+//! and inline. When a live frame arrives with `seq > expected`, the loop
+//! requests a replay, applies every replayed event in order, then applies the
+//! live frame. Since gaps are only detected from a frame in hand, the
+//! listener never waits for a seq the publisher has already passed.
 //!
-//! Modelled after dynamo's [`standalone_indexer`] listener: one tokio
-//! task per worker; the SUB socket and DEALER replay socket live in
-//! the same task; **gap recovery is synchronous and inline**. When a
-//! live SUB frame arrives with `seq > expected`, the loop sends a
-//! replay request on the DEALER socket, drains the response, applies
-//! every replayed event in order, and then applies the live frame
-//! that triggered the detection.
-//!
-//! This is structurally immune to the "drain-to-live handover gap"
-//! we kept hitting with the previous separate-recv-thread design:
-//! gap detection is only ever triggered by a live frame already in
-//! hand, so there is no state where the listener silently waits
-//! forever for a seq the publisher has already passed.
-//!
-//! Sequence-cursor semantics are owned by
-//! [`dynamo_kv_router::recovery::CursorState`] (`Initial`,
-//! `Live(u64)`, `InvalidatedByBarrier(Option<u64>)`).
-//!
-//! [`standalone_indexer`]: dynamo's
-//! `lib/kv-router/src/standalone_indexer/listener.rs` —
-//! we reuse `CursorState` from there and port the control-flow
-//! pattern, but reimplement the ZMQ socket helpers here because
-//! dynamo keeps theirs `pub(super)`.
+//! Sequence-cursor semantics come from
+//! [`dynamo_kv_router::recovery::CursorState`]. The ZMQ socket helpers are
+//! reimplemented here because dynamo's are `pub(super)`.
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,17 +37,12 @@ use crate::inflight_prefixes::InflightPrefixes;
 use crate::prom::{IngestEvent, PromMetrics};
 use crate::workers::WorkerRegistry;
 
-/// Per-recv DEALER timeout. Keeps the inner loop responsive to
-/// cancellation and lets us measure inter-event delay during a
-/// replay.
+/// Per-recv DEALER timeout, keeping the replay loop responsive.
 const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;
 
-/// Spawn the ingest listener for a single worker. `endpoint_key` is
-/// the worker's `score_addr` (resolved by `WorkerEntry::from_config`)
-/// — the key into [`InflightPrefixes`] so the on-store hook can find
-/// the matching dispatches. `eviction_tx` lets this listener signal
-/// the main coordinator to evict the worker if its engine reports a
-/// block_size that doesn't match the fleet's configured value.
+/// Spawn the ingest listener for a single worker. `endpoint_key` is the
+/// worker's `score_addr`, the key into [`InflightPrefixes`]. `eviction_tx`
+/// lets the listener request eviction on a block_size mismatch.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_listener(
     cfg: WorkerConfig,
@@ -76,13 +56,9 @@ pub fn spawn_worker_listener(
     eviction_tx: EvictionTx,
     cancel: CancellationToken,
 ) {
-    // Temporary diagnostic switch: set `KINFERENCE_DISABLE_INGEST=1`
-    // to skip ZMQ ingest entirely. Workers are still marked ready
-    // (so picks work) but no SUB/DEALER sockets open, no events
-    // applied, no radix-tree state. Useful for isolating whether
-    // ingest activity contributes to runtime contention with the
-    // tokenize HTTP path. Remove the env var to restore normal
-    // ingest behavior — no recompile needed.
+    // Diagnostic switch: `KINFERENCE_DISABLE_INGEST=1` skips ZMQ ingest
+    // entirely. Workers are still marked ready, but the radix tree stays
+    // empty.
     if std::env::var("KINFERENCE_DISABLE_INGEST").is_ok() {
         tracing::warn!(
             worker_id = cfg.worker_id_str,
@@ -91,8 +67,7 @@ pub fn spawn_worker_listener(
              and cache-affinity routing will be no-op for this run."
         );
         workers.set_initial_sync_complete(cfg.worker_id_num);
-        // Drop the indexer / prom / inflight_prefixes Arc clones
-        // explicitly so it's clear this branch holds no references.
+        // This branch holds no references.
         let _ = (
             indexer,
             prom,
@@ -104,17 +79,9 @@ pub fn spawn_worker_listener(
         return;
     }
 
-    // No publish socket declared. In Kubernetes mode that means the
-    // `InferenceWorkerSet` omitted `spec.kvEvents`, which is a DECLARATION —
-    // these engines don't publish — and honoring it is the only correct
-    // response. Connecting to a default port instead would look healthy
-    // forever: ZMQ `connect` always succeeds, so the SUB socket would sit
-    // silent, `initial_sync_complete` would never fire, and the worker would
-    // stay un-ready with nothing to point at.
-    //
-    // So mark the worker ready and route to it on load alone. Degraded, not
-    // dead: queue depth and KV usage are still scraped, only the prefix signal
-    // is absent.
+    // No publish socket declared (e.g. the `InferenceWorkerSet` omits
+    // `spec.kvEvents`): these engines don't publish. Mark the worker ready and
+    // route on load alone, without a prefix signal.
     if cfg.zmq_endpoint.as_deref().unwrap_or("").is_empty() {
         tracing::info!(
             worker_id = cfg.worker_id_str,
@@ -168,11 +135,8 @@ pub fn spawn_worker_listener(
     });
 }
 
-/// Per-listener mutable state. Holds the cursor (for in-order
-/// gap-detection) and the event normalizer built once at startup
-/// from the fleet-wide `Config.kv_block_size`. If the engine ever
-/// reports a different block_size, the worker is evicted (we never
-/// rebuild the normalizer mid-flight).
+/// Per-listener mutable state: the cursor (for gap detection) and the event
+/// normalizer, built once from the pool's `kv_block_size`.
 struct ListenerState {
     cursor: CursorState,
     normalizer: ZmqEventNormalizer,
@@ -199,8 +163,7 @@ enum ReplayFailureReason {
     /// sentinel or socket close) before reaching the target.
     EndedBeforeTarget,
     /// Local wall budget exhausted before the publisher's sentinel
-    /// arrived. Not in dynamo's enum — we add it because we keep a
-    /// safety timeout that dynamo doesn't.
+    /// arrived. Not in dynamo's enum, which has no such timeout.
     WallBudgetExhausted,
 }
 
@@ -216,10 +179,9 @@ impl ReplayFailureReason {
     }
 }
 
-/// Per-replay-call tracker for log diagnostics. Ported from dynamo's
-/// `ReplayRecoveryProgress`. Mutated inside `replay_gap` after each
-/// frame is applied; consulted at exit to decide whether to emit the
-/// "replay incomplete" WARN with a structured reason.
+/// Per-replay-call tracker, used at exit to decide whether to warn that the
+/// replay was incomplete, and why. Ported from dynamo's
+/// `ReplayRecoveryProgress`.
 struct ReplayProgress {
     start_seq: u64,
     end_seq: u64,
@@ -284,12 +246,9 @@ impl ReplayProgress {
     }
 }
 
-/// Run a single listener until it errors or `cancel` fires. The body
-/// is a `tokio::select!` over (cancel, SUB recv). All gap recovery
-/// happens *inside* the SUB-recv branch, synchronously, before the
-/// triggering frame is applied. There is no separate recv thread,
-/// no pending-frame buffer, no mid-stream replay channel — the
-/// previous design's recurring bug class lived in those.
+/// Run a single listener until it errors or `cancel` fires. All gap recovery
+/// happens inside the SUB-recv branch, synchronously, before the triggering
+/// frame is applied.
 #[allow(clippy::too_many_arguments)]
 async fn run_listener(
     cfg: &WorkerConfig,
@@ -313,18 +272,11 @@ async fn run_listener(
     let replay_endpoint = cfg.replay_endpoint.clone();
 
     let mut sub = ZmqSocket::sub(&live_endpoint, &worker_id_str)?;
-    // Replay is OFF by default. Set `KINFERENCE_ENABLE_REPLAY=1` to
-    // turn it on. When off, live SUB ingest still flows (new block-
-    // stored events continue to populate the radix tree), but
-    // historical events are never fetched and gaps are not recovered.
-    // The default-off stance reflects two observations: (a) the
-    // DEALER replay tight-loop contends with the tokenize HTTP path
-    // and degrades tail latency, and (b) the radix tree picks up
-    // stale state when the engine's KV cache has been cleared without
-    // a process restart, leading to hallucinated cache hits in the
-    // picker. Live SUB alone gives consistent state for the duration
-    // of the process. Unlike `KINFERENCE_DISABLE_INGEST`, this knob
-    // never affects live ingest.
+    // Replay is off unless `KINFERENCE_ENABLE_REPLAY=1`. Live ingest still
+    // flows, but history is never fetched and gaps aren't recovered. Off by
+    // default because the replay loop contends with tokenization for tail
+    // latency, and because replayed history can be stale when the engine's
+    // KV cache was cleared without a restart, producing phantom cache hits.
     let enable_replay = std::env::var("KINFERENCE_ENABLE_REPLAY").is_ok();
     let mut replay = if !enable_replay {
         tracing::info!(
@@ -352,37 +304,25 @@ async fn run_listener(
         normalizer: ZmqEventNormalizer::new(block_size),
         block_size_guard: BlockSizeGuard::new(block_size),
     };
-    // Whether this listener has already reported that events are flowing.
-    // Local, so the registry write below happens once.
+    // Whether this listener has reported that events are flowing, so the
+    // registry write happens once.
     let mut observed_events = false;
-    // Liveness accounting for the heartbeat below. `frames_seen` counts every
-    // message that reached the socket, including ones we dropped for shape —
-    // it answers "is anything on the wire", which is a different question from
-    // "did we apply an event".
+    // Liveness accounting for the heartbeat. `frames_seen` counts every
+    // message, including ones dropped for shape.
     let mut frames_seen: u64 = 0;
     let mut events_applied: u64 = 0;
     let listener_started = Instant::now();
     let mut warned_idle = false;
     let mut heartbeat = tokio::time::interval(SUB_HEARTBEAT_IVL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // First tick fires immediately; burn it so the first report is one interval
-    // in rather than at t=0 when silence means nothing yet.
+    // Skip the immediate first tick.
     heartbeat.tick().await;
 
-    // Mark ready as soon as the sockets are connected — matching
-    // dynamo's `standalone_indexer::listener` pattern. The radix
-    // tree fills in lazily: when the first live SUB frame arrives,
-    // `handle_observation` sees `CursorObservation::Initial { got
-    // > 0 }` and fires a bounded `replay_gap(0, got)` to pull the
-    // history. Bounded requests get a publisher-sent sentinel and
-    // terminate cleanly; open-ended requests (the previous
-    // proactive-drain attempt) never get a sentinel because the
-    // publisher tails forever.
-    //
-    // Cold-start window: if the cluster is idle when kinference
-    // starts, the radix tree stays empty until the first event
-    // arrives. That's acceptable — no traffic means no routing
-    // decisions to get wrong.
+    // Mark ready as soon as the sockets are connected, as dynamo does. The
+    // radix tree fills in lazily: the first live frame triggers a bounded
+    // `replay_gap(0, got)` for the history (bounded, since only bounded
+    // requests get a sentinel). On an idle cluster the tree stays empty until
+    // the first event, which is harmless.
     workers.set_initial_sync_complete(worker_id_num);
     tracing::info!(
         worker_id = worker_id_str,
@@ -402,20 +342,13 @@ async fn run_listener(
                 );
                 return Ok(());
             }
-            // A connected-but-idle SUB is indistinguishable from a
-            // correctly-wired one: ZMQ `connect` succeeds with no peer, and
-            // `listener ready` prints either way. Without this, "the engine
-            // publishes nothing" and "we are subscribed to the wrong address"
-            // both present as an absence of log lines, forever. Report the
-            // silence positively so it can be acted on.
+            // ZMQ `connect` succeeds with no peer, so report silence, which
+            // can mean a wrong address as well as an engine publishing
+            // nothing.
             _ = heartbeat.tick() => {
                 let idle = listener_started.elapsed();
-                // ONCE, then never again at this level. The signal is "this
-                // listener has never received anything", which is worth saying
-                // exactly one time — repeating it every minute turns a real
-                // diagnostic into background noise an operator learns to
-                // filter, and a healthy fleet serving cached prefixes trips it
-                // legitimately.
+                // Warn once only, since a healthy fleet serving cached
+                // prefixes can also be silent.
                 if frames_seen == 0 && !warned_idle && idle >= SUB_IDLE_WARN_AFTER {
                     warned_idle = true;
                     tracing::warn!(
@@ -449,10 +382,8 @@ async fn run_listener(
                         continue;
                     }
                 };
-                // A decoded frame is the only proof the event stream is real —
-                // the SUB socket reaches steady state whether or not anything
-                // is publishing. Gated on a local flag so this costs one
-                // registry write per listener, not one per event.
+                // A well-formed frame is the only proof the event stream is
+                // real.
                 events_applied += 1;
                 if !observed_events {
                     observed_events = true;
@@ -474,9 +405,7 @@ async fn run_listener(
                 )
                 .await;
                 if evicted {
-                    // Block-size mismatch — eviction sent. Exit
-                    // cleanly; the coordinator will tear down our
-                    // task via the per-worker cancellation token.
+                    // Block-size mismatch: eviction sent, so exit.
                     return Ok(());
                 }
             }
@@ -484,10 +413,8 @@ async fn run_listener(
     }
 }
 
-/// Apply a single live SUB frame, recovering any sequence gap
-/// synchronously beforehand. Mirrors dynamo's
-/// `ListenerLoop::handle_message` / `handle_gap` pattern in
-/// `standalone_indexer/listener.rs`.
+/// Apply a single live SUB frame, recovering any sequence gap first. Mirrors
+/// dynamo's `ListenerLoop::handle_message` / `handle_gap`.
 #[allow(clippy::too_many_arguments)]
 async fn handle_observation(
     state: &mut ListenerState,
@@ -505,10 +432,7 @@ async fn handle_observation(
 ) -> bool {
     match state.cursor.observe(seq) {
         CursorObservation::Initial { got } if got > 0 => {
-            // First frame we've seen but the publisher's already at a
-            // non-zero seq. Drain `[0, got)` inline so the radix tree
-            // is contiguous with the live stream before we apply the
-            // in-hand frame.
+            // First frame, at a non-zero seq: drain `[0, got)` first.
             tracing::info!(
                 worker_id = worker_id_str,
                 start_seq = 0,
@@ -560,8 +484,7 @@ async fn handle_observation(
             }
         }
         CursorObservation::Stale { got, last_applied } => {
-            // Already applied this or earlier. Don't reapply, don't
-            // advance the cursor.
+            // Already applied.
             tracing::trace!(
                 worker_id = worker_id_str,
                 got,
@@ -598,20 +521,13 @@ async fn handle_observation(
     false
 }
 
-/// Drain `[start_seq, end_seq)` from the DEALER replay socket,
-/// applying each replayed frame to the radix tree and our
-/// bookkeeping.
+/// Drain `[start_seq, end_seq)` from the DEALER replay socket, applying each
+/// frame.
 ///
-/// Bounded requests only — `end_seq` must come from a known live-
-/// SUB-frame seq (see `handle_observation`). Open-ended requests
-/// (`end_seq = u64::MAX`) make the publisher tail forever; the
-/// sentinel never arrives and we hit the safety budget.
+/// `end_seq` must come from a live frame: for an open-ended request the
+/// publisher tails forever and never sends the sentinel.
 ///
-/// On exit, `ReplayProgress::failure_reason` decides whether to
-/// emit a structured WARN identifying why replay didn't deliver
-/// everything requested. Ported from dynamo's standalone_indexer
-/// listener (`ListenerLoop::replay_gap` +
-/// `ReplayRecoveryProgress::warn_if_incomplete`).
+/// Ported from dynamo's `ListenerLoop::replay_gap`.
 #[allow(clippy::too_many_arguments)]
 async fn replay_gap(
     start_seq: u64,
@@ -658,7 +574,7 @@ async fn replay_gap(
             .await
         {
             Ok(Some(m)) => m,
-            Ok(None) => continue, // recv timeout — keep waiting until wall budget
+            Ok(None) => continue, // recv timeout; keep waiting until wall budget
             Err(err) => {
                 tracing::warn!(
                     worker_id = worker_id_str,
@@ -696,10 +612,8 @@ async fn replay_gap(
         };
         let seq = u64::from_be_bytes(seq_bytes);
 
-        // Replayed events can arrive in interleaved or duplicate
-        // order; the cursor's `Stale` check is what protects the
-        // radix tree from double-applies. We still apply if the
-        // cursor accepts the frame; otherwise skip.
+        // The cursor's `Stale` check guards against duplicate replayed
+        // events.
         match state.cursor.observe(seq) {
             CursorObservation::Stale { .. } => {
                 continue;
@@ -708,9 +622,8 @@ async fn replay_gap(
             | CursorObservation::Contiguous { .. }
             | CursorObservation::FreshAfterBarrier { .. } => {}
             CursorObservation::Gap { .. } => {
-                // Replayed frame is itself ahead of cursor — accept
-                // it and advance; the gap will be reattempted by the
-                // next observation if needed.
+                // Ahead of the cursor: accept it; a later observation
+                // retries the gap.
             }
         }
 
@@ -729,41 +642,24 @@ async fn replay_gap(
         )
         .await;
         if evicted {
-            // Block-size mismatch — eviction sent, stop replaying.
+            // Block-size mismatch: eviction sent, stop replaying.
             return;
         }
         state.cursor = state.cursor.advance_to(seq);
         progress.record(seq);
 
-        // Cooperative yield every 32 applied events. Replay processes
-        // hundreds of events per second in a tight loop; without
-        // yielding, the tokio worker running this task is held the
-        // entire time, starving other async work (notably the
-        // tokenize HTTP client's response-body parse). Yield costs
-        // ~one queue push and lets the runtime service one HTTP
-        // task between event batches. 32 was picked empirically:
-        // small enough to keep tokenize-tail responsive under burst,
-        // large enough that yield overhead is a rounding error.
+        // Yield every 32 events, so the replay loop doesn't starve other
+        // tasks such as tokenization. 32 was picked empirically.
         if progress.replayed.is_multiple_of(32) {
             tokio::task::yield_now().await;
         }
 
-        // Optimization: if the cursor has caught up to (or passed)
-        // the requested end_seq, we can stop early — the publisher
-        // will continue streaming to its sentinel but we don't need
-        // those frames (they'll arrive live).
+        // Caught up to `end_seq`: the rest will arrive live.
         if seq + 1 >= end_seq {
             break;
         }
     }
 
-    // Decide what to emit. Three cases:
-    //   1. failure_reason() returns Some(_) → emit WARN with
-    //      structured fields (dynamo's pattern).
-    //   2. wall_budget_hit && failure_reason returns
-    //      WallBudgetExhausted → already in case 1.
-    //   3. Clean completion (sentinel + everything contiguous +
-    //      reached end) → emit INFO with the replayed count.
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match progress.failure_reason(wall_budget_hit) {
         Some(reason) => {
@@ -805,13 +701,10 @@ fn parse_seq_payload(msg: &[Vec<u8>]) -> Option<(u64, &[u8])> {
     Some((u64::from_be_bytes(seq_bytes), msg[2].as_slice()))
 }
 
-// --- Bookkeeping (preserved from previous design) -------------------
+// --- Bookkeeping ------------------------------------------------------
 
-/// Decode one ZMQ payload into events and apply each to the radix
-/// tree + our local bookkeeping. Side effects:
-/// [`InflightPrefixes::on_stored`] (drives layered-overlap math +
-/// tokenize-divergence sniff), [`PromMetrics::record_event`] (ingest
-/// counters), and `indexer.apply_event` (radix-tree state).
+/// Decode one ZMQ payload and apply each event to the radix tree,
+/// [`InflightPrefixes::on_stored`] and the ingest metrics.
 ///
 /// Returns `true` when this listener should stop because a
 /// block_size mismatch was detected and eviction has been signaled.
@@ -847,10 +740,7 @@ async fn apply_frame(
 
     for raw_event in batch.events {
         if block_size_guard.observe(&raw_event, worker_id_num, worker_id_str, eviction_tx) {
-            // Mismatch detected; eviction signal sent. Stop
-            // processing further events from this batch — they're
-            // suspect under a wrong block_size and the coordinator
-            // will tear down the listener shortly.
+            // Mismatch: eviction sent; the rest of the batch is suspect.
             return true;
         }
         let Some(placement_event) = normalizer.normalize(
@@ -866,21 +756,15 @@ async fn apply_frame(
         log_event(worker_id_str, seq, &router_event);
         let (ev_kind, n_blocks) = match &router_event.event.data {
             KvCacheEventData::Stored(d) => {
-                // Notify the pending-prefix tracker BEFORE we hand
-                // the event off to the indexer. Each stored hash is
-                // removed from any matching outstanding dispatches
-                // for this worker — once an `on_stored` drains a
-                // dispatch's `remaining` set, the dispatch drops out
-                // and the radix tree becomes the sole signal.
+                // Notify the pending-prefix tracker before the indexer.
+                // Once a dispatch's blocks are all stored it drops out, and
+                // the radix tree is the sole signal.
                 //
-                // We MUST match on `tokens_hash` (dynamo-kv-router's
-                // own XXH3 recomputation over the event's token_ids
-                // field), NOT `block_hash` (the engine's external
-                // hash). `InflightPrefixes` is populated from
-                // `compute_block_hash_for_seq` in `score_workers`
-                // ([src/grpc.rs]), so both sides need to be using
-                // XXH3 over the same token bytes for the match to
-                // ever land.
+                // Match on `tokens_hash` (dynamo-kv-router's XXH3 over the
+                // event's token ids), not `block_hash` (the engine's hash):
+                // `InflightPrefixes` is populated from
+                // `compute_block_hash_for_seq` in `score_workers`, which uses
+                // the same XXH3.
                 let stored_hashes: Vec<u64> = d.blocks.iter().map(|b| b.tokens_hash.0).collect();
                 inflight_prefixes.on_stored(endpoint_key, &stored_hashes);
                 (IngestEvent::Stored, d.blocks.len() as u64)
@@ -894,19 +778,15 @@ async fn apply_frame(
     false
 }
 
-/// KV block sizes are small (SGLang page-size 1, vLLM 16, Gemma 64,
-/// …). A `BlockStored` event reporting a value above this bound is a
-/// decode/transport glitch — a misframed ZMQ message, e.g. after PUB/SUB
-/// carried over an L4 load balancer dropped and re-synced the connection
-/// mid-stream — NOT a real engine block_size. Such events are dropped,
-/// never evicted on.
+/// KV block sizes are small (SGLang page-size 1, vLLM 16, Gemma 64). A
+/// `BlockStored` event above this bound is treated as a decode or transport
+/// glitch (e.g. a misframed message after a reconnect), dropped and never
+/// evicted on.
 const MAX_PLAUSIBLE_BLOCK_SIZE: u32 = 1024;
 
 /// How many consecutive main-attention `BlockStored` events must agree on
-/// the SAME (plausible) mismatching block_size before we evict. A real
-/// config mismatch reports the same wrong value on every event; a one-off
-/// corrupt frame doesn't repeat. This debounces transient ZMQ corruption
-/// so a single bad frame can't take a healthy worker out of rotation.
+/// the same (plausible) mismatching block_size before we evict. A real
+/// mismatch repeats; a corrupt frame doesn't.
 const BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD: u32 = 3;
 
 /// Verdict for one observed block_size, from [`BlockSizeGuard::classify`].
@@ -914,33 +794,23 @@ const BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD: u32 = 3;
 enum BlockSizeVerdict {
     /// Matches the configured value; the stream is healthy.
     Healthy,
-    /// Implausible value — treated as a decode/transport glitch and
-    /// dropped without affecting the debounce state.
+    /// Implausible value: a glitch, dropped without affecting the debounce
+    /// state.
     Glitch,
     /// Plausible value that mismatches, but not yet seen enough
     /// consecutive times to be sure it's a real config error.
     Pending { consecutive: u32 },
-    /// A sustained mismatch at one value — a genuine misconfiguration.
-    /// The caller should evict.
+    /// A sustained mismatch at one value: a genuine misconfiguration. The
+    /// caller should evict.
     Evict,
 }
 
-/// Per-listener guard against evicting a worker on a *spurious*
-/// block_size. Holds the debounce state a stateless check can't.
+/// Per-listener guard against evicting a worker on a spurious block_size.
 ///
-/// Homogeneous-pool assumption: every worker in a pool runs the same
-/// engine build with the same block_size. A real operator misconfig
-/// makes every event report the same wrong value, so it trips the
-/// threshold quickly and the operator sees a fail-loud eviction WARN
-/// with the value the engines actually use. But a *transient* corrupt
-/// frame (implausible value, or a plausible value seen once) no longer
-/// evicts — the reason this guard exists.
-///
-/// Mismatched main-attention events (the kind the radix tree indexes)
-/// are otherwise silently dropped by `dynamo_kv_router`; an undetected
-/// *sustained* mismatch would leave the worker's radix tree empty and
-/// every query against it return 0 matches, so eviction stays the
-/// fail-loud response to a real mismatch.
+/// `dynamo_kv_router` silently drops mismatched main-attention events, so a
+/// sustained mismatch would leave the radix tree empty; eviction makes it
+/// loud. A transient corrupt frame (an implausible value, or a plausible one
+/// seen once) doesn't evict.
 struct BlockSizeGuard {
     configured: u32,
     /// The last plausible, mismatching block_size observed, and how many
@@ -948,12 +818,8 @@ struct BlockSizeGuard {
     /// matches `configured`, so only a *sustained* mismatch trips.
     last_observed: Option<u32>,
     consecutive: u32,
-    /// One-shot latch: have we already surfaced (at WARN) that we're
-    /// persistently dropping this worker's KV events? Dropping is
-    /// otherwise DEBUG-only, so without this an operator would never
-    /// learn a worker's KV indexing is dead (e.g. a hybrid/Mamba model
-    /// whose event schema our dynamo-kv-router pin can't decode). We
-    /// warn once, then fall back to debug to avoid per-event spam.
+    /// Whether we've already warned that this worker's KV events are being
+    /// dropped (e.g. a hybrid/Mamba model). Later drops log at debug.
     warned_persistent_drop: bool,
 }
 
@@ -967,9 +833,7 @@ impl BlockSizeGuard {
         }
     }
 
-    /// Pure debounce/sanity core over an already-extracted block_size.
-    /// Mutates the debounce counters; performs no I/O so it's directly
-    /// unit-testable.
+    /// Debounce and sanity check over a block_size, with no I/O.
     fn classify(&mut self, engine_block_size: u32) -> BlockSizeVerdict {
         if engine_block_size == self.configured {
             self.last_observed = None;
@@ -977,9 +841,7 @@ impl BlockSizeGuard {
             return BlockSizeVerdict::Healthy;
         }
         if engine_block_size == 0 || engine_block_size > MAX_PLAUSIBLE_BLOCK_SIZE {
-            // Obviously-not-a-block-size → decode/transport glitch. Do
-            // NOT advance the debounce; a stream of varied garbage
-            // shouldn't accumulate toward eviction.
+            // A glitch; varied garbage shouldn't accumulate toward eviction.
             return BlockSizeVerdict::Glitch;
         }
         if self.last_observed == Some(engine_block_size) {
@@ -1014,31 +876,18 @@ impl BlockSizeGuard {
         else {
             return false;
         };
-        // Models with interleaved sliding-window / chunked-local layers
-        // (Gemma 3, Mistral, some MoEs) emit BlockStored events from BOTH
-        // their main-attention layers (larger blocks) AND their sliding-
-        // window layers (smaller blocks). The library's normalizer filter
-        // drops the non-main events via `kv_cache_spec_kind`; we mirror
-        // that filter here, otherwise a sliding-window event with a
-        // smaller block_size would look like a mismatch.
+        // Models with sliding-window or chunked-local layers (Gemma 3,
+        // Mistral, some MoEs) also emit BlockStored events for those layers,
+        // with smaller blocks. Mirror the normalizer's `kv_cache_spec_kind`
+        // filter so they don't look like a mismatch.
         //
-        // `None` means the engine did NOT tag the event with a spec kind.
-        // For a legacy single-attention model that's genuinely
-        // main-attention, so we keep it. BUT on a hybrid / Mamba-SSM model
-        // (e.g. Qwen3-*-Instruct) whose vLLM build predates KV-event
-        // spec-kind tagging, the Mamba state-layer blocks — which carry a
-        // huge block_size (e.g. 1568, the whole SSM "page", NOT a
-        // misdecode) — ALSO arrive untagged as `None` and slip through
-        // this filter; we can't tell them apart from real attention
-        // blocks. They're then caught only by the MAX_PLAUSIBLE_BLOCK_SIZE
-        // sanity bound in `classify` below (which disables prefix routing
-        // for that worker). The real fix is engine-side: run a vLLM build
-        // that emits `kv_cache_spec_kind`, so the Mamba blocks are labeled
-        // here (`Some(Mamba) => false`) and dropped, leaving the
-        // block_size-16 attention blocks to populate the radix tree.
-        // NOTE: bumping dynamo-kv-router does NOT help — it has had full
-        // Mamba spec-kind support (`filter::KvCacheSpecKind::Mamba`) since
-        // well before our pin; the missing metadata is on the wire.
+        // `None` (untagged) is kept, as for a single-attention model. On a
+        // hybrid/Mamba model (e.g. Qwen3-*-Instruct) with a vLLM build that
+        // doesn't tag events, the Mamba state blocks (huge block_size, e.g.
+        // 1568) also arrive untagged, and are caught only by
+        // `MAX_PLAUSIBLE_BLOCK_SIZE`, disabling prefix routing for the worker.
+        // The fix is an engine build that emits `kv_cache_spec_kind`; the
+        // dynamo-kv-router version is not the problem.
         let is_main_attention = match kv_cache_spec_kind {
             None => true,
             Some(
@@ -1057,9 +906,7 @@ impl BlockSizeGuard {
             BlockSizeVerdict::Glitch => {
                 let configured = self.configured;
                 if !self.warned_persistent_drop {
-                    // First time: surface loudly (once) so the operator
-                    // learns this worker's KV indexing is effectively
-                    // dead, rather than it failing silently at DEBUG.
+                    // Warn once, then log at debug.
                     self.warned_persistent_drop = true;
                     tracing::warn!(
                         worker_id = worker_id_str,
@@ -1172,23 +1019,16 @@ fn log_event(
 
 // --- ZMQ socket helpers ---------------------------------------------
 //
-// Tokio-async wrappers over `zmq::Socket`. We need this because
-// dynamo's equivalent (`standalone_indexer/zmq.rs`) is `pub(super)`
-// and not importable. The wrappers are mechanical: register the
-// socket's fd with tokio's `AsyncFd`, poll the socket's edge-trigger
-// `get_events()` to know when it's actually ready to recv/send (the
-// fd alone is a level-trigger and lies), and bail out cleanly on
-// timeouts so the caller can interleave cancel/budget checks.
+// Tokio wrappers over `zmq::Socket` (dynamo's are `pub(super)`): register
+// the socket's fd with `AsyncFd`, and check `get_events()` for actual
+// readiness, since the fd alone isn't reliable.
 
 /// How often the KV-event listener re-checks its own liveness. Cheap; the
 /// reporting below is what decides whether anything is said.
 const SUB_HEARTBEAT_IVL: Duration = Duration::from_secs(60);
-/// How long a listener must have received NOTHING before it says so — once.
-///
-/// An idle fleet legitimately publishes nothing: KV events fire on newly
-/// STORED blocks, so a workload whose prefixes are all already cached is
-/// silent and healthy. Five minutes of total silence is still worth one line,
-/// because it is also exactly what a wrong endpoint looks like.
+/// How long a listener must have received nothing before it warns, once.
+/// KV events fire only on newly stored blocks, so a healthy fleet can be
+/// silent, but so is a wrong endpoint.
 const SUB_IDLE_WARN_AFTER: Duration = Duration::from_secs(300);
 const ZMQ_SUB_RCVTIMEO_MS: i32 = 100;
 const ZMQ_RECONNECT_IVL_MS: i32 = 100;
@@ -1202,17 +1042,12 @@ const TCP_KEEPALIVE_IDLE_SECS: i32 = 60;
 const TCP_KEEPALIVE_INTVL_SECS: i32 = 30;
 const TCP_KEEPALIVE_CNT: i32 = 3;
 
-/// Tokio-driven wrapper around `zmq::Socket`. Owns the underlying
-/// socket; `AsyncFd` waits on the file descriptor's edge-triggered
-/// readiness and we check `get_events()` to decide whether the
-/// socket is actually ready.
+/// Tokio-driven wrapper around `zmq::Socket`.
 struct ZmqSocket {
     inner: AsyncFd<SocketWrapper>,
 }
 
-/// Holds the raw fd alongside the socket so `AsyncFd` can register
-/// it. The fd is owned by the socket; this struct just borrows it
-/// for `AsRawFd`.
+/// The socket plus its raw fd (owned by the socket), for `AsyncFd`.
 struct SocketWrapper {
     socket: zmq::Socket,
     fd: RawFd,
@@ -1268,29 +1103,21 @@ impl ZmqSocket {
 
     async fn recv_multipart(&mut self) -> Result<Vec<Vec<u8>>> {
         loop {
-            // ZMQ's FD is EDGE-triggered and this loop has three distinct
-            // failure modes that all look identical from outside — a listener
-            // that logged `listener ready` and then went quiet forever. The
-            // traces below tell them apart:
+            // ZMQ's fd is edge-triggered. The traces distinguish three ways
+            // a listener can go quiet:
             //
-            //   no `fd readable` at all  the FD never signals. Registration or
-            //                            edge-trigger problem; the socket may
-            //                            not be peered at all.
-            //   readable, no POLLIN      the FD woke us with nothing queued —
-            //                            connected but no publisher, or the
-            //                            subscription never took.
-            //   POLLIN then EAGAIN       the classic edge-trigger race: libzmq
-            //                            said readable, then had nothing.
-            //
-            // All at trace, so this costs nothing until someone is debugging.
+            //   no `fd readable` at all  the fd never signals; the socket may
+            //                            not be peered.
+            //   readable, no POLLIN      woken with nothing queued: no
+            //                            publisher, or no subscription.
+            //   POLLIN then EAGAIN       the edge-trigger race.
             let mut guard = self
                 .inner
                 .readable_mut()
                 .await
                 .context("AsyncFd readable")?;
             tracing::trace!("zmq: fd readable");
-            // Poll the socket's edge-triggered readiness; if it isn't
-            // actually ready, clear the readiness and wait again.
+            // Not actually ready: clear the readiness and wait again.
             let events = guard
                 .get_inner_mut()
                 .socket
@@ -1317,8 +1144,7 @@ impl ZmqSocket {
     }
 
     /// Like [`Self::recv_multipart`] but returns `Ok(None)` if the
-    /// `timeout` elapses with no frame available. Cancellation-safe:
-    /// callers can interleave with other selects.
+    /// `timeout` elapses with no frame available. Cancellation-safe.
     async fn recv_multipart_with_timeout(
         &mut self,
         timeout: Duration,
@@ -1370,22 +1196,15 @@ impl ZmqSocket {
     }
 }
 
-/// Three layers of socket robustness for a healthy PUB→SUB / DEALER
-/// stream over an L4 load balancer (AWS NLB and similar):
+/// Socket robustness for streams over an L4 load balancer (e.g. AWS NLB):
 ///
-/// 1. **OS TCP keepalive** — defends against a half-open TCP
-///    connection. Probes after 60s idle, then every 30s, drop
-///    after 3. Well inside NLB's 350s idle timeout.
-/// 2. **ZMTP 3.1 heartbeats** — libzmq exchanges PING/PONG at the
-///    protocol layer. A peer that stops responding has its
-///    connection torn down and rebuilt automatically. Requires
-///    libzmq 4.2.0+ on both peers.
-/// 3. **Bounded reconnect backoff** — `ZMQ_RECONNECT_IVL_MAX` caps
-///    libzmq's exponential backoff at 5s.
+/// 1. OS TCP keepalive, against half-open connections: probes after 60s
+///    idle, then every 30s, dropping after 3. Within NLB's 350s idle timeout.
+/// 2. ZMTP 3.1 heartbeats (libzmq 4.2.0+ on both peers): an unresponsive
+///    peer's connection is rebuilt.
+/// 3. Reconnect backoff capped at 5s.
 ///
-/// Errors on individual options are logged but not fatal — the
-/// socket still works with whatever subset of robustness features
-/// succeeded. Must be called before `connect()`.
+/// Option errors are not fatal. Must be called before `connect()`.
 fn apply_socket_robustness(socket: &zmq::Socket, worker_id: &str, kind: &str) {
     let _ = socket.set_tcp_keepalive(1);
     let _ = socket.set_tcp_keepalive_idle(TCP_KEEPALIVE_IDLE_SECS);
@@ -1399,12 +1218,8 @@ fn apply_socket_robustness(socket: &zmq::Socket, worker_id: &str, kind: &str) {
     }
 }
 
-// Drop ergonomics: the surrounding tokio task ends → AsyncFd drops →
-// SocketWrapper drops → zmq::Socket drops → libzmq closes the
-// connection. `ZMQ_LINGER_MS=0` on DEALER means we don't block on
-// pending sends at close time. The cancellation-token-driven exit
-// in `run_listener` ensures we leave the loop before the wrapper is
-// dropped, so nothing reaches into a half-closed socket.
+// Sockets close when the listener task ends. `ZMQ_LINGER_MS=0` on DEALER
+// means closing doesn't block on pending sends.
 
 #[cfg(test)]
 mod tests;

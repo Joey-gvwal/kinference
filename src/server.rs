@@ -41,15 +41,8 @@ struct Args {
 }
 
 /// Parse the command line and run the server until it is told to stop.
-///
-/// The whole of what `main` used to be. It lives in the library so that a
-/// second binary, `kinfctl`, can share every module with the server without
-/// widening a single item's visibility: both binaries are thin shims over
-/// this crate.
 pub async fn run() -> Result<()> {
-    // ANSI color codes only when stdout is a TTY and the user hasn't opted out
-    // via NO_COLOR (https://no-color.org). Piping or redirecting therefore
-    // produces clean ASCII without escape sequences.
+    // ANSI colors only on a TTY, and not with NO_COLOR (https://no-color.org).
     let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
         && std::env::var_os("NO_COLOR").is_none();
     tracing_subscriber::fmt()
@@ -74,10 +67,8 @@ pub async fn run() -> Result<()> {
     );
 
     let cancel = CancellationToken::new();
-    // Pre-bind so we can log READY only after the socket is genuinely
-    // listening — i.e., a successful nc/grpcurl/score connection would now
-    // be accepted. `TcpIncoming::new` binds synchronously and returns an
-    // io::Error on failure, which we surface before logging anything else.
+    // Pre-bind so READY is logged only once the socket is listening.
+    // `TcpIncoming::new` binds synchronously and fails with an io::Error.
     let incoming = tonic::transport::server::TcpIncoming::new(listen_addr, true, None)
         .map_err(|e| anyhow::anyhow!("failed to bind gRPC listener on {listen_addr}: {e}"))?;
 
@@ -85,21 +76,16 @@ pub async fn run() -> Result<()> {
         wait_for_shutdown_signal().await;
     };
 
-    // The elector is the one spawned task with work that MUST complete after
-    // cancellation: vacating the Lease is what lets a peer take over
-    // immediately instead of waiting out the full lease duration. Everything
-    // else can be dropped mid-flight. Held here so shutdown can await it —
-    // otherwise `main` returns, the runtime drops, and the vacate is aborted
-    // in flight, which makes the whole feature silently inert.
+    // The elector is the one task whose work must complete after
+    // cancellation: vacating the Lease lets a peer take over immediately.
+    // Held here so shutdown can await it before the runtime drops.
     let mut leader_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    // The two service implementations have different concrete types, so the
-    // `Router` returned by `add_service` doesn't unify. Serve inside each
-    // arm and let `?` short-circuit out at the end.
+    // The two service implementations have different types, so serve inside
+    // each arm.
     let server_result = if cfg.mock_mode {
-        // Mock mode flattens every pool's static workers into one
-        // registry and answers deterministically. Per-pool tuning is
-        // not modeled — mock only needs model→endpoint resolution.
+        // Mock mode flattens every pool's static workers into one registry
+        // and answers deterministically, with no per-pool tuning.
         let registry = Arc::new(WorkerRegistry::new());
         let mut next_num: u64 = 1;
         for spec in &cfg.pool_specs()? {
@@ -120,8 +106,7 @@ pub async fn run() -> Result<()> {
         let _ = next_num;
         tracing::info!("MOCK mode: ingest, metrics polling, and /tokenize are all bypassed");
         if cfg.admin_listen.is_some() {
-            // The admin listener exists to diagnose real-world traffic; mock data
-            // there is misleading. Surface the no-op clearly.
+            // Mock data on the admin listener would be misleading.
             tracing::warn!(
                 "admin_listen is set but ignored in mock mode (its telemetry is for diagnosing real-world traffic)"
             );
@@ -143,34 +128,24 @@ pub async fn run() -> Result<()> {
             .await
     } else {
         let metrics = Arc::new(MetricsRegistry::new());
-        // Prometheus exposition registry — shared by the gRPC
-        // `report_final_token` recorder and the dashboard's `/metrics` route.
+        // Prometheus registry, shared by the gRPC handlers and the admin
+        // listener's `/metrics`.
         let prom = Arc::new(prom::PromMetrics::with_config(&cfg.metrics));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
-        // Wall-clock budget for a single replay_gap call against the
-        // DEALER socket. Initial-drain replays may need to apply
-        // 10k+ events from history; at ~150-250 events/sec apply
-        // rate that's 40-60s of wall time, so we default high.
-        // Steady-state gap recovery completes far faster.
+        // Wall-clock budget for one replay_gap call. High because the initial
+        // drain can take 40-60s; see `Config::replay_timeout_ms`.
         let replay_timeout_ms = cfg.replay_timeout_ms.unwrap_or(60_000);
 
-        // Build one Pool per `[[workerset]]`. Each owns its own KvIndexer
-        // (sized to the pool's block_size), WorkerRegistry,
-        // InflightPrefixes, InflightRegistry, and pick lock.
-        // Paired with its config rather than looked up by id: a PoolId is no
-        // longer an index, and indexing `cfg.pools` by one was only ever
-        // correct because the two vectors happened to be built together.
-        // Declarations resolved against their profiles once, here. Everything
-        // downstream sees `PoolSpec`, never a profile reference.
+        // One `PoolSpec` per `[[workerset]]`, resolved against its profile.
+        // Each pool owns its own KvIndexer, WorkerRegistry, InflightPrefixes,
+        // InflightRegistry and pick lock.
         //
         // The pools themselves are built by `PoolManager` further down, once
-        // the things a pool needs to be wired to exist (the coordinator
-        // channel, telemetry, the eviction channel). Publishing a pool before
-        // those exist would make it visible to picks while nothing fed it.
+        // the coordinator and eviction channels exist; publishing one earlier
+        // would make it visible to picks while nothing fed it.
         let specs = cfg.pool_specs()?;
-        // The published set every consumer reads. Swapping it is a pointer
-        // write rather than a structural change to each consumer.
+        // The published pool set every consumer reads.
         let pool_registry = pool::PoolRegistry::new();
         for spec in &specs {
             tracing::info!(
@@ -182,41 +157,32 @@ pub async fn run() -> Result<()> {
             );
         }
 
-        // Reactive model→pool routing + worker→pool reverse index.
+        // Model to pools routing, and the worker to pool reverse index.
         let model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let worker_pool: Arc<DashMap<u64, Arc<Pool>>> = Arc::new(DashMap::new());
 
         // TTL for a pick's in-flight bookkeeping (pending observation +
         // inflight counter + inflight-prefix entry). Must exceed worst-case
-        // *full* response time — see `Config::observation_ttl_secs`.
+        // *full* response time; see `Config::observation_ttl_secs`.
         let observation_ttl =
             std::time::Duration::from_secs(cfg.observation_ttl_secs.unwrap_or(600));
 
-        // Shared pending-observation stash. Inserted at pick time by
-        // `pick_and_record` (gRPC `Pick()`),
-        // consumed at observe time. Its TTL sweep — which also releases the
-        // inflight/prefix state each evicted pick reserved — is spawned once
-        // the `KinferenceService` exists (the cleanup needs the service); see
-        // below.
+        // Pending-observation stash, inserted at pick and consumed at report.
+        // Its TTL sweep, which also releases each evicted pick's inflight
+        // state, is spawned below once the service exists.
         let pending_observations = observations::shared(observation_ttl);
         // Per-request metric labels (model + qos), same TTL/lifecycle as the
         // pending-observation stash; taken at ReportFinalToken, TTL-swept.
         let request_labels = observations::shared_request_labels(observation_ttl);
 
-        // Buffered request bodies for PushBody → Pick → PullBody. Its TTL is
-        // deliberately much shorter than `observation_ttl`: bodies are large and
-        // every step that consumes one follows immediately, so a body still here
-        // after a minute belongs to a caller that vanished.
+        // Buffered bodies for PushBody, Pick, PullBody. A much shorter TTL than
+        // `observation_ttl`: bodies are large and consumed immediately.
         let body_ttl = std::time::Duration::from_secs(cfg.body_ttl_secs.unwrap_or(60));
         let body_idle_timeout =
             std::time::Duration::from_secs(cfg.body_idle_timeout_secs.unwrap_or(30));
-        // Config is in KB for legibility; everything downstream — the store, the
-        // gRPC frame limit, `kinference_body_buffer_bytes` — is in bytes. Convert
-        // once, here, so only this line knows about the unit.
-        //
-        // `saturating_mul` so an absurd config value clamps instead of wrapping
-        // to a small cap, which would silently make the buffer tiny.
+        // Config is in KB; everything downstream is in bytes. `saturating_mul`
+        // so an absurd value clamps instead of wrapping to a tiny cap.
         const KB: u64 = 1024;
         let body_max_request_bytes = cfg
             .body_max_request_kb
@@ -235,26 +201,14 @@ pub async fn run() -> Result<()> {
             "Body buffer configured"
         );
 
-        // Shared HTTP client for tokenize fanout. Built once here so
-        // connections pool across score requests; per-call
-        // `Client::new()` would forfeit pooling, timeout, and every
-        // tuning knob below.
+        // Shared HTTP client for tokenization, so connections pool.
         //
-        // The pool/keepalive settings mirror what the upstream
-        // Gateway-API-Inference-Extension EPP uses for its vLLM
-        // tokenize calls. vLLM speaks HTTP/1.1 only — no h2c — so
-        // we force H/1.1 here and skip any ALPN negotiation. Under
-        // bench concurrency, HTTP/1.1 needs multiple concurrent TCP
-        // connections per host since H/1.1 can't multiplex. The
-        // pool idle cap is operator-tunable via
-        // `tokenize.pool_max_idle_per_host` — default 16 fits the
-        // per-worker rotation path; bump to ≥ peak concurrency when
-        // pointing `tokenize.url` at a single dedicated render
-        // endpoint, so warmed connections survive between bursts.
-        // `pool_idle_timeout = 90s` matches the EPP default and
-        // AWS NLB's idle-tolerance. `tcp_keepalive` lets the OS
-        // detect half-closed connections without us discovering them
-        // via a failed request.
+        // Settings mirror the Gateway API Inference Extension EPP's. vLLM speaks
+        // HTTP/1.1 only, so force it; without multiplexing that means several
+        // connections per host (`tokenize.pool_max_idle_per_host`, default 16;
+        // raise to peak concurrency with a single `render_url`).
+        // `pool_idle_timeout = 90s` matches the EPP and AWS NLB idle tolerance;
+        // `tcp_keepalive` detects half-closed connections.
         let pool_max_idle_per_host = cfg.tokenize.pool_max_idle_per_host.unwrap_or(16);
         let tokenize_client = Arc::new(
             reqwest::Client::builder()
@@ -269,20 +223,9 @@ pub async fn run() -> Result<()> {
         );
         tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
 
-        // Build the LocalTokenizerRegistry unconditionally. It's
-        // ~free to construct (empty DashMaps + a reqwest client),
-        // and keeping it around in every mode means an operator can
-        // flip Render → Compare → Local at runtime without a
-        // process restart — the cost of the first request after a
-        // flip is one Hub fetch per model, then cache-warm for the
-        // session. The registry must exist BEFORE the coordinator
-        // spawns so handle_added can thread it into the per-worker
-        // metrics poller / warmup tasks.
-        // The local tokenizer registry is fleet-wide (keyed by model,
-        // one on-disk cache). The tokenization MODE is per-pool now, so
-        // the registry is always built; each pool decides whether it
-        // consults it. Warmup is gated per-pool inside `handle_added`
-        // (only non-Render pools pre-load tokenizers).
+        // The local tokenizer registry is fleet-wide and cheap to build, so it
+        // is always built; each pool's tokenize mode decides whether to use it.
+        // It must exist before the coordinator spawns, for `handle_added`.
         let warmup_enabled = cfg.tokenize.local.warmup;
         let local_tokenizer =
             match local_tokenize::LocalTokenizerRegistry::new(cfg.tokenize.local.clone()) {
@@ -304,43 +247,25 @@ pub async fn run() -> Result<()> {
                 }
             };
 
-        // Coordinator channel carries (PoolId, WorkerChange). Each pool
-        // runs its own Discovery; a per-pool forwarder tags that pool's
-        // events with its id onto this shared channel.
-        // Carries the pool itself rather than its id: the forwarder already
-        // holds an `Arc<Pool>`, so passing it removes a lookup that could
-        // otherwise resolve to nothing once the pool set is mutable.
+        // Coordinator channel of (pool, change). Each pool runs its own
+        // discovery, and a per-pool forwarder tags its events with the pool.
         let (coord_tx, mut rx) = tokio::sync::mpsc::channel::<(Arc<Pool>, WorkerChange)>(64);
         // Per-worker cancellation tokens so Removed can stop a single
         // worker's listeners without disturbing the rest of the fleet.
         //
-        // Keyed by (pool, worker) rather than worker alone. A worker moving
-        // between worker sets otherwise has its new pool's token overwrite the
-        // old one, and the old pool's Removed then cancels the NEW pool's
-        // listeners — a healthy worker in the correct pool goes dark, and the
-        // logs blame the pool that left.
+        // Keyed by (pool, worker), so when a worker moves between worker sets
+        // the old pool's Removed doesn't cancel the new pool's listeners.
         let task_tokens: Arc<DashMap<(PoolId, u64), CancellationToken>> = Arc::new(DashMap::new());
 
-        // Eviction signal — subsystems (ingest, metrics) request a
-        // worker's removal here when they detect a homogeneity
-        // violation. The coordinator below drains the receiver and
-        // runs the same teardown as a discovery-initiated Removed.
+        // Ingest and metrics request a worker's eviction here on a homogeneity
+        // violation; the coordinator runs the same teardown as for Removed.
         let (eviction_tx, mut eviction_rx) = eviction::channel();
 
-        // In-cluster credentials, acquired ONCE if any worker set needs them.
-        //
-        // `KubeDiscovery::new` used to do this per pool, which made pool
-        // creation async and fallible. That is tolerable at startup — failing
-        // hard on unreachable credentials is right — and intolerable in a
-        // reconcile loop, where a transient apiserver hiccup would turn "a
-        // worker set appeared" into a silent failure with nothing to retry it.
-        // Fail here, where fatal is the correct response.
-        // Needed the moment any pool watches EndpointSlices. A TOML worker set
-        // in kubernetes mode says so at startup; a CR-derived one cannot be
-        // known until the watch lists, so try whenever `[kubernetes]` is on and
-        // let a failure surface per-pool rather than killing the process. That
-        // ordering is what lets the CR resolution path be exercised from
-        // outside a cluster, where pod IPs are unreachable but the CRs are not.
+        // In-cluster credentials, acquired once here so pool creation stays
+        // synchronous and infallible. Required (fatal) when a TOML worker set
+        // uses kubernetes discovery; with only `[kubernetes]` on, a failure
+        // surfaces per pool instead, so CR resolution can run outside a
+        // cluster.
         let needs_kube_now = specs
             .iter()
             .any(|s| s.discovery.mode == DiscoveryMode::Kubernetes);
@@ -363,9 +288,8 @@ pub async fn run() -> Result<()> {
             None
         };
 
-        // Everything a pool has to be wired to now exists, so pools can be
-        // built. `PoolManager` owns the live set; the registry above is what
-        // it publishes for everyone else to read.
+        // Pools can be built now. `PoolManager` owns the live set and
+        // publishes it to the registry.
         let hooks = Arc::new(MainHooks {
             cancel: cancel.clone(),
             coord_tx: coord_tx.clone(),
@@ -376,9 +300,8 @@ pub async fn run() -> Result<()> {
             observation_ttl,
             discovery_tokens: DashMap::new(),
         });
-        // Published by the worker-set watch, read by the status writer. Built
-        // unconditionally so the status writer never has to care whether the
-        // watch is running; with `[kubernetes]` off it simply stays empty.
+        // Written by the worker-set watch, read by the status writer. Empty
+        // with `[kubernetes]` off.
         let rejection_store = policy::worker_sets::RejectionStore::new();
         let mut pool_manager = pool_manager::PoolManager::new(
             pool_registry.clone(),
@@ -387,22 +310,18 @@ pub async fn run() -> Result<()> {
             model_router.clone(),
             pool_manager::ReapPolicy {
                 linger: std::time::Duration::from_secs(30),
-                // A retired pool must outlive the observations that might still
-                // resolve against it, or the backstop fires while a request is
-                // genuinely mid-flight.
+                // A retired pool must outlive observations that may still
+                // reference it.
                 backstop: observation_ttl.max(std::time::Duration::from_secs(600)),
             },
         );
-        // TOML-declared sets are materialized immediately; CR-declared ones
-        // arrive with the watch. The two coexist: a static set and an
-        // `InferenceWorkerSet` are both just a `PoolSpec`, and their keys cannot
-        // collide because a CR key is always namespaced and a TOML key never is.
+        // TOML-declared sets are materialized now, CR-declared ones with the
+        // watch. Their keys can't collide: CR keys are namespaced, TOML keys
+        // never are.
         let report = pool_manager.reconcile(specs.clone());
         if !report.failed.is_empty() {
-            // At STARTUP a worker set that cannot be wired is fatal: the
-            // operator asked for it explicitly and would otherwise get a
-            // silently smaller fleet. A reconcile at runtime logs and carries
-            // on, because the rest of the fleet is already serving.
+            // Fatal at startup, unlike at runtime, so a misconfigured set
+            // doesn't silently shrink the fleet.
             anyhow::bail!(
                 "failed to start worker set(s): {}",
                 report
@@ -415,14 +334,11 @@ pub async fn run() -> Result<()> {
         }
         let live_pools = pool_registry.snapshot();
 
-        // The manager moves into exactly one task — its single owner, so the
-        // live map needs no lock. With `[kubernetes]` on that task also watches
-        // `InferenceWorkerSet`s and reconciles; without it, it only reaps.
+        // The manager moves into one task, so it needs no lock. With
+        // `[kubernetes]` on, that task also watches `InferenceWorkerSet`s;
+        // otherwise it only reaps.
         if cfg.kubernetes.enabled {
-            // Its own client, inferred rather than in-cluster-only: reading CRs
-            // from outside the cluster is harmless, and it is only the pod IPs
-            // that EndpointSlice discovery derives that would be unreachable.
-            // Same reasoning as `policy::status::spawn`.
+            // Inferred, so it also works outside a cluster.
             let client = kube::Client::try_from(kube::Config::infer().await?)?;
             let watcher = policy::worker_sets::WorkerSetWatcher::new(
                 &cfg.kubernetes,
@@ -446,30 +362,14 @@ pub async fn run() -> Result<()> {
                 }
             });
         }
-        // KEEP a sender alive alongside the coordinator, rather than dropping
-        // ours here.
-        //
-        // Dropping it was right while the pool set was fixed: the only way for
-        // every forwarder to exit was process cancellation, so a closed channel
-        // meant shutdown. Once pools come and go it means something else
-        // entirely — the pool count reached zero — and the coordinator would
-        // exit permanently on `rx.recv() == None`. Scale to zero worker sets
-        // and back up, and no worker would ever be registered again for the
-        // life of the process, with one debug line as the only trace.
-        //
-        // Holding a sender the coordinator itself owns makes the channel
-        // outlive any number of forwarders, so cancellation stays the single
-        // shutdown signal.
+        // Keep a sender alive in the coordinator, so the channel doesn't close
+        // when the pool count reaches zero; cancellation is the only shutdown
+        // signal.
         let coord_keepalive = coord_tx.clone();
         drop(coord_tx);
 
-        // Coordinator. Dispatches each (pool, change) to that pool's
-        // state stores.
-        //
-        // It no longer holds a snapshot of the pool set. Both the discovery
-        // channel and `worker_pool` carry `Arc<Pool>` directly, so there is
-        // nothing left to look up — which also means there is no frozen vec
-        // here to go stale, and no id that could index past its end.
+        // Coordinator. Dispatches each (pool, change) to that pool's state
+        // stores.
         let coord_metrics = metrics.clone();
         let coord_cancel = cancel.clone();
         let coord_task_tokens = task_tokens.clone();
@@ -479,9 +379,7 @@ pub async fn run() -> Result<()> {
         let coord_worker_pool = worker_pool.clone();
         let coord_prom = prom.clone();
         tokio::spawn(async move {
-            // Moved in so it lives exactly as long as the coordinator: the
-            // channel cannot close underneath it, whatever happens to the
-            // forwarders. Cancellation is the only way out of the loop below.
+            // Lives as long as the coordinator.
             let _keepalive = coord_keepalive;
             loop {
                 tokio::select! {
@@ -493,10 +391,8 @@ pub async fn run() -> Result<()> {
                             .get(&req.worker_id_num)
                             .map(|e| e.value().clone());
                         if let Some(pool) = owner {
-                            // Counted here rather than inside the teardown: this
-                            // is the only path that carries a reason, and doing
-                            // it after the pool lookup means a request for a
-                            // worker already gone is not counted twice.
+                            // Counted here, the only path with a reason, and
+                            // after the lookup so a gone worker isn't counted.
                             coord_prom.record_worker_eviction(req.reason.as_label());
                             evict_worker(
                                 req.worker_id_num,
@@ -511,11 +407,7 @@ pub async fn run() -> Result<()> {
                     }
                     change = rx.recv() => {
                         let Some((pool, change)) = change else {
-                            // Unreachable while `_keepalive` is held: the
-                            // coordinator owns a sender, so the channel cannot
-                            // close just because every forwarder exited. Left
-                            // as a loud error rather than deleted, because
-                            // reaching it would mean that invariant broke.
+                            // Unreachable while `_keepalive` is held.
                             tracing::error!(
                                 "coordinator: discovery channel closed while a sender is held; \
                                  no further worker registration will happen"
@@ -559,12 +451,12 @@ pub async fn run() -> Result<()> {
             }
         });
 
-        // Admin listener + the metrics rollup — only when configured.
-        // One `PolicyStore` for the whole process, made before anything that
-        // reads it. `None` when policy is off, which `/readyz` treats as "nothing
-        // to wait for".
+        // One `PolicyStore` for the process, made before anything reads it.
+        // `None` when policy is off, which `/readyz` treats as nothing to wait
+        // for.
         let policy_store_cell = cfg.policy.enabled.then(policy::store::PolicyStore::new);
 
+        // Admin listener and the metrics rollup, when configured.
         if let Some(addr_str) = &cfg.admin_listen {
             let dash_addr: std::net::SocketAddr = addr_str
                 .parse()
@@ -575,9 +467,8 @@ pub async fn run() -> Result<()> {
                 prom.clone(),
                 cancel.clone(),
             );
-            // Created here rather than with the watcher below, because `/readyz`
-            // gates on it: the store starts un-listed, and that is precisely the
-            // window where serving a Pick would silently bypass policy.
+            // `/readyz` gates on the policy store being listed, so picks don't
+            // bypass policy at startup.
             let dash_pools = pool_registry.clone();
             let dash_policy = policy_store_cell.clone();
             let dash_metrics = metrics.clone();
@@ -607,20 +498,14 @@ pub async fn run() -> Result<()> {
             "READY: gRPC accepting connections"
         );
 
-        // The observation CSV sink is shared across pools + both
-        // front-ends; rows carry their pool + config snapshot so offline
-        // analysis can split by pool. Per-pool inflight counters and
-        // pick locks live inside each `Pool`.
+        // The observation CSV sink is shared across pools; rows carry their
+        // pool and config snapshot.
         let observation_sink = Arc::new(observation_sink::ObservationSink::from_env());
 
-        // Optional CRD-driven routing policy. Built before the service so the
-        // watcher can be handed the same snapshot cell the pick path reads.
-        // `None` when disabled, which makes a pool-naming Pick fall back to
-        // model→pool routing rather than fail.
+        // Optional CRD-driven routing policy, sharing the snapshot cell the
+        // pick path reads. When disabled, a pool-naming Pick falls back to
+        // model-based routing.
         let policy_bits = if cfg.policy.enabled {
-            // A destination resolves by IDENTITY now: an `InferenceWorkerSet`
-            // IS a pool, so the lookup is (namespace, name) against the live
-            // pool set. There is nothing to bind at startup.
             if !cfg.kubernetes.enabled {
                 tracing::warn!(
                     "[policy] is enabled but [kubernetes] is not, so no pool has a \
@@ -632,10 +517,8 @@ pub async fn run() -> Result<()> {
             let store = policy_store_cell
                 .clone()
                 .expect("created whenever [policy] is enabled");
-            // ONE store, shared deliberately: the service writes into it from the
-            // Abort / ReportFirstToken handlers, and the status writer publishes
-            // what it holds. Two instances would leave provider status permanently
-            // reporting a provider nobody had reported anything about.
+            // Shared: the service writes it from the feedback handlers and the
+            // status writer publishes it.
             let provider_health = Arc::new(policy::provider_health::ProviderHealthStore::new());
             let watcher = policy::store::PolicyWatcher::new(
                 cfg.policy.namespace.clone(),
@@ -648,13 +531,9 @@ pub async fn run() -> Result<()> {
                 let cancel = cancel.clone();
                 tokio::spawn(async move { watcher.run(cancel).await });
             }
-            // Only ONE replica may write status. Everything else — discovery,
-            // these watches, KV ingest, picking — runs on every replica, so a
-            // follower is a fully functional router that just doesn't publish.
-            //
-            // With election disabled the channel is pre-set to `true` and no
-            // elector is spawned, so a single-replica deployment behaves exactly
-            // as it did before this existed.
+            // Only one replica writes status; everything else runs on every
+            // replica. With election disabled the channel is set to `true` and
+            // no elector is spawned.
             let leader_rx = if cfg.leader_election.enabled {
                 let (tx, rx) = tokio::sync::watch::channel(false);
                 let ns = cfg
@@ -665,9 +544,7 @@ pub async fn run() -> Result<()> {
                     .unwrap_or_else(|| "default".to_string());
                 let identity = leader_identity();
                 let params = leader::LeaseParams::from(&cfg.leader_election);
-                // Reuse the client construction policy the controller side
-                // already uses (`Config::infer`), so the Lease is reachable in
-                // exactly the deployments where status writing is.
+                // `Config::infer`, like the status writer.
                 let kube_cfg = kube::Config::infer().await?;
                 let client = kube::Client::try_from(kube_cfg)?;
                 tracing::info!(
@@ -686,18 +563,14 @@ pub async fn run() -> Result<()> {
                 }));
                 rx
             } else {
-                // Always-leader. `watch::channel` keeps the sender alive by
-                // leaking it deliberately: dropping it would close the channel,
-                // and the writer treats a closed channel as "hold current
-                // state" plus an error — noise for a case that is not an error.
+                // Always leader. The sender is leaked so the channel never
+                // closes, which the writers would log as an error.
                 let (tx, rx) = tokio::sync::watch::channel(true);
                 std::mem::forget(tx);
                 rx
             };
 
-            // kinference is the router-controller for these kinds, so it publishes
-            // their status. This is not just observability: a conforming
-            // gateway will not program a route until the pool reports
+            // A conforming gateway won't program a route until the pool reports
             // Accepted=True, so nothing routes until this runs.
             policy::status::spawn(
                 cfg.policy.namespace.as_deref(),
@@ -712,14 +585,8 @@ pub async fn run() -> Result<()> {
             )
             .await?;
 
-            // The other half of being the router-controller: a gateway has no
-            // schema for `InferencePool` and cannot resolve a route that names
-            // one. kinference publishes what each pool resolves to as a
-            // `BackendBinding`, in kinds the gateway does understand.
-            //
-            // Leader-gated with the same receiver as status, for the same
-            // reason: these are objects, and two writers that disagree on one
-            // field rewrite each other forever.
+            // `BackendBinding`s let a gateway resolve a route naming an
+            // `InferencePool`. Leader-gated like status.
             if cfg.policy.backend_bindings {
                 policy::binding::spawn(
                     cfg.policy.namespace.clone(),
@@ -735,9 +602,8 @@ pub async fn run() -> Result<()> {
             None
         };
 
-        // Provider health is NOT behind the policy toggle: the feedback RPCs that
-        // write it do not know whether policy is enabled, and an always-present
-        // empty store is cheaper than threading that question into them.
+        // Provider health exists even with policy off, so the feedback RPCs
+        // needn't check.
         let (policy_store, provider_health) = match policy_bits {
             Some((store, health)) => (Some(store), health),
             None => (
@@ -761,10 +627,9 @@ pub async fn run() -> Result<()> {
             prom.clone(),
         ));
 
-        // Body-buffer reaper. Separate task from the observation sweep because
-        // the TTLs differ by an order of magnitude. This is the mechanism that
-        // guarantees release — `Abort` only shortens the window — so it also
-        // refreshes the occupancy gauges while it's here.
+        // Body-buffer reaper, separate from the observation sweep since the TTLs
+        // differ greatly. It guarantees release (`Abort` only shortens the
+        // window) and refreshes the occupancy gauges.
         {
             let service = service.clone();
             let prom = prom.clone();
@@ -792,12 +657,8 @@ pub async fn run() -> Result<()> {
             });
         }
 
-        // Pending-observation TTL sweep. Runs on the service so eviction can
-        // release each expired pick's inflight + inflight-prefix state — a
-        // caller that never reports, or a long non-streaming request that
-        // outran `observation_ttl`, would otherwise leak the worker's
-        // inflight count (the counter has no sweep of its own). Also caps the
-        // stash so it can't grow unbounded.
+        // Pending-observation TTL sweep. Releases each expired pick's inflight
+        // state, which has no sweep of its own, and bounds the stash.
         {
             let service = service.clone();
             let cancel = cancel.clone();
@@ -814,9 +675,7 @@ pub async fn run() -> Result<()> {
                                     "pending_observations sweep: evicted entries past TTL (inflight state released)"
                                 );
                             }
-                            // Same tick, same reasoning: a deleted
-                            // InferenceProvider would otherwise pin its health
-                            // entry for the life of the process.
+                            // So a deleted provider's entry doesn't linger.
                             let dropped = service.provider_health.sweep();
                             if dropped > 0 {
                                 tracing::debug!(
@@ -833,13 +692,9 @@ pub async fn run() -> Result<()> {
         Server::builder()
             .add_service(
                 PickerServer::from_arc(service)
-                    // Raise tonic's 4 MiB default so a caller that sends its
-                    // whole body as ONE `BodyChunk` isn't rejected by the
-                    // transport before our own per-request budget gets a say —
-                    // that would surface as an opaque error instead of a clean
-                    // RESOURCE_EXHAUSTED. Headroom over the body cap covers
-                    // framing. (Callers SHOULD still chunk at ≤1 MiB; see the
-                    // proto's Conformance section.)
+                    // Above tonic's 4 MiB default, so a body sent as one chunk
+                    // hits our own budget (RESOURCE_EXHAUSTED) rather than an
+                    // opaque transport error. Callers should still chunk.
                     .max_decoding_message_size((body_max_request_bytes + 1024 * 1024) as usize),
             )
             .serve_with_incoming_shutdown(incoming, shutdown)
@@ -848,10 +703,9 @@ pub async fn run() -> Result<()> {
 
     cancel.cancel();
 
-    // Give the elector a bounded moment to vacate the Lease. Bounded because a
-    // slow or unreachable apiserver must not hold the pod past its termination
-    // grace period — a handover that waits out the lease expiry is the correct
-    // fallback, and it is what happens on SIGKILL anyway.
+    // Give the elector a bounded moment to vacate the Lease, so a slow
+    // apiserver can't hold the pod past its grace period. Otherwise the handover
+    // waits out the lease, as on SIGKILL.
     if let Some(task) = leader_task {
         const VACATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
         match tokio::time::timeout(VACATE_BUDGET, task).await {
@@ -874,8 +728,7 @@ pub async fn run() -> Result<()> {
 /// cancel token), and kicks a one-shot warmup so the worker is routable
 /// before the next periodic `/v1/models` tick.
 ///
-/// On `SlotExhausted`, logs ERROR and skips — no panic, the fleet keeps
-/// serving its existing workers.
+/// On `SlotExhausted`, logs an error and skips the worker.
 #[allow(clippy::too_many_arguments)]
 fn handle_added(
     pool: &Arc<pool::Pool>,
@@ -888,9 +741,8 @@ fn handle_added(
     prom: &Arc<prom::PromMetrics>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     parent_cancel: &CancellationToken,
-    // The fleet-wide local tokenizer registry (keyed by model). Passed
-    // through to the per-worker warmup/poller only when this pool's
-    // tokenize mode actually consults it — see `warmup_for_pool` below.
+    // Passed to the per-worker tasks only when this pool's tokenize mode
+    // uses it.
     local_tokenizer: Option<Arc<local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: &eviction::EvictionTx,
     model_router: &Arc<
@@ -902,9 +754,7 @@ fn handle_added(
     let registry = &pool.registry;
     let indexer = &pool.indexer;
     let inflight_prefixes = &pool.inflight_prefixes;
-    // Warmup fires only when enabled AND this pool actually uses the
-    // in-process tokenizer (Local/Compare). Render-mode pools skip it —
-    // they don't consult the local registry, so there's nothing to warm.
+    // Warm up only for pools using the in-process tokenizer (Local/Compare).
     let warmup_tokenizer =
         if warmup_enabled && !matches!(pool.tokenize_mode, config::TokenizeMode::Render) {
             local_tokenizer
@@ -920,10 +770,9 @@ fn handle_added(
         "Added worker"
     );
 
-    // 1. Two worker sets selecting one pod. This MUST bail: `worker_id_num`
-    //    keys the fleet-wide `MetricsRegistry` and the eviction channel, so
-    //    continuing would corrupt state the first registration owns. The fix
-    //    is a Service selector, not a kinference setting.
+    // 1. Two worker sets selecting one pod. Must bail: `worker_id_num` keys
+    //    fleet-wide state the first registration owns. The fix is a Service
+    //    selector.
     if let Some(owner) = worker_pool.get(&w.worker_id_num)
         && owner.value().id != pool.id
     {
@@ -936,9 +785,8 @@ fn handle_added(
         return;
     }
 
-    // Reverse index for eviction + observation lifecycle. Provisionally
-    // route this worker's model_name hint to this pool so requests can
-    // land before the first /v1/models scrape confirms it.
+    // Reverse index for eviction and the observation lifecycle. Provisionally
+    // route the model_name hint, before the first /v1/models scrape.
     worker_pool.insert(w.worker_id_num, pool.clone());
     if !w.model_name.is_empty() {
         crate::monitor::associate_models(
@@ -949,13 +797,11 @@ fn handle_added(
         );
     }
 
-    // 2. WorkerRegistry — bootstrap-hint from config.model_name; reactive
-    //    by_model is updated by the metrics poller / warmup.
+    // 2. WorkerRegistry, seeded from config.model_name; `by_model` is updated
+    //    by the metrics poller and warmup.
     let entry = WorkerEntry::from_config(&w, block_size);
-    // The score_addr we just resolved here is the same key the
-    // pick path uses for InflightRegistry / InflightPrefixes — grab
-    // it before `entry` is moved into the registry so we can pass
-    // it to the ZMQ listener (which will key `on_stored` by it).
+    // The key the pick path uses for inflight state, which the ZMQ listener
+    // also keys `on_stored` by.
     let endpoint_key = entry.score_addr.clone();
     if !registry.register(w.worker_id_num, entry) {
         tracing::warn!(
@@ -971,10 +817,8 @@ fn handle_added(
     let worker_token = parent_cancel.child_token();
     task_tokens.insert((pool.id, w.worker_id_num), worker_token.clone());
 
-    // 3b. A declared model list is authoritative: seed it and skip the
-    //     `/v1/models` leg entirely. An engine behind an authenticating proxy,
-    //     or one that simply doesn't serve that endpoint, would otherwise never
-    //     become routable despite being perfectly healthy.
+    // 3b. A declared model list is authoritative: seed it and skip
+    //     `/v1/models`, for engines that don't serve it.
     if let Some(models) = pool.static_models.as_deref() {
         if models.is_empty() {
             tracing::warn!(
@@ -984,16 +828,12 @@ fn handle_added(
                  serves nothing and no scrape will discover otherwise"
             );
         } else {
-            // The verdict is NOT optional here. `set_served_models` refuses on a
-            // mismatch and returns without touching `by_model`, so claiming the
-            // models anyway would advertise a pool that cannot serve them: the
-            // router resolves the request here and `score_workers` then finds no
-            // worker, forever.
+            // `set_served_models` refuses on a mismatch, so only claim the
+            // models when it accepted them.
             match registry.set_served_models(w.worker_id_num, models) {
-                // Static seeding hands every worker the SAME declared list, so
-                // these two cannot arise from a real fleet difference — only from
-                // the pin outliving a `spec.models` edit. Routable, but worth a
-                // line, because it means `reset_declared_models` did not run.
+                // Every worker gets the same declared list, so these mean the
+                // pin outlived a `spec.models` edit (`reset_declared_models`
+                // didn't run). Still routable.
                 crate::workers::ServedModelsVerdict::Widened { .. }
                 | crate::workers::ServedModelsVerdict::Narrowed { .. } => {
                     tracing::warn!(
@@ -1009,11 +849,8 @@ fn handle_added(
                     crate::monitor::associate_models(model_router, pool.id, &pool.name, models);
                 }
                 crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
-                    // Unreachable while the whole set is seeded from one
-                    // declared list, so reaching it means the pin outlived a
-                    // change to that list — which `reset_declared_models` is
-                    // supposed to prevent. Loud, and the worker is skipped
-                    // rather than half-registered.
+                    // As above, but not routable: skip the worker rather than
+                    // half-register it.
                     tracing::error!(
                         workerset = pool.name,
                         worker_id = w.worker_id_str,
@@ -1030,9 +867,8 @@ fn handle_added(
         registry.set_initial_sync_complete(w.worker_id_num);
     }
 
-    // 4. Spawn the per-worker tasks. The metrics poller + warmup carry
-    //    the pool's `model_router` handle so a confirmed /v1/models
-    //    scrape updates model→pool routing.
+    // 4. Spawn the per-worker tasks. The metrics poller and warmup update
+    //    model routing after a /v1/models scrape.
     ingest::spawn_worker_listener(
         w.clone(),
         block_size,
@@ -1045,9 +881,8 @@ fn handle_added(
         eviction_tx.clone(),
         worker_token.clone(),
     );
-    // A declared model list means nothing to scrape for, so the refresh is
-    // pushed out of the way rather than the poller being skipped — it still
-    // scrapes queue depth and KV usage, which is most of what the picker uses.
+    // With a declared model list, push the models refresh out of the way; the
+    // poller still scrapes load metrics.
     let refresh_secs = if pool.static_models.is_some() {
         u64::MAX / 2000
     } else {
@@ -1067,11 +902,9 @@ fn handle_added(
         pool.name.clone(),
     );
 
-    // 5. Warmup: kick an immediate /v1/models scrape so the worker is
-    //    routable on its live model set within sub-second instead of
-    //    waiting for the periodic tick (~30s). Also kicks the
-    //    LocalTokenizerRegistry warmup if local-mode is on, so the
-    //    first user request finds the tokenizer cache warm.
+    // 5. Warmup: an immediate /v1/models scrape, so the worker is routable
+    //    without waiting for the periodic tick, plus tokenizer warmup in
+    //    local mode.
     spawn_one_shot_warmup(
         w,
         metrics.clone(),
@@ -1087,14 +920,10 @@ fn handle_added(
 /// The side effects `PoolManager` delegates: starting a pool's discovery, and
 /// dropping its workers' fleet-wide state when it retires.
 ///
-/// It lives here rather than in `pool_manager` because it needs handles the
-/// manager has no business knowing about — the coordinator channel, telemetry,
-/// the eviction channel. That split is what keeps the lifecycle logic testable
-/// against a recording stub.
+/// Here rather than in `pool_manager`, which can then be tested against a
+/// stub.
 struct MainHooks {
-    /// Process token. Pool tokens are children of it (via `Pool::from_spec`);
-    /// the discovery tokens below are children of it too, so process shutdown
-    /// still reaches everything.
+    /// Process token. Pool and discovery tokens are its children.
     cancel: CancellationToken,
     coord_tx: tokio::sync::mpsc::Sender<(Arc<Pool>, WorkerChange)>,
     kube_client: Option<kube::Client>,
@@ -1105,11 +934,9 @@ struct MainHooks {
     /// Per-pool token scoping that pool's discovery, forwarder, and prefix
     /// sweep.
     ///
-    /// Deliberately NOT `pool.cancel`: that one survives retirement until the
-    /// reaper fires, because the `KvIndexer` panics if anything reaches it
-    /// after cancellation. Discovery has the opposite requirement — it must
-    /// stop the instant the pool retires, or it keeps announcing workers into
-    /// a pool nothing routes to.
+    /// Not `pool.cancel`, which survives retirement until the reaper fires
+    /// (the `KvIndexer` panics if used after cancellation). Discovery must
+    /// stop the moment the pool retires.
     discovery_tokens: DashMap<PoolId, CancellationToken>,
 }
 
@@ -1151,9 +978,8 @@ impl pool_manager::PoolHooks for MainHooks {
                 }
             });
         }
-        // Per-pool inflight-prefix TTL sweep. Drops dispatches older than
-        // `observation_ttl` as a backstop against lifecycle leaks (a
-        // BlockStored event lost upstream, a stream that dropped without TTFT).
+        // Per-pool inflight-prefix TTL sweep, a backstop against lifecycle
+        // leaks.
         {
             let inflight = pool.inflight_prefixes.clone();
             let ttl = self.observation_ttl;
@@ -1204,17 +1030,11 @@ impl pool_manager::PoolHooks for MainHooks {
     }
 }
 
-/// Single teardown sequence for both discovery-initiated removals
-/// (`WorkerChange::Removed`) and active evictions (homogeneity
-/// violations reported on the eviction channel). Cancels the
-/// worker's per-task token, drops every state store entry, and asks
-/// the KvIndexer to drop the worker's radix-tree subtree.
+/// Teardown for both discovery removals and evictions: cancel the worker's
+/// tasks, drop its state, and drop its radix-tree subtree.
 ///
-/// `reason` is `None` for discovery removals (the pod just left;
-/// nothing anomalous to log) and `Some(_)` for evictions triggered
-/// by a homogeneity violation. The latter produces a WARN with the
-/// reason so the operator's incident trail explains why a worker
-/// disappeared mid-flight.
+/// `reason` is `None` for discovery removals and `Some` for evictions, which
+/// are logged with the reason.
 async fn evict_worker(
     worker_id_num: u64,
     reason: Option<eviction::EvictionReason>,
@@ -1232,20 +1052,12 @@ async fn evict_worker(
         worker_pool,
     );
 
-    // Ask the KvIndexer to drop this worker's subtree. `remove_worker` is
-    // the dynamo-kv-router public API for this; on the next find_matches
-    // call the removed worker's blocks won't be attributed.
     pool.indexer.remove_worker(worker_id_num).await;
 }
 
-/// Everything `evict_worker` does EXCEPT the indexer call — synchronous, and
-/// safe to run against a pool that is being torn down.
-///
-/// Retirement needs exactly this half. `KvIndexer::remove_worker` unwraps a
-/// channel send, so calling it on a pool whose token is about to be cancelled
-/// races the cancellation and panics the loser; and the subtree is about to be
-/// dropped wholesale anyway, so removing workers from it one at a time buys
-/// nothing.
+/// Everything `evict_worker` does except the indexer call, for retiring pools:
+/// `KvIndexer::remove_worker` panics if it races cancellation, and the whole
+/// tree is dropped anyway.
 #[allow(clippy::too_many_arguments)]
 fn drop_worker_state(
     worker_id_num: u64,
@@ -1255,9 +1067,7 @@ fn drop_worker_state(
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
 ) {
-    // Resolved BEFORE the registry entry is dropped below, and only for the
-    // log line: the numeric id is an internal handle that means nothing to
-    // whoever is reading this, while the string is the pod's k8s coordinate.
+    // For the log line, before the registry entry is dropped.
     let worker_id = pool
         .registry
         .lookup(worker_id_num)
@@ -1270,9 +1080,7 @@ fn drop_worker_state(
         None => tracing::info!(pool = pool.name, worker_id, "Removed worker"),
     }
 
-    // Stop the per-worker tasks (ZMQ listener + metrics poller). They
-    // select on the cancel token and exit cleanly. Scoped to THIS pool, so a
-    // worker that has since moved keeps the new pool's listeners running.
+    // Stop the per-worker tasks, for this pool only.
     if let Some((_, token)) = task_tokens.remove(&(pool.id, worker_id_num)) {
         token.cancel();
     }
@@ -1280,15 +1088,10 @@ fn drop_worker_state(
     // Per-pool state: unconditionally ours to drop.
     pool.registry.unregister(worker_id_num);
 
-    // Fleet-wide state is keyed by `worker_id_num` alone, so tear it down only
-    // while this pool is still the registered owner. Without the guard a
-    // straggling Removed from a departed pool blanks the current owner's
-    // metrics — and a worker with no samples reads as the CHEAPEST on every
-    // load term, so it attracts every pick until the next scrape.
+    // Fleet-wide state is keyed by `worker_id_num` alone, so only drop it while
+    // this pool is the owner; blanked metrics would make the worker look idle.
     //
-    // `model_router` is deliberately not touched either way: the pool may still
-    // serve the model via other workers, and a stale claim only yields a
-    // transient NoWorkers that self-heals.
+    // `model_router` is left alone: other workers may still serve the model.
     let still_ours = worker_pool
         .get(&worker_id_num)
         .is_none_or(|e| e.value().id == pool.id);
@@ -1306,11 +1109,8 @@ fn drop_worker_state(
 
 /// This replica's `holderIdentity` on the Lease.
 ///
-/// `POD_NAME` (downward API) is the useful answer, because it is what an
-/// operator sees in `kubectl get pods` and can act on. Hostname is the same
-/// string in practice for a Deployment pod, and the random fallback only exists
-/// so two processes on one host cannot both claim the identity and fight
-/// silently — a random loser is better than a stalemate.
+/// `POD_NAME` (downward API), as shown by `kubectl get pods`; else the
+/// hostname; else a random name.
 fn leader_identity() -> String {
     if let Ok(name) = std::env::var("POD_NAME")
         && !name.trim().is_empty()
@@ -1343,14 +1143,8 @@ fn kube_namespace_hint() -> Option<String> {
 
 /// Resolve on SIGINT **or SIGTERM**.
 ///
-/// SIGTERM is the one that matters in production: it is what Kubernetes sends
-/// to begin pod termination, and what `docker stop` sends. Handling only
-/// `ctrl_c()` (SIGINT) meant that in a cluster kinference got no graceful shutdown at
-/// all — SIGTERM's default disposition killed the process outright, so the
-/// cancellation token never fired. Nothing downstream of it ran: the gRPC server
-/// never drained in-flight requests, buffered bodies were never released, and
-/// the leader Lease was never vacated, which silently cost every failover the
-/// full lease duration instead of an immediate handover.
+/// SIGTERM is what Kubernetes and `docker stop` send; without handling it
+/// there is no graceful shutdown (no draining, no Lease vacate).
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
