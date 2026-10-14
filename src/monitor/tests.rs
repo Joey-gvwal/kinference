@@ -19,9 +19,7 @@ fn a_claim_is_recorded() {
     assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(0)]);
 }
 
-/// The behavior this replaced: a second pool's claim used to be logged and
-/// DROPPED, which left that worker set dead for the model on the no-policy
-/// path even though it was serving it perfectly well.
+/// A second pool's claim is recorded alongside the first.
 #[test]
 fn a_second_pool_joins_rather_than_being_ignored() {
     let r = router();
@@ -33,9 +31,7 @@ fn a_second_pool_joins_rather_than_being_ignored() {
     );
 }
 
-/// Both arrival orders produce the same set, and `BTreeSet` fixes the
-/// iteration order — so two replicas that observed their pools in opposite
-/// orders still rank candidates identically.
+/// Both arrival orders produce the same set, iterated in the same order.
 #[test]
 fn claim_order_does_not_affect_the_result() {
     let forward = router();
@@ -65,9 +61,7 @@ fn distinct_models_route_to_distinct_pools() {
     assert_eq!(serving(&r, "llama"), vec![PoolId::from_raw(1)]);
 }
 
-/// The R2 regression: without a release path a departed pool's claim is
-/// permanent, so a replacement worker set is ignored FOREVER and requests
-/// 404 while healthy workers idle.
+/// A departed pool's claim is released.
 #[test]
 fn releasing_a_pool_frees_the_model_for_its_replacement() {
     let r = router();
@@ -119,9 +113,8 @@ fn group(pool: Arc<Pool>, scores: Vec<WorkerScore>) -> ScoredGroup {
     }
 }
 
-/// The whole point of the index: two worker sets serve one model, and the
-/// no-policy path has to choose. It chooses on predicted wait, so the pool
-/// with the deeper queue loses even though it was scored first.
+/// With two worker sets serving one model, the no-policy path chooses on
+/// predicted wait, so the deeper queue loses even when scored first.
 #[tokio::test]
 async fn the_less_loaded_pool_wins() {
     let busy = group(test_pool("busy"), vec![score("10.0.0.1:8000", 64)]);
@@ -143,15 +136,13 @@ async fn a_pool_is_ranked_by_its_best_endpoint() {
         ],
     );
     let steady = group(test_pool("steady"), vec![score("10.0.0.4:8000", 8)]);
-    // `steady` goes first, so returning the head — or ranking on the mean
-    // queue depth — would both pick it.
+    // `steady` goes first, so returning the head or ranking on the mean
+    // would both pick it.
     let winner = best_group(vec![steady, mixed], "req", None).expect("a pool must win");
     assert_eq!(winner.pool.name, "mixed");
 }
 
-/// A pool that scored no workers cannot win, and must not shadow one that
-/// did — this is what makes an empty `ScoreOutcome::NoWorkers` from one pool
-/// non-fatal now that several may serve a model.
+/// A pool that scored no workers cannot win, and doesn't shadow one that did.
 #[tokio::test]
 async fn a_pool_with_no_scores_is_skipped() {
     let empty = group(test_pool("empty"), Vec::new());
@@ -161,10 +152,8 @@ async fn a_pool_with_no_scores_is_skipped() {
     assert!(best_group(vec![group(test_pool("empty"), Vec::new())], "req", None).is_none());
 }
 
-/// Ties keep the first group. `resolve_pools` yields pool-id order, so two
-/// replicas that saw their pools appear in opposite orders still agree —
-/// which matters because inflight tracking is split between them and a
-/// coin-flip per replica would smear one request stream across both pools.
+/// Ties keep the first group, and `resolve_pools` yields pool-id order, so
+/// replicas agree.
 #[tokio::test]
 async fn a_tie_keeps_the_first_group() {
     let first = group(test_pool("first"), vec![score("10.0.0.1:8000", 3)]);
@@ -173,10 +162,7 @@ async fn a_tie_keeps_the_first_group() {
     assert_eq!(winner.pool.name, "first");
 }
 
-/// The two degradations must not share a label or a message. They were
-/// reported identically, so an operator chasing "tokenize unavailable"
-/// would go and inspect a perfectly healthy engine while kinference's own radix
-/// tree was the thing failing.
+/// The two degradations have distinct labels and messages.
 #[test]
 fn the_two_degradations_are_told_apart() {
     assert_ne!(
@@ -213,11 +199,8 @@ fn empty_model_list_is_noop() {
 
 // --- alias fallback -------------------------------------------------
 //
-// The gate these guard: `model_router` only holds names an engine REPORTED,
-// so a declared alias resolved to nothing and the request was refused
-// before the policy stage — the only place that knew the alias table — was
-// reached. A request for `qwen-simple` 404'd while the worker set's own
-// status listed it.
+// `model_router` only holds names engines report, so a declared alias is
+// translated before the "nothing serves this model" check.
 
 fn ws(aliases: &[(&str, &str)]) -> crate::policy::resolve::ResolvedWorkerSet {
     crate::policy::resolve::ResolvedWorkerSet {
@@ -230,9 +213,8 @@ fn ws(aliases: &[(&str, &str)]) -> crate::policy::resolve::ResolvedWorkerSet {
         kv_events_declared: false,
         aliases: aliases
             .iter()
-            // Fixtures still pass (canonical, upstream); under the new shape
-            // the canonical is an ALIAS of the upstream, so every existing
-            // case asks the same question.
+            // Fixtures pass (canonical, upstream); the canonical becomes an
+            // alias of the upstream.
             .map(|(n, u)| crate::policy::crd::ModelAlias {
                 name: Some(u.to_string()),
                 aliases: if n == u { vec![] } else { vec![n.to_string()] },
@@ -250,9 +232,7 @@ fn an_alias_resolves_to_the_upstream_an_engine_actually_serves() {
     assert_eq!(got.as_deref(), Some("Qwen/Qwen2.5-32B-Instruct-AWQ"));
 }
 
-/// A declared alias whose upstream nothing serves must NOT be rewritten to.
-/// Doing so would move the 404 from kinference to the engine and lose the
-/// operator-facing reason.
+/// A declared alias whose upstream nothing serves is not rewritten.
 #[test]
 fn an_alias_whose_upstream_is_unserved_does_not_resolve() {
     let d = [ws(&[("qwen-simple", "Qwen/Qwen2.5-32B-Instruct-AWQ")])];
@@ -262,9 +242,8 @@ fn an_alias_whose_upstream_is_unserved_does_not_resolve() {
     );
 }
 
-/// `upstreams_for` appends the canonical name as an identity fallback. We
-/// only reach here because no pool serves it, so returning it would rewrite
-/// the model to itself and loop the caller straight back to NoWorkers.
+/// The canonical name itself, which `upstreams_for` appends, is never
+/// returned.
 #[test]
 fn the_canonical_name_is_never_returned_as_its_own_upstream() {
     let d = [ws(&[])];
@@ -274,14 +253,13 @@ fn the_canonical_name_is_never_returned_as_its_own_upstream() {
     );
 }
 
-/// Documents the accepted limitation of the minimal fix: two upstream models
-/// declared interchangeable under one name resolve to ONE fixed choice
-/// rather than becoming candidates the policy ranks.
+/// Two upstream models sharing one alias resolve to one fixed choice, not
+/// candidates the policy ranks.
 #[test]
 fn several_upstreams_take_the_first_that_is_served() {
     let d = [ws(&[("bar", "llama-70B"), ("bar", "llama-70B-FP8")])];
-    // Only the FP8 build is up — the first declared one is skipped, so the
-    // ordering rule is "first SERVED", not "first declared".
+    // Only the FP8 build is up, so the first declared one is skipped: first
+    // served, not first declared.
     assert_eq!(
         first_served_upstream(&[&d[0]], "bar", |m| m == "llama-70B-FP8").as_deref(),
         Some("llama-70B-FP8")
@@ -294,7 +272,7 @@ fn several_upstreams_take_the_first_that_is_served() {
 }
 
 /// Aliases live per worker set, so a pool spanning several sets searches all
-/// of them — the alias may be declared on a set other than the first.
+/// of them.
 #[test]
 fn aliases_on_a_later_destination_are_found() {
     let d = [ws(&[]), ws(&[("short", "vendor/long-name")])];
@@ -319,9 +297,8 @@ fn resolved_provider(
         path: None,
         models: models
             .iter()
-            // The fixture tuple is still (canonical, upstream, ctx); under
-            // the new shape the canonical is an ALIAS of the upstream, which
-            // keeps every existing case asking the same question.
+            // (canonical, upstream, ctx); the canonical becomes an alias of
+            // the upstream.
             .map(|(n, u, ctx)| crate::policy::crd::ProviderModel {
                 name: Some(u.to_string()),
                 aliases: if n == u { vec![] } else { vec![n.to_string()] },
@@ -331,12 +308,7 @@ fn resolved_provider(
     }
 }
 
-/// Every per-endpoint signal must be `None`, not a default.
-///
-/// This is the property the whole design leans on: `Matcher::eval` treats
-/// absence as non-matching, so a Local-only exclusion cannot silently drop a
-/// provider — and a defaulted latency of zero would have been the BEST score
-/// under every `minimize`, handing a vendor all the traffic.
+/// Every per-endpoint signal is `None`, not a default.
 #[test]
 fn a_provider_candidate_carries_no_per_endpoint_signal() {
     let health = crate::policy::provider_health::ProviderHealthStore::new();
@@ -346,7 +318,7 @@ fn a_provider_candidate_carries_no_per_endpoint_signal() {
     let c = &cands[0];
 
     assert_eq!(c.canonical_model, "bar");
-    // The vendor's own spelling, which is what the body must end up saying.
+    // The vendor's own spelling.
     assert_eq!(c.upstream_model, "acme/llama-70b");
     assert_eq!(c.backend, "together");
     assert_eq!(c.backend_type(), crate::policy::crd::BackendType::Provider);
@@ -355,12 +327,12 @@ fn a_provider_candidate_carries_no_per_endpoint_signal() {
     assert_eq!(c.attrs.prefix_cache_hit_ratio, None);
     assert_eq!(c.attrs.queued_prompts, None);
     assert_eq!(c.attrs.backend_ready_endpoints, None);
-    // Declared rather than observed, and the one signal a provider does have.
+    // Declared rather than observed.
     assert_eq!(c.attrs.context_window, Some(131072));
 }
 
-/// The path reaches the candidate, because by the time one WINS there is no
-/// `ResolvedProvider` left to ask: `selection` sees only the `CandidateTarget`.
+/// The path is carried on the candidate, since `selection` only sees the
+/// `CandidateTarget`.
 #[test]
 fn a_provider_candidate_carries_the_dispatch_path() {
     let health = crate::policy::provider_health::ProviderHealthStore::new();
@@ -373,8 +345,7 @@ fn a_provider_candidate_carries_the_dispatch_path() {
     };
     assert_eq!(path.as_deref(), Some("/serving-endpoints/chat/completions"));
 
-    // And a provider that declares none leaves the request line alone, which
-    // is what a mixed pool needs: a local win must not be rewritten.
+    // A provider that declares none leaves the path alone.
     prov.path = None;
     let target = &provider_candidates_for(&health, &prov, "bar")[0].target;
     let crate::policy::engine::CandidateTarget::Provider { path, .. } = target else {
@@ -399,16 +370,11 @@ fn two_rows_under_one_name_are_two_candidates() {
         &[("bar", "acme/v1", None), ("bar", "acme/v2", None)],
     );
     let cands = provider_candidates_for(&health, &prov, "bar");
-    // Exactly as two worker-set aliases would be: interchangeable upstream
-    // models become a routing choice rather than a fixed pick.
+    // Interchangeable upstream models become separate candidates.
     assert_eq!(cands.len(), 2);
 }
 
-/// A destination the caller keeps failing to reach must stop being offered.
-///
-/// There is no dispatch retry anywhere in this design, so every pick a broken
-/// provider wins is a failed request — and kinference cannot see the cause, only
-/// the reports.
+/// A provider the caller keeps failing to reach stops being offered.
 #[test]
 fn a_suppressed_provider_produces_no_candidates_at_all() {
     use crate::policy::provider_health::FailureKind;
@@ -426,8 +392,7 @@ fn a_suppressed_provider_produces_no_candidates_at_all() {
         "a provider the caller cannot dispatch to must not be a candidate"
     );
 
-    // One success is enough to bring it back — recovery is unobservable from
-    // here, so it can only be learned by something working again.
+    // One success brings it back.
     health.record_success(&key, 200.0);
     assert_eq!(provider_candidates_for(&health, &prov, "bar").len(), 1);
 }
@@ -442,8 +407,7 @@ fn an_observed_provider_carries_its_p95_as_both_signal_and_objective() {
     let c = &provider_candidates_for(&health, &prov, "bar")[0];
     // Once as the `observedTTFTP95` a predicate compares against...
     assert_eq!(c.attrs.backend_observed_ttft_ms, Some(840.0));
-    // ...and once as the value EstimatedTTFT ranks on. The two must agree, or
-    // a policy could exclude on a figure different from the one that ranked.
+    // ...and once as the value EstimatedTTFT ranks on, which must agree.
     assert_eq!(
         c.objective_ms(&crate::policy::compile::Rank::MinimizeEstimatedTtft),
         Some(840.0)
@@ -457,11 +421,7 @@ fn an_observed_provider_carries_its_p95_as_both_signal_and_objective() {
 
 /// `worker_score` maps every input to the field it names.
 ///
-/// Five of its parameters are `u32`, so a transposition — `matched_blocks` for
-/// `total_blocks`, say — type-checks silently, and no other test in the suite
-/// would notice: the picker's tests build `WorkerScore` directly, and the
-/// scoring path is not driven at unit level. This is cheap only because the
-/// projection now happens in exactly one place.
+/// Five of its parameters are `u32`, so a transposition would type-check.
 #[test]
 fn worker_score_maps_each_input_to_its_own_field() {
     let entry = crate::workers::WorkerEntry {
@@ -509,8 +469,8 @@ fn worker_score_maps_each_input_to_its_own_field() {
 // --- policy_select, end to end ----------------------------------------------
 //
 // Through the real service with live pools and no network: workers have no
-// HTTP URL, so tokenization fails at once and scoring degrades to load only —
-// which still yields a score per worker, enough to rank.
+// HTTP URL, so tokenization fails and scoring degrades to load only, which
+// still yields a score per worker.
 
 fn offline_worker(model: &str, addr: &str) -> crate::workers::WorkerEntry {
     crate::workers::WorkerEntry {
@@ -698,9 +658,7 @@ async fn select(
 }
 
 /// When every matching rule falls through, the unmatched route serves the
-/// model the request asked for. It used to reuse every group earlier rules had
-/// scored — here the faster `gemma` group a rule considered and then excluded
-/// — so a request for `qwen` could be answered by `gemma`.
+/// requested model, not a group an earlier rule scored (here, `gemma`).
 #[tokio::test]
 async fn a_fall_through_serves_the_requested_model_only() {
     let (svc, store, live) = policy_fleet(
@@ -724,9 +682,8 @@ async fn a_fall_through_serves_the_requested_model_only() {
     assert_eq!(endpoint, "10.0.0.1:8000");
 }
 
-/// A worker never scraped has no `queuedPrompts` at all, so a `drop` on it
-/// cannot fire — absence never matches. It used to read as an idle worker
-/// with an empty queue. The scraped idle worker beside it is dropped.
+/// A worker never scraped has no `queuedPrompts`, so a `drop` on it can't
+/// fire. The scraped idle worker beside it is dropped.
 #[tokio::test]
 async fn an_unscraped_worker_has_no_saturation_signals() {
     let (svc, store, live) = policy_fleet(
@@ -821,8 +778,7 @@ async fn local_and_cloud_picks() -> KinferenceService {
     svc
 }
 
-/// Every pick that routes is counted by tenant and destination, so a dashboard
-/// can show where each tenant's traffic went, on the cluster or off it.
+/// Every pick that routes is counted by tenant and destination.
 #[tokio::test]
 async fn a_pick_is_counted_by_tenant_and_destination() {
     let svc = local_and_cloud_picks().await;
@@ -837,8 +793,7 @@ async fn a_pick_is_counted_by_tenant_and_destination() {
 
 /// The token families' `model` is the name each body was SENT with: the
 /// worker's model on a local pick, the provider row's `name` on a provider pick.
-/// Not the alias the client asked for, which would merge two different models,
-/// and not whatever the report says, which is the vendor's own spelling.
+/// Not the alias the client asked for, nor what the report says.
 #[tokio::test]
 async fn token_metrics_name_the_model_each_body_was_sent_with() {
     use crate::proto::picker_server::Picker;
