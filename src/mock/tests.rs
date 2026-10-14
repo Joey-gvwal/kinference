@@ -29,11 +29,8 @@ fn registry_with_model(model: &str) -> Arc<WorkerRegistry> {
 
 /// Seed a pushed body and return its `stream_id`.
 ///
-/// Goes through the store rather than the `push_body` RPC because
-/// `tonic::Streaming` can only be built by the transport layer. The drain
-/// loop itself (idle budget, byte budgets, half-close vs reset) is unit
-/// tested in `crate::grpc`, and the full streaming RPC is covered by the
-/// mock-mode grpcurl e2e.
+/// Goes through the store, since `tonic::Streaming` can only be built by the
+/// transport layer. The drain loop is tested in `crate::grpc`.
 async fn push(svc: &MockKinferenceService, body: &str) -> u64 {
     let mut r = svc.body_store.reservation();
     r.charge(body.len() as u64).expect("within budget");
@@ -102,8 +99,7 @@ async fn unchanged_body_round_trips_byte_for_byte() {
     let original = r#"{"model":"qwen-test","messages":[{"role":"user","content":"hi"}]}"#;
     let (resp, body) = round_trip(&svc, original).await;
     assert_eq!(resp.outcome, PickOutcome::Ok as i32);
-    // Nothing to rewrite → PullBody still returns a COMPLETE body (the old
-    // "empty means unchanged" wire contract is gone).
+    // Nothing to rewrite: PullBody still returns the complete body.
     assert_eq!(body, original.as_bytes());
     assert_eq!(resp.body_total_bytes, original.len() as u64);
 }
@@ -203,11 +199,9 @@ async fn no_workers_releases_the_body_and_reports_the_model() {
     assert_eq!(svc.body_store.stats().1, 0);
 }
 
-/// End-to-end through the real pick path, not just the helper: a client that
-/// sends `stream` as a STRING (which Pydantic accepts, so the engine really
-/// does stream) must still get `include_usage` forced on. Covers the second
-/// reader of the flag too — `RequestMeta.streaming` shares `stream_flag`, so
-/// a regression that reverted one site would show up here.
+/// Through the real pick path: a client sending `stream` as a string (which
+/// Pydantic accepts, so the engine streams) still gets `include_usage`
+/// forced on. `RequestMeta.streaming` reads the same `stream_flag`.
 #[tokio::test]
 async fn string_valued_stream_still_adds_include_usage() {
     let svc = MockKinferenceService::new(registry_with_model("qwen-test"));

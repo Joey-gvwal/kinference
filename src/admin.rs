@@ -3,8 +3,8 @@
 //! Serves `GET /readyz`, used by the K8s readinessProbe; `GET /metrics`; and
 //! the read-only policy API under `/api` (`GET /api/policy/context`,
 //! `POST /api/policy/simulate`, see [`policy_api`]). Only started when
-//! `admin_listen` is configured — a deployment that leaves it unset also loses
-//! the readiness probe, so set it in production.
+//! `admin_listen` is configured, so set it in production to get the readiness
+//! probe.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,25 +24,18 @@ use crate::prom::PromMetrics;
 
 mod policy_api;
 
-/// State threaded through every axum route via `FromRef`. Holds the Arcs the
-/// handlers below need: the pool set and policy store for `/readyz`, the
-/// Prometheus registry for `/metrics`.
+/// State shared by every route via `FromRef`.
 #[derive(Clone)]
 struct AppState {
-    /// The live pool set, not a startup snapshot of its registries — so
-    /// `/readyz` can report how much of the fleet has resolved, and pools that
-    /// appear after the server started still count.
+    /// The live pool set, so `/readyz` reports on pools added after startup.
     pools: Arc<PoolRegistry>,
-    /// CRD policy, when enabled. `/readyz` gates on this having LISTED, which
-    /// is the one startup state where answering a Pick is worse than refusing
-    /// it — see [`readyz`].
+    /// CRD policy, when enabled. `/readyz` gates on it having listed; see
+    /// [`readyz`].
     policy: Option<Arc<crate::policy::store::PolicyStore>>,
-    /// Prometheus exposition registry for `/metrics` (same `Arc` the
-    /// gRPC `report_final_token` handler records into).
+    /// Prometheus registry for `/metrics`.
     prom: Arc<PromMetrics>,
-    /// The policy API's own state — snapshot readers plus the semaphore that
-    /// bounds concurrent simulations. Built once, so every request shares one
-    /// semaphore; see [`policy_api::PolicyApiState`].
+    /// The policy API's state, built once so every request shares one
+    /// simulation semaphore; see [`policy_api::PolicyApiState`].
     policy_api: policy_api::PolicyApiState,
 }
 
@@ -78,9 +71,7 @@ impl FromRef<AppState> for Arc<PromMetrics> {
 /// Every route on the admin listener.
 ///
 /// Everything answers in JSON, failures included: an unknown path is a JSON
-/// 404 naming the real endpoints, and a wrong method a JSON 405. Callers here
-/// are programs, and a program should never have to sniff a content type to
-/// learn it called the wrong URL.
+/// 404 naming the real endpoints, and a wrong method a JSON 405.
 fn router(state: AppState) -> Router {
     let get_only = || async { policy_api::method_not_allowed("GET, HEAD") };
     Router::new()
@@ -97,11 +88,9 @@ fn router(state: AppState) -> Router {
         .route("/api/*rest", any(policy_api::not_found))
         .route("/metrics", get(metrics))
         .route("/readyz", get(readyz))
-        // Whatever the routes above cannot match. Not only truly unknown
-        // paths: matchit does not backtrack from a static prefix into a
-        // catch-all, so `/api/policy/context/` — a trailing slash — matched
-        // neither the endpoint nor `/api/*rest`, and got axum's default: a 404
-        // with an empty body.
+        // Whatever the routes above cannot match, including a trailing-slash
+        // `/api/policy/context/`: matchit doesn't backtrack from a static
+        // prefix into `/api/*rest`.
         .fallback(fallback)
         // Applies to every route, but only `simulate` reads a body.
         .layer(axum::extract::DefaultBodyLimit::max(
@@ -144,9 +133,7 @@ pub async fn serve(
     Ok(())
 }
 
-/// Prometheus scrape target. Renders kinference's own metric set (currently
-/// per-model token counters fed by `ReportFinalToken`) in the
-/// text-exposition format.
+/// Prometheus scrape target, in the text-exposition format.
 async fn metrics(State(prom): State<Arc<PromMetrics>>) -> Response {
     (
         [(header::CONTENT_TYPE, PromMetrics::content_type())],
@@ -155,30 +142,15 @@ async fn metrics(State(prom): State<Arc<PromMetrics>>) -> Response {
         .into_response()
 }
 
-/// K8s readinessProbe target. Returns 200 once at least one worker has
-/// resolved both its model list (via `/v1/models` scrape) AND its
-/// initial ZMQ event-stream sync. Returns 503 otherwise so K8s holds
-/// client traffic off the pod through the cold-start window. See
-/// [`crate::workers::WorkerEntry::is_ready`] for the per-worker
-/// definition.
-/// A pool set that is empty and one whose workers are all still cold both
-/// return 503, but they are different operator problems — "kinference has nothing
-/// to route to" versus "the engines are still warming" — so they say so.
-/// Readiness: can this process answer a `Pick`?
+/// K8s readinessProbe target: can this process answer a `Pick`?
 ///
-/// Deliberately NOT "is there anywhere to route to". A `Pick` for a model
-/// nothing serves has a correct answer — `NO_WORKERS` — and refusing traffic
-/// rather than giving it is worse on both ends: the caller cannot distinguish a
-/// cold router from a broken one, and a provider-only deployment (which has no
-/// workers at all, since a provider is not backed by a pool) would never become
-/// Ready despite being able to route perfectly well.
+/// Not "is there anywhere to route to": a `Pick` for a model nothing serves
+/// has a correct answer (`NO_WORKERS`), and a provider-only deployment has no
+/// workers at all.
 ///
-/// One gate, and it is the only startup state where answering is worse than
-/// refusing: with policy enabled but the CRD reflectors not yet listed, a `Pick`
-/// naming an `InferencePool` cannot be told from one naming a pool that does not
-/// exist — so it routes on load alone and SILENTLY BYPASSES the policy. Serving
-/// that is a wrong answer, not an empty one. Everything else about startup —
-/// no worker sets, no endpoints, no tokenizer yet — degrades honestly.
+/// The one gate is policy: when enabled but the CRD reflectors haven't
+/// listed, a `Pick` naming an `InferencePool` would route on load alone,
+/// bypassing the policy. Returns 503 until then.
 async fn readyz(State(st): State<ReadyzState>) -> Response {
     if let Some(store) = st.policy.as_ref()
         && !store.snapshot().listed()
@@ -191,8 +163,7 @@ async fn readyz(State(st): State<ReadyzState>) -> Response {
             .into_response();
     }
 
-    // Ready either way; the body carries the fleet state that used to decide it,
-    // because `curl /readyz` was a useful way to see it.
+    // Ready either way; the body reports the fleet state for operators.
     let snapshot = st.pools.snapshot();
     let pools_n = snapshot.len();
     let ready: usize = snapshot.iter().filter(|p| p.registry.any_ready()).count();

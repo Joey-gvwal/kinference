@@ -1,8 +1,5 @@
-//! Reconciliation tests. We drive `reconcile()` directly by hand-
-//! populating a `reflector::Store<EndpointSlice>` — no live cluster,
-//! no HTTP mock. Exercises the full logic path except the
-//! reflector's own watch/reconnect machinery, which is kube-rs's
-//! responsibility and covered by its own test suite.
+//! Reconciliation tests, driving `reconcile()` against a hand-populated
+//! `reflector::Store<EndpointSlice>`.
 use super::*;
 use k8s_openapi::api::core::v1::ObjectReference;
 use k8s_openapi::api::discovery::v1::{EndpointConditions, EndpointPort};
@@ -64,8 +61,7 @@ fn drain(rx: &mut mpsc::Receiver<WorkerChange>) -> Vec<WorkerChange> {
 }
 
 /// A slice with a caller-chosen port list, for the port-resolution tests.
-/// K8s empties `ports[]` once the last backing pod goes, because a port NAME
-/// has nothing left to resolve against — `Some(vec![])` is that state.
+/// `Some(vec![])` is the state Kubernetes leaves once the last pod goes.
 fn slice_with_ports(
     slice_uid: &str,
     name: &str,
@@ -85,10 +81,7 @@ fn port(name: &str, n: i32) -> EndpointPort {
     }
 }
 
-/// Replay is scoped to the kvEvents declaration, same as the publish socket.
-/// It used to resolve unconditionally, so a set that had declared it
-/// publishes nothing still carried a replay port on every endpoint — a value
-/// nothing could ever read, since no listener starts without `zmq`.
+/// Replay is scoped to the kvEvents declaration, like the publish socket.
 #[test]
 fn no_kv_events_declaration_resolves_neither_socket() {
     let sl = slice_with_ports(
@@ -115,8 +108,8 @@ fn no_kv_events_declaration_resolves_neither_socket() {
     assert_eq!(got.http, 8000, "the rest of the Service resolves normally");
 }
 
-/// With the block present, both halves resolve off the Service by convention
-/// — the shape an ordinary vLLM Service works with, no port fields written.
+/// With the block present and no ports given, both resolve by conventional
+/// name.
 #[test]
 fn a_kv_events_declaration_resolves_both_sockets_by_convention() {
     let sl = slice_with_ports(
@@ -142,10 +135,6 @@ fn refs_declaring_http(name: &str) -> PortRefs {
 }
 
 /// Collects WARN-and-above output emitted on this thread.
-///
-/// The only way to test a log line is to read it. Kept local to these two
-/// tests rather than promoted to a shared helper, since nothing else in the
-/// suite asserts on log output.
 #[derive(Clone, Default)]
 struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -172,8 +161,8 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
     }
 }
 
-/// `reconcile` never leaves the calling thread — it awaits only on
-/// `tx.send` — so a thread-local default subscriber captures all of it.
+/// `reconcile` never leaves the calling thread (it awaits only on
+/// `tx.send`), so a thread-local subscriber captures all of it.
 fn capture_warnings() -> (LogBuf, tracing::subscriber::DefaultGuard) {
     let buf = LogBuf::default();
     let guard = tracing::subscriber::set_default(
@@ -186,11 +175,8 @@ fn capture_warnings() -> (LogBuf, tracing::subscriber::DefaultGuard) {
     (buf, guard)
 }
 
-/// Scaling a GPU node pool to zero leaves an empty placeholder slice whose
-/// `ports[]` K8s has also emptied. Resolving declared port names against it
-/// used to WARN once per declared port on every reconcile, blaming a typo in
-/// a CR that was correct all along — so an operator debugging a real problem
-/// got sent after a phantom one.
+/// An empty placeholder slice (e.g. after scaling to zero) has no `ports[]`,
+/// and must not warn about declared port names.
 #[tokio::test]
 async fn an_endpoint_less_slice_warns_about_nothing() {
     let (store, mut writer) = reflector::store::<EndpointSlice>();
@@ -238,9 +224,8 @@ async fn an_endpoint_less_slice_warns_about_nothing() {
     );
 }
 
-/// The other half: the guard must not have bought silence by suppressing the
-/// diagnostic outright. A slice that HAS a Ready endpoint but genuinely
-/// lacks the declared port name is a real misconfiguration and still says so.
+/// A slice with a Ready endpoint that lacks the declared port name still
+/// warns.
 #[tokio::test]
 async fn a_declared_port_missing_from_a_live_slice_still_warns() {
     let (store, mut writer) = reflector::store::<EndpointSlice>();
@@ -408,17 +393,9 @@ async fn deleted_slice_yields_removed() {
     assert!(announced.is_empty());
 }
 
-/// Pins the hazard the run loop's `InitDone` gate exists to prevent.
-///
-/// `reconcile` derives departures purely by diffing `announced` against the
-/// store, so an EMPTY store retracts the entire pool. After a watcher
-/// rebuild the new store starts empty and stays empty until `InitDone`, so
-/// reconciling during that window would emit `Removed` for every worker and
-/// then re-`Added` moments later — a full pool bounce, including a fresh
-/// radix tree per worker, triggered by nothing more than a reconnect.
-///
-/// If someone later removes that gate, this test still passes (it calls
-/// `reconcile` directly) — but it documents precisely why the gate is there.
+/// An empty store retracts the whole pool, which is why the run loop doesn't
+/// reconcile before `InitDone` after a rebuild. (This test calls `reconcile`
+/// directly, so it documents the hazard rather than testing the gate.)
 #[tokio::test]
 async fn reconciling_against_an_unlisted_store_would_retract_the_pool() {
     let (store, mut writer) = reflector::store::<EndpointSlice>();

@@ -1,7 +1,7 @@
 //! Leader election over a `coordination.k8s.io/v1` Lease.
 //!
-//! Exactly one replica may write status and reconcile infra; every
-//! replica still translates and serves data planes. The claiming
+//! Exactly one replica writes CRD status and `BackendBinding`s; every
+//! replica still routes. The claiming
 //! rules: the holder renews inside a grace window before expiry, a
 //! rival waits out the current claim's expiry before trying,
 //! takeovers bump `leaseTransitions`, and a
@@ -138,12 +138,8 @@ pub async fn run(
 /// apiserver errors (the caller retries).
 ///
 /// Matches on `Status::code` rather than kube's `is_not_found()` /
-/// `is_conflict()` helpers deliberately. Those reduce to a `reason` string
-/// comparison for known reasons — `reason_or_code` only consults the code when
-/// the reason is *un*known — so they miss a bare 404/409 carrying no reason.
-/// Comparing the code is the more permissive test, and correct for both cases
-/// that arise here: a GET on a missing Lease (404 NotFound) and a lost create
-/// race (409 AlreadyExists).
+/// `is_conflict()`, which compare the `reason` string and so miss a bare
+/// 404/409 with no reason.
 async fn fetch_or_create(api: &Api<Lease>, namespace: &str, name: &str) -> Option<Lease> {
     match api.get(name).await {
         Ok(lease) => Some(lease),

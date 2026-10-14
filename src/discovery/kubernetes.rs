@@ -1,43 +1,25 @@
-//! `KubeDiscovery` — watch the EndpointSlices of a named K8s Service and
+//! `KubeDiscovery`: watch the EndpointSlices of a named Kubernetes Service and
 //! emit one worker per Ready endpoint.
 //!
-//! Operates in-cluster only: `kube::Config::incluster_env()` reads the
-//! auto-mounted service-account token. We deliberately refuse to fall
-//! back to `~/.kube/config` — even if auth succeeded that way, pod IPs
-//! returned by EndpointSlice would not be reachable from outside the
-//! cluster's pod network.
+//! In-cluster only: `~/.kube/config` is not honored, since pod IPs from an
+//! EndpointSlice aren't reachable from outside the cluster network.
 //!
-//! The Service does NOT need to be headless. K8s stamps every EndpointSlice
-//! it creates for a selector-based Service — ClusterIP, headless,
-//! LoadBalancer, all of them — with `kubernetes.io/service-name=<svc>` and
-//! lists the backing pods' individual IPs. We read those per-pod IPs and
-//! connect to each pod DIRECTLY (HTTP `/v1/models` + `/render` and the ZMQ
-//! event ports); we never route through the Service VIP, so its type and
-//! kube-proxy's round-robin are irrelevant to prefix-aware routing. (The
-//! VIP never appears in an EndpointSlice.)
+//! Any selector-based Service works, headless or not: its EndpointSlices are
+//! labeled `kubernetes.io/service-name=<svc>` and list the pods' own IPs, which
+//! kinference dials directly, never the Service VIP.
 //!
 //! Per-endpoint port resolution order:
-//!   1. Named port on the EndpointSlice (`http`, `metrics`, `kv-pub` or
-//!      `kv-events`, `kv-replay`) — inherited from the Service's
-//!      `spec.ports[].name`.
-//!   2. `discovery.defaults` from config (last resort).
+//!   1. A port the `InferenceWorkerSet` declares, by name or number.
+//!   2. The conventional port name on the EndpointSlice (`http`, `metrics`,
+//!      `kv-pub` or `kv-events`, `kv-replay`).
+//!   3. `discovery.defaults`.
 //!
-//! Worker identity = `fnv1a_u64(endpoint.target_ref.uid)`. Same UID
-//! semantics as the original Pod-mode discovery: a restarted pod gets
-//! a fresh UID → a fresh `worker_id_num` → a fresh prefix-cache view in
-//! the dynamo router. Correct semantics.
+//! Worker identity is `fnv1a_u64(endpoint.target_ref.uid)`, so a restarted
+//! pod gets a fresh `worker_id_num` and a fresh prefix-cache view.
 //!
-//! ## Reconciliation model
-//!
-//! We drive off `kube::runtime::reflector`, which maintains a deduped
-//! in-memory `Store<EndpointSlice>` that stays in sync with the API
-//! server (including correctly pruning objects that vanished during a
-//! disconnect at relist time). Each event on the reflector stream is
-//! just a "state may have changed" wakeup: we re-derive the current
-//! set of Ready endpoints from the store and diff it against
-//! `announced` (what we've already emitted `Added` for). No per-event
-//! Apply/Delete dispatch, no `Init*` state machine — the store owns
-//! that complexity.
+//! Each event on the reflector stream is a wakeup: the current set of Ready
+//! endpoints is re-derived from the store and diffed against `announced` (what
+//! has been emitted as `Added`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,12 +62,8 @@ impl KubeDiscovery {
     /// Build in-cluster credentials once, so pool creation can be synchronous
     /// and infallible.
     ///
-    /// `new` does two things: acquire credentials (fallible, and a fatal
-    /// startup condition) and bind a config (trivial). Doing both per pool made
-    /// creation `async` and fallible, which is exactly what a reconcile loop
-    /// cannot tolerate — a transient apiserver hiccup would turn "add a worker
-    /// set" into a failure with nothing to retry it. Acquire once here, at
-    /// startup, where failing hard is the right answer.
+    /// Called once at startup, where failing hard is right; [`Self::from_client`]
+    /// then binds each pool's config without I/O.
     pub async fn client() -> Result<kube::Client> {
         let kube_cfg = kube::Config::incluster_env().context(
             "failed to read in-cluster Kubernetes service-account credentials. \
@@ -118,11 +96,9 @@ impl Discovery for KubeDiscovery {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),
         };
-        // SAFETY: KubeDiscovery::new validated this.
+        // Validated before the pool spec reaches here; see `from_client`.
         let service_name = self.cfg.service_name.clone().unwrap_or_default();
-        // Watch only the EndpointSlices belonging to the named Service.
-        // K8s's EndpointSlice controller stamps every slice it creates with
-        // this label, so this is the canonical selector.
+        // Only the named Service's EndpointSlices.
         let wcfg = watcher::Config::default().labels(&format!("{SVC_NAME_LABEL}={service_name}"));
 
         tracing::info!(
@@ -131,41 +107,28 @@ impl Discovery for KubeDiscovery {
             "starting EndpointSlice watcher"
         );
 
-        // `announced` tracks what we've already told the rest of the
-        // system about. The reflector's `Store` is the source of truth
-        // for what CURRENTLY exists in K8s; on each stream wakeup we
-        // diff the two and emit deltas.
-        //
-        // Hoisted ABOVE the rebuild loop deliberately: it must survive a
-        // rebuild, or the new generation would re-`Added` every worker under an
-        // id the registry already holds, which `handle_added` treats as a
-        // duplicate and rolls back.
+        // What has been announced as `Added`. Outside the rebuild loop so it
+        // survives a rebuild; otherwise every worker would be re-`Added`, which
+        // `handle_added` treats as a duplicate and rolls back.
         let mut announced: HashMap<String, (u64, String)> = HashMap::new();
 
-        // Rebuild the watcher rather than exiting when its stream ends. This
-        // used to `return`, which left the pool permanently frozen: no new
-        // worker ever discovered, no departure ever noticed, and no error after
-        // the one warning. Unlike the policy watcher there is no fallback here,
-        // so the pool simply stops tracking reality.
+        // Rebuild the watcher when its stream ends, or the pool would stop
+        // tracking membership.
         const REBUILD_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         loop {
             if cancel.is_cancelled() {
                 return;
             }
             let (store, writer) = reflector::store::<EndpointSlice>();
-            // `.default_backoff()` chains a `StreamBackoff` so transient API
-            // errors retry with exponential backoff. Wrap it with `reflector`
-            // so every event also updates `store` (in-band, before the event
-            // yields to us — so `store.state()` always reflects the current
-            // event when we handle it).
+            // The reflector updates `store` before each event is yielded, so
+            // `store.state()` reflects the event being handled.
             let stream = reflector::reflector(writer, start_watcher(slices.clone(), wcfg.clone()))
                 .default_backoff();
             tokio::pin!(stream);
 
-            // This generation's store starts EMPTY, so reconciling before the
-            // initial list completes would diff a populated `announced` against
-            // nothing and retract the entire pool, only to re-add it moments
-            // later. `InitDone` is the first point `store.state()` is whole.
+            // This generation's store starts empty, so reconciling before
+            // `InitDone` would retract the whole pool and re-add it moments
+            // later.
             let mut listed = false;
 
             loop {
@@ -229,47 +192,33 @@ impl Discovery for KubeDiscovery {
 /// `Added` / `Removed` for every pod that just transitioned in or out
 /// of the Ready-across-any-slice set.
 ///
-/// Idempotent: safe to call after every event (including no-op events).
-/// Store lookups are cheap read-locks — a full re-derivation costs
-/// O(slices × endpoints_per_slice) which is bounded and small.
+/// Idempotent, and cheap enough to run on every event.
 async fn reconcile(
     store: &reflector::Store<EndpointSlice>,
     defaults: &DiscoveryDefaults,
     ports: &PortRefs,
     tx: &mpsc::Sender<WorkerChange>,
-    // `namespace/name` of the InferenceWorkerSet these endpoints belong to, so a
-    // churn line says WHICH declared fleet moved. Two sets can front the same
-    // Service, so the Service name alone does not answer that. `None` in static
-    // mode, where there is no CR.
+    // `namespace/name` of the InferenceWorkerSet, for logs, since two sets
+    // can front one Service. `None` without a CR.
     workerset: Option<&str>,
-    // pod_uid -> (worker id, k8s coordinate). The coordinate is stored rather
-    // than re-derived because the Removed path fires exactly when the endpoint
-    // has left the store, leaving nothing to derive it from.
+    // pod_uid -> (worker id num, worker id string). Stored because a removed
+    // endpoint is no longer in the store.
     announced: &mut HashMap<String, (u64, String)>,
 ) {
     let ws = workerset.unwrap_or("-");
-    // Snapshot: pod_uid → WorkerConfig for every Ready endpoint the
-    // store currently knows about. A pod that's Ready in multiple
-    // slices dedupes to one entry (last write wins; the WorkerConfig
-    // is identical modulo slice_name, which is only used in
-    // debug logging).
+    // pod_uid -> WorkerConfig for every Ready endpoint. A pod Ready in
+    // several slices dedupes to one entry.
     let mut current: HashMap<String, WorkerConfig> = HashMap::new();
     for slice in store.state() {
-        // A slice with no Ready endpoint contributes nothing, and resolving its
-        // ports first is not merely wasted work — it WARNs. K8s keeps an empty
-        // placeholder slice after the last pod goes but empties `ports[]`, since
-        // a port NAME has no container port left to resolve against. Every
-        // declared name then "misses" and reports a typo in a CR that was
-        // correct all along. Scaling a GPU node pool to zero produced exactly
-        // that: one bogus WARN per declared port, on every reconcile.
+        // Skip slices with no Ready endpoint before resolving ports. An empty
+        // placeholder slice has no `ports[]`, so every declared port name
+        // would warn as a miss.
         if !slice.endpoints.iter().flatten().any(is_endpoint_ready) {
             continue;
         }
         let ports = extract_named_ports(&slice, defaults, ports);
         let slice_name = slice.metadata.name.as_deref().unwrap_or("");
-        // `endpoints` became `Option<Vec<_>>` in the k8s 1.36 API, so flatten
-        // rather than iterating the Option itself. A slice with the field
-        // absent is simply an empty slice.
+        // `endpoints` is optional; absent means empty.
         for ep in slice.endpoints.iter().flatten() {
             if !is_endpoint_ready(ep) {
                 continue;
@@ -315,10 +264,8 @@ async fn reconcile(
         let _ = tx.send(WorkerChange::Added(cfg.clone())).await;
     }
 
-    // No longer Ready anywhere → emit Removed. Covers three cases the
-    // hand-rolled reconciler handled separately: endpoint dropped from
-    // a slice, slice deleted, and endpoint vanished during a
-    // reflector-driven relist.
+    // No longer Ready anywhere: emit Removed. Covers an endpoint dropped from
+    // a slice, a deleted slice, and an endpoint gone after a relist.
     let vanished: Vec<String> = announced
         .keys()
         .filter(|u| !current.contains_key(*u))
@@ -336,11 +283,9 @@ async fn reconcile(
     }
 }
 
-/// Ready iff `endpoint.conditions.ready == Some(true)`. K8s's
-/// EndpointSlice controller only sets this when the backing Pod passes
-/// its readiness probe AND isn't terminating — equivalent to the
-/// is_pod_ready check we used to do ourselves, just without inspecting
-/// the Pod.
+/// Ready iff `endpoint.conditions.ready == Some(true)`, which the
+/// EndpointSlice controller sets only when the Pod passes its readiness probe
+/// and isn't terminating.
 fn is_endpoint_ready(ep: &Endpoint) -> bool {
     ep.conditions
         .as_ref()
@@ -348,10 +293,8 @@ fn is_endpoint_ready(ep: &Endpoint) -> bool {
         .unwrap_or(false)
 }
 
-/// Slice-level port resolution. Each EndpointSlice carries a single
-/// `ports[]` (inherited from the Service) that applies to all its
-/// endpoints. We look up `http`, `metrics`, `kv-pub`/`kv-events`, `kv-replay`
-/// by name and fall back to `discovery.defaults` for any that are absent.
+/// Ports resolved for a slice. Each EndpointSlice carries one `ports[]` for
+/// all its endpoints. See the module docs for the resolution order.
 struct ResolvedPorts {
     http: u16,
     metrics: u16,
@@ -363,18 +306,12 @@ struct ResolvedPorts {
 
 /// Resolve one explicitly-declared port against the slice.
 ///
-/// A NAME is looked up in the slice's port list; a miss returns `None` so the
-/// caller falls back to its conventional-name chain, with a WARN, because a
-/// name that resolves to nothing is a typo or a Service that changed under the
-/// CR — silently dialing a default would serve traffic against the wrong port.
-/// `reconcile` skips endpoint-less slices before calling this, so the WARN
-/// cannot fire for a slice that is merely empty.
+/// A name is looked up in the slice's ports; a miss warns (likely a typo or a
+/// changed Service) and returns `None`, so the caller falls back to the
+/// conventional name.
 ///
-/// A NUMBER is matched against the slice's ports first: the CR names a SERVICE
-/// port, the slice carries TARGET ports, and they coincide in the ordinary case
-/// but need not. No match means using it verbatim, with a WARN naming the
-/// hazard, because refusing outright would be worse — the number is usually
-/// right.
+/// A number is a Service port while the slice carries target ports; they
+/// usually coincide. With no match it is used verbatim, with a warning.
 fn resolve_port_ref(slice: &EndpointSlice, role: &str, want: &PortRef) -> Option<u16> {
     let ports = slice.ports.as_deref().unwrap_or(&[]);
     match want {
@@ -437,12 +374,9 @@ fn extract_named_ports(
     let metrics = declared("metrics", &refs.metrics)
         .or_else(|| find("metrics"))
         .unwrap_or(http);
-    // `kv-events` is the name the InferenceWorkerSet CRD's examples use for the
-    // publish socket; `kv-pub` is what kinference's own configs have always used.
-    // Accept both, because the failure mode of accepting only one is silent: the
-    // lookup misses, the ZMQ default is used, the SUB socket connects to
-    // nothing (ZMQ connect always succeeds), and the pool serves traffic with a
-    // permanently empty prefix model.
+    // Accept both `kv-pub` and `kv-events` (the CRD examples' name). A miss
+    // would silently fall back to the default port, and since ZMQ connect
+    // always succeeds, the prefix model would stay empty.
     let zmq = if refs.kv_events_declared_absent {
         None
     } else {
@@ -453,11 +387,7 @@ fn extract_named_ports(
                 .unwrap_or(defaults.zmq_port),
         )
     };
-    // Gated on the same declaration as `zmq`: replay reads back the stream the
-    // publish socket emits, so a set that publishes nothing has nothing to
-    // replay. Before `replayPort` moved under `kvEvents` this resolved
-    // unconditionally, and the value was carried on every endpoint of an
-    // events-free set and never read.
+    // A set that publishes nothing has nothing to replay.
     let replay = if refs.kv_events_declared_absent {
         None
     } else {
@@ -515,24 +445,21 @@ fn synthesize_worker_from_endpoint(
     Some(WorkerConfig {
         worker_id_str,
         worker_id_num,
-        // Empty hint — the warmup-fired /v1/models scrape populates the
-        // reactive by_model index sub-second after registration.
+        // Filled in by the warmup /v1/models scrape after registration.
         model_name: String::new(),
         zmq_endpoint,
         replay_endpoint,
         metrics_url,
         http_url,
-        // K8s mode derives the routable address from `http_url`
-        // (which is already `http://<pod-ip>:<port>/`), so no need
-        // for an explicit override.
+        // Derived from `http_url`, which already uses the pod IP.
         endpoint: None,
         pod_name: Some(pod_name),
         namespace: Some(namespace),
         node_name,
-        node_ip: None, // not exposed by EndpointSlice; we don't currently route on this anyway
+        node_ip: None, // not exposed by EndpointSlice
         pod_ip: Some(address),
         availability_zone,
-        instance_type: None, // would require Node fetch + extra RBAC; out of scope
+        instance_type: None, // would need a Node fetch and extra RBAC
     })
 }
 

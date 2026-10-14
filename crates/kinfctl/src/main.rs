@@ -1,4 +1,4 @@
-//! `kinfctl` — the kinference command-line tool.
+//! `kinfctl`, the kinference command-line tool.
 //!
 //! One command today, `check`, for catching mistakes in `InferencePolicy`
 //! manifests before they are applied. Built for being driven by an assistant
@@ -19,8 +19,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use kinference_policy::check::{self, Input, NameCheckSkip, Options, Report};
 use kinference_policy::warning::WarningCode;
 
-/// Exit statuses. Distinct for "found problems" and "could not look", so a
-/// script — or an agent — never mistakes an unreadable file for a clean one.
+/// Exit statuses. "Found problems" and "could not look" differ, so a script
+/// never mistakes an unreadable file for a clean one.
 const EXIT_CLEAN: u8 = 0;
 const EXIT_FINDINGS: u8 = 1;
 const EXIT_UNUSABLE: u8 = 2;
