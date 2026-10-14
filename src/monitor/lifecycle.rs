@@ -37,8 +37,8 @@ impl KinferenceService {
         request_id: u64,
         client_request_id: Option<&str>,
         qos: Qos,
-        pool_ref: Option<&crate::policy::PoolRef>,
-        identity: &crate::policy::RequestIdentity,
+        pool_ref: Option<&kinference_policy::PoolRef>,
+        identity: &kinference_policy::RequestIdentity,
     ) -> PickAndRecordOutcome {
         let req_label = client_request_id
             .map(|s| s.to_string())
@@ -196,11 +196,12 @@ impl KinferenceService {
         };
         // Captured before scoring consumes `messages`, falling back to the
         // completions-API `prompt`.
-        let classifier_text = crate::policy::classify::last_user_text(&messages).or_else(|| {
-            obj.get("prompt")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
+        let classifier_text =
+            kinference_policy::classify::last_user_text(&messages).or_else(|| {
+                obj.get("prompt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
         // Scoring consumes these, but a second pool or a policy may need them
         // again; only clone in that case.
         let policy_active = pool_ref.is_some() && self.policy.is_some();
@@ -327,7 +328,7 @@ impl KinferenceService {
         let mut forced_endpoint: Option<String> = None;
         let selected: Option<ScoredGroup>;
         if let (Some(pref), Some(store)) = (pool_ref, self.policy.as_ref()) {
-            let attrs = crate::policy::predicate::RequestAttrs {
+            let attrs = kinference_policy::predicate::RequestAttrs {
                 // Upstream first, then its declared aliases.
                 model: {
                     let mut names = vec![model.clone()];
@@ -345,8 +346,8 @@ impl KinferenceService {
                 max_tokens: parsed_max_tokens,
                 qos: Some(qos.as_label().to_string()),
                 tenant: identity.tenant.clone(),
-                // See `policy::classify`.
-                tag: crate::policy::classify::tags_for_request(
+                // See `kinference_policy::classify`.
+                tag: kinference_policy::classify::tags_for_request(
                     &req_label,
                     classifier_text.as_deref(),
                 ),
@@ -393,7 +394,7 @@ impl KinferenceService {
                     self.prom.record_routed(
                         &identity.tenant,
                         &pick.provider.name,
-                        crate::policy::crd::BackendType::Provider,
+                        kinference_policy::crd::BackendType::Provider,
                     );
                     return PickAndRecordOutcome::Provider {
                         pick,
@@ -775,7 +776,7 @@ impl KinferenceService {
         self.prom.record_routed(
             &identity.tenant,
             &pool.key.name,
-            crate::policy::crd::BackendType::Local,
+            kinference_policy::crd::BackendType::Local,
         );
 
         match degraded_reason {

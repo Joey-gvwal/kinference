@@ -6,7 +6,7 @@
 //! bare wakeups and all state is re-derived from the stores on each one.
 //!
 //! A seventh reflector, on core `Service`, is not an input to [`resolve`] and
-//! does not hold the publish gate (see [`super::services`]). Its output is
+//! does not hold the publish gate (see [`kinference_policy::services`]). Its output is
 //! attached to the published snapshot ([`PolicyIndex::services`]) so pools and
 //! Service ports are read from one consistent instant.
 
@@ -14,18 +14,17 @@ use std::sync::{Arc, RwLock};
 
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Service;
+use kinference_policy::crd::{
+    HTTPRoute, InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet,
+    ReferenceGrant,
+};
+use kinference_policy::resolve::{PolicyIndex, PoolIndex, rejection_index, resolve};
+use kinference_policy::services::ServiceIndex;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector;
 use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::{Api, Resource};
 use tokio_util::sync::CancellationToken;
-
-use super::crd::{
-    HTTPRoute, InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet,
-    ReferenceGrant,
-};
-use super::resolve::{PolicyIndex, PoolIndex, rejection_index, resolve};
-use super::services::ServiceIndex;
 
 /// The published snapshot. Read on the pick hot path: take the read lock, clone
 /// the `Arc`, release.

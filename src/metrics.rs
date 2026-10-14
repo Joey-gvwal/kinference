@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
+use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Engine, WorkerConfig};
-use crate::policy::PoolId;
 
 // vLLM and SGLang prefix metric names with `<engine>:`, which
 // prometheus-parse 0.2.5 rejects. The scraped body is rewritten to `vllm_` /

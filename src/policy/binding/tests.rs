@@ -2,11 +2,11 @@ use super::*;
 
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
-use crate::policy::PoolId;
-use crate::policy::compile::CompiledPolicy;
-use crate::policy::crd::{Condition, IntOrString};
-use crate::policy::engine::ObjectKey;
-use crate::policy::resolve::{ResolvedProvider, ResolvedWorkerSet};
+use kinference_policy::PoolId;
+use kinference_policy::compile::CompiledPolicy;
+use kinference_policy::crd::{Condition, IntOrString};
+use kinference_policy::engine::ObjectKey;
+use kinference_policy::resolve::{ResolvedProvider, ResolvedWorkerSet};
 
 /// The default picker extension name.
 const EXT: Option<&str> = Some("chat-picker");
@@ -470,12 +470,12 @@ fn only_a_false_accepted_condition_reads_as_rejected() {
         "no status yet is not a rejection"
     );
 
-    b.status = Some(crate::policy::crd::BackendBindingStatus {
+    b.status = Some(kinference_policy::crd::BackendBindingStatus {
         conditions: vec![condition("True")],
     });
     assert_eq!(rejected_reason(&b), None);
 
-    b.status = Some(crate::policy::crd::BackendBindingStatus {
+    b.status = Some(kinference_policy::crd::BackendBindingStatus {
         conditions: vec![condition("False")],
     });
     let reason = rejected_reason(&b).expect("rejected");

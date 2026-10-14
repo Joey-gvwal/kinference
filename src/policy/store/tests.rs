@@ -1,7 +1,7 @@
 //! Event classification and the reflector stores that feed `resolve`.
 use super::*;
-use crate::policy::crd::{Destination, InferencePoolSpec, InferenceWorkerSetSpec, ServiceRef};
-use crate::policy::resolve::RejectionIndex;
+use kinference_policy::crd::{Destination, InferencePoolSpec, InferenceWorkerSetSpec, ServiceRef};
+use kinference_policy::resolve::RejectionIndex;
 use kube::api::ObjectMeta;
 
 fn meta(name: &str) -> ObjectMeta {
@@ -46,8 +46,8 @@ fn seeding_a_reflector_store_feeds_resolve() {
     writer.apply_watcher_event(&watcher::Event::Apply(worker_set("workers-h100")));
     let sets = store.state();
     assert_eq!(sets.len(), 1);
-    let key = crate::policy::PoolKey::namespaced("infra", "workers-h100");
-    let id = crate::policy::PoolId::from_raw(1);
+    let key = kinference_policy::PoolKey::namespaced("infra", "workers-h100");
+    let id = kinference_policy::PoolId::from_raw(1);
     let idx = resolve(
         &[Arc::new(pool(
             "chat",

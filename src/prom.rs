@@ -94,7 +94,7 @@ const POLICY_DECISION_OUTCOMES: [&str; 9] = [
 const EVICTION_REASONS: [&str; 2] = ["block_size_mismatch", "model_mismatch"];
 
 /// `kinference_workerset_rejected_total{reason}`.
-/// Source: `crate::policy::rejection::RejectReason::as_condition_reason`.
+/// Source: `kinference_policy::rejection::RejectReason::as_condition_reason`.
 /// CamelCase, since these double as Kubernetes condition reasons.
 const WORKERSET_REJECT_REASONS: [&str; 7] = [
     "MissingProfile",
@@ -1310,7 +1310,7 @@ impl PromMetrics {
         &self,
         tenant: &str,
         destination: &str,
-        kind: crate::policy::crd::BackendType,
+        kind: kinference_policy::crd::BackendType,
     ) {
         self.routed_requests
             .with_label_values(&[self.tenant_label(tenant), destination, kind.as_str()])

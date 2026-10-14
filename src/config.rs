@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use kinference_policy::PoolKey;
 use serde::Deserialize;
-
-use crate::policy::PoolKey;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]

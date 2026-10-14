@@ -293,7 +293,7 @@ fn an_empty_tenant_always_buckets_under_default() {
 #[test]
 fn routed_requests_count_by_tenant_destination_and_type() {
     use crate::config::TenantLabels;
-    use crate::policy::crd::BackendType::{Local, Provider};
+    use kinference_policy::crd::BackendType::{Local, Provider};
 
     let m = with(TenantLabels::Allow(vec!["acme".into()]));
     m.record_routed("acme", "qwen-ws", Local);
