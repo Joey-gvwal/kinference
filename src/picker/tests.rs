@@ -22,27 +22,19 @@ fn make_worker(
     }
 }
 
-/// Convenience: build a zero-filled inflight slice parallel to a
-/// worker vec, for tests that don't care about the tie-breaker.
+/// A zero-filled inflight slice parallel to `workers`.
 fn zero_inflight(workers: &[WorkerScore]) -> Vec<u32> {
     vec![0; workers.len()]
 }
 
-/// Convenience: build a zero-filled pending-workload slice parallel
-/// to a worker vec, for tests that don't care about inflight items
-/// on any worker. Each worker gets an empty Vec of InflightSummary.
+/// An empty pending-workload slice parallel to `workers`.
 fn zero_workload(workers: &[WorkerScore]) -> Vec<Vec<InflightSummary>> {
     vec![Vec::new(); workers.len()]
 }
 
 /// Build a single InflightSummary for use in tests. `dispatched_at`
-/// is offset back from now by `age_ms` so the caller can synthesize
-/// realistic ordering across multiple summaries on one worker
-/// (smallest age = newest = highest position number).
-///
-/// `total_at_dispatch` defaults to `uncached` (fully-cold prefill).
-/// Tests that care about the quadratic split should use
-/// `summary_with_total`.
+/// is `age_ms` before now. `total_at_dispatch` equals `uncached` (fully cold);
+/// see `summary_with_total`.
 fn summary(uncached: u32, age_ms: u64) -> InflightSummary {
     summary_with_total(uncached, uncached, age_ms)
 }
@@ -104,17 +96,9 @@ fn higher_overlap_wins() {
 
 #[test]
 fn cold_tie_with_top_k_min_1_still_spreads() {
-    // Regression test for the tie-extension fix in select_by_min_wait
-    // (plugin.rs:586-617). With top_k_min=1 and a cold fleet of N
-    // bit-identical workers, *naive* argmin would always pick
-    // index 0 (sort_by is stable). The tie-extension extends the
-    // pool through equal-cost ties, so the pick is uniform random
-    // across all tied entries. Across many runs we expect to see
-    // all endpoints chosen at least once.
-    //
-    // (When `inflight` is all-zero this test exercises the
-    // legacy path — tie-extension alone, with the in-flight
-    // tie-break being a no-op.)
+    // With top_k_min=1 and identical workers, plain argmin would always
+    // pick index 0. The tie extension makes the pick uniform across ties,
+    // so over many runs every endpoint is chosen.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -152,10 +136,8 @@ fn cold_tie_with_top_k_min_1_still_spreads() {
 
 #[test]
 fn inflight_breaks_predicted_wait_ties() {
-    // Three workers tied on predicted_ms but with different
-    // in-flight counts. The picker should ALWAYS pick the one
-    // with the lowest in-flight, never random across tied
-    // candidates with non-tied inflight.
+    // Three workers tied on predicted_ms with different in-flight counts:
+    // the lowest in-flight always wins.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -189,14 +171,9 @@ fn inflight_breaks_predicted_wait_ties() {
 
 #[test]
 fn tie_tolerance_widens_pool_to_include_near_ties() {
-    // Reproduces the real-world scenario where one worker has
-    // matched=0 (no chat-template prefix cached) and the others
-    // have matched=1 (template-only "overlap"). With a small
-    // attention_uncached_block_ms the gap is a few ms —
-    // meaningless noise, but enough to keep :8000 out of the
-    // pool under strict equality. With tie_tolerance_ms=50 the
-    // pool widens to include :8000, and the lower inflight
-    // count wins.
+    // One worker has matched=0 and the others matched=1 (a chat-template
+    // prefix), a gap of a few ms. With tie_tolerance_ms=50 the pool includes
+    // the empty worker, and its lower inflight count wins.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -237,10 +214,8 @@ fn tie_tolerance_widens_pool_to_include_near_ties() {
 
 #[test]
 fn tie_tolerance_zero_keeps_strict_predicted_wait_ordering() {
-    // Same setup as above but with tie_tolerance_ms=0: :empty:1
-    // is *not* in the pool because its predicted_ms is strictly
-    // higher than the warm workers'. The picker should pick one
-    // of the warm workers despite their higher inflight.
+    // With tie_tolerance_ms=0, :empty:1 is not in the pool, so a warm
+    // worker wins despite higher inflight.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -275,10 +250,8 @@ fn tie_tolerance_zero_keeps_strict_predicted_wait_ordering() {
 
 #[test]
 fn tie_tolerance_does_not_pull_in_meaningfully_worse_workers() {
-    // Even with a generous tolerance, a worker whose predicted_ms
-    // is FAR above the minimum (the queue cost case) must stay
-    // out of the pool. Only "noise" differences within the
-    // tolerance band are eligible.
+    // Even with a generous tolerance, a worker far above the minimum stays
+    // out of the pool.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -287,7 +260,7 @@ fn tie_tolerance_does_not_pull_in_meaningfully_worse_workers() {
         ..Default::default()
     };
     let workers = vec![
-        // Truly slow worker — has a real waiting queue (10 entries).
+        // Truly slow worker: a real waiting queue (10 entries).
         make_worker("slow:1", 0, 100, 10, 1.0, 0.0),
         // Fast workers, no queue.
         make_worker("fast:1", 0, 100, 0, 100.0, 0.0),
@@ -315,8 +288,7 @@ fn tie_tolerance_does_not_pull_in_meaningfully_worse_workers() {
 
 #[test]
 fn inflight_tie_within_a_pool_falls_through_to_random() {
-    // Three workers tied on predicted_ms AND on inflight (all 0)
-    // — the tie-break is a no-op, so random pick across all three.
+    // Tied on predicted_ms and inflight: random across all three.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -353,9 +325,8 @@ fn inflight_tie_within_a_pool_falls_through_to_random() {
 
 #[test]
 fn inflight_does_not_override_predicted_wait() {
-    // The picker must never prefer a worker with worse predicted_ms
-    // just because it has lower inflight. Inflight only breaks
-    // ties WITHIN the top-K pool.
+    // Inflight only breaks ties within the top-K pool; it never beats a
+    // better predicted_ms.
     let predictor = PredictorConfig::default();
     let picker = PickerConfig {
         top_k_min: 1,
@@ -422,9 +393,8 @@ fn pure_argmin_deterministic() {
 
 #[test]
 fn saturated_cold_fallback_kicks_in() {
-    // completion_rate==0 AND kv_cache_usage above threshold AND
-    // queue_waiting > 0 should select the saturated-cold rate, not
-    // the prefill-bound floor.
+    // No completions, cache above threshold and a queue: the saturated-cold
+    // rate applies.
     let predictor = PredictorConfig::default();
     // 5 queued entries, no completion history, cache 95% full.
     let w = make_worker("stuck:1", 0, 0, 5, 0.0, 0.95);
@@ -458,10 +428,8 @@ fn format_score_table_sorts_by_name_and_marks_chosen() {
         top_k_fraction: 0.0,
         ..Default::default()
     };
-    // Insert out of alphabetical order to prove the sort happens.
-    // The chosen worker has the *higher* predicted wait, to also
-    // prove that the marker tracks the `chosen_endpoint` arg
-    // independently of the rendered sort order.
+    // Out of alphabetical order, and the chosen worker has the higher
+    // predicted wait, so the marker follows `chosen_endpoint`, not the order.
     let workers = vec![
         make_worker("zeta:1", 0, 100, 10, 1.0, 0.0),   // big wait
         make_worker("alpha:1", 0, 100, 0, 100.0, 0.0), // small wait
@@ -502,7 +470,7 @@ fn format_score_table_sorts_by_name_and_marks_chosen() {
         lines[1].contains("expect_ms"),
         "second line should be column header: {table}"
     );
-    // Sorted by name alphabetically — alpha:1 first.
+    // Sorted by name, so alpha:1 first.
     assert!(
         lines[2].contains("alpha:1"),
         "first data row should be alpha:1: {table}"
@@ -573,10 +541,8 @@ fn format_score_table_renders_q_wait_and_q_inflight() {
 // -------- q_running U-shape penalty -------------------------------
 
 /// Default config knobs (peak_ms=700, peak_qr=2, falloff_qr=5).
-/// Confirms the endpoints of the U: 0 at effective_qr=0 (idle,
-/// no contention) and 0 at effective_qr ≥ falloff_qr (ride-along
-/// regime). All variants pass q_inflight=0 — the in-flight
-/// staleness path is covered separately below.
+/// 0 at effective_qr=0 and at effective_qr ≥ falloff_qr. q_inflight is 0
+/// here; it is covered below.
 #[test]
 fn q_running_penalty_is_zero_at_qr_zero_and_falloff() {
     let predictor = PredictorConfig::default();
@@ -623,8 +589,7 @@ fn q_running_penalty_ramps_linearly_on_both_sides() {
     approx(q_running_penalty_ms(4, 0, &predictor), 233.3333);
 }
 
-/// `peak_ms <= 0` disables the term entirely. The kill switch
-/// gives operators an A/B knob without removing the wiring.
+/// `peak_ms <= 0` disables the term.
 #[test]
 fn q_running_penalty_disabled_when_peak_is_zero() {
     let predictor = PredictorConfig {
@@ -642,10 +607,8 @@ fn q_running_penalty_disabled_when_peak_is_zero() {
     }
 }
 
-/// Degenerate config: peak_qr=0 (would divide by zero). The
-/// helper saturates the divisor at 1, so the rising edge runs
-/// from 0→peak over [0,1] and the falling edge from peak→0 over
-/// [1, falloff_qr]. Confirms no NaN, no panic.
+/// Degenerate config: peak_qr=0 is treated as 1, so there is no NaN or
+/// panic.
 #[test]
 fn q_running_penalty_degenerate_peak_qr_zero_does_not_panic() {
     let predictor = PredictorConfig {
@@ -659,14 +622,8 @@ fn q_running_penalty_degenerate_peak_qr_zero_does_not_panic() {
     );
 }
 
-/// In-flight staleness fix: a worker we just dispatched to looks
-/// qr=0 to the metric scraper for up to ~50ms, but our shadow
-/// `q_inflight` already knows about the pending dispatch. Folding
-/// q_inflight into effective_qr means the very next concurrent
-/// pick sees a non-clean worker and avoids self-induced contention.
-///
-/// (qr=0, q_inflight=k) must produce the same penalty as
-/// (qr=k, q_inflight=0) — the U-shape lookup is on the sum.
+/// The penalty is over `qr + q_inflight`, so (qr=0, q_inflight=k) matches
+/// (qr=k, q_inflight=0).
 #[test]
 fn q_running_penalty_inflight_combines_with_scraped_qr() {
     let predictor = PredictorConfig::default();
@@ -679,10 +636,8 @@ fn q_running_penalty_inflight_combines_with_scraped_qr() {
     }
 }
 
-/// At effective_qr ≥ falloff_qr the penalty drops to 0 regardless
-/// of how the count is split between scraped + in-flight. A worker
-/// with qr=3 already scraped and q_inflight=2 freshly dispatched
-/// (sum 5 = falloff_qr) sits in the ride-along regime.
+/// At effective_qr ≥ falloff_qr the penalty is 0 however the count is split,
+/// e.g. qr=3 plus q_inflight=2.
 #[test]
 fn q_running_penalty_inflight_can_push_past_falloff() {
     let predictor = PredictorConfig::default();
@@ -698,9 +653,7 @@ fn q_running_penalty_inflight_can_push_past_falloff() {
     );
 }
 
-/// Saturation guard: adding very large q_inflight to an already-
-/// near-max u32 qr must not panic or wrap. (Pathological but
-/// cheap to check.)
+/// A huge q_inflight added to a near-max qr doesn't panic or wrap.
 #[test]
 fn q_running_penalty_saturating_add_does_not_panic() {
     let predictor = PredictorConfig::default();
@@ -712,9 +665,8 @@ fn q_running_penalty_saturating_add_does_not_panic() {
     assert_eq!(v, 0.0, "max value lands well past falloff → 0");
 }
 
-/// End-to-end: two identical workers differing only in
-/// `queue_running`. The qr=2 worker (danger zone, peak penalty)
-/// must have higher predicted_ms than the qr=0 worker by ~peak.
+/// Two workers differing only in `queue_running`: the qr=2 one (peak
+/// penalty) predicts about `peak` more than the qr=0 one.
 #[test]
 fn predicted_wait_ms_includes_q_running_term() {
     let predictor = PredictorConfig::default();
@@ -737,8 +689,7 @@ fn predicted_wait_ms_includes_q_running_term() {
     approx(p_cont.q_running_ms, 700.0);
 }
 
-/// At qr ≥ falloff_qr, q_running_ms goes back to 0 (ride-along
-/// regime). Confirms the U closes on the right.
+/// At qr ≥ falloff_qr, q_running_ms is back to 0.
 #[test]
 fn predicted_wait_ms_q_running_term_disappears_past_falloff() {
     let predictor = PredictorConfig::default();
@@ -749,9 +700,7 @@ fn predicted_wait_ms_q_running_term_disappears_past_falloff() {
     let now = Instant::now();
     let p_idle = predicted_wait_ms(&idle, &predictor, &[], now);
     let p_busy = predicted_wait_ms(&busy, &predictor, &[], now);
-    // Penalty term should be 0 on both sides — the rest of the
-    // prediction is identical because the two workers are
-    // otherwise the same.
+    // The penalty is 0 on both, and the workers are otherwise identical.
     assert_eq!(
         p_busy.q_running_ms, 0.0,
         "qr=7 (past falloff) must produce 0 penalty"
@@ -792,7 +741,7 @@ fn approx(a: f32, b: f32) {
 
 #[test]
 fn layered_overlap_alpha_one_yields_max_across_all_sources() {
-    // α=1 → no eviction → sum equals the longest matched prefix
+    // α=1 (no eviction): the sum equals the longest matched prefix
     // across all sources (pending dispatches + kv).
     //
     // Empty pending: trivially kv_match.
@@ -864,8 +813,7 @@ fn prefill_ms_quadratic_matches_long_prompt_anchor() {
 
 #[test]
 fn prefill_ms_zero_uncached_is_zero() {
-    // A pure warm hit (0 uncached blocks) has 0 prefill cost
-    // regardless of prompt length.
+    // A pure warm hit has 0 prefill cost regardless of prompt length.
     let predictor = PredictorConfig {
         attention_uncached_block_ms: 2.3,
         attention_uncached_per_every_block_ms: 0.009,
@@ -877,10 +825,7 @@ fn prefill_ms_zero_uncached_is_zero() {
 
 #[test]
 fn prefill_ms_linear_only_matches_legacy_behavior() {
-    // Setting the quadratic coefficient to 0 reduces to the
-    // legacy `a × uncached` form — useful for tests that want
-    // simple arithmetic and for operators who want to disable
-    // the length-aware term during A/B comparisons.
+    // A zero quadratic coefficient reduces to `a × uncached`.
     let predictor = PredictorConfig {
         attention_uncached_block_ms: 7.0,
         attention_uncached_per_every_block_ms: 0.0,
@@ -907,8 +852,7 @@ fn scale_per_dispatch_by_progress_zeroes_unstarted() {
 
 #[test]
 fn scale_per_dispatch_by_progress_clamps_to_unit_range() {
-    // Caller-side bugs (progress > 1 or negative) shouldn't break
-    // the math — clamp to [0, 1].
+    // Out-of-range progress is clamped to [0, 1].
     let scaled = scale_per_dispatch_by_progress(&[100.0, 100.0], &[1.5, -0.3]);
     assert_eq!(scaled, vec![100.0, 0.0]);
 }
@@ -938,9 +882,7 @@ fn layered_overlap_with_cache_credit_zeros_fresh_inflights() {
 
 #[test]
 fn layered_overlap_monotonic_in_alpha() {
-    // Raising α never decreases overlap (every layer's
-    // contribution is non-negative, and weights are non-decreasing
-    // in α for any single layer).
+    // Raising α never decreases overlap.
     let prev = compute_layered_overlap(&[3.0, 6.0, 4.0], 7.0, 0.0);
     let mut last = prev;
     for step in 1..=10 {
@@ -956,11 +898,9 @@ fn layered_overlap_monotonic_in_alpha() {
 
 #[test]
 fn layered_overlap_redundant_pending_dispatches_collapse() {
-    // Two pending dispatches that overlap P_new identically. The
-    // newer one alone covers everything the older one would, so
-    // the older one adds nothing — result is α-invariant.
+    // Two pending dispatches that overlap P_new identically. The older one
+    // adds nothing, so the result doesn't depend on α.
     //
-    // Mirrors the conversation's first walkthrough:
     //   queue=[abcde, abcdf], P_new=abcdg, kv empty
     //   per_dispatch (oldest first) = [4, 4]
     // newest (P2=abcdf) contributes 4; P1 is fully redundant;
@@ -972,7 +912,6 @@ fn layered_overlap_redundant_pending_dispatches_collapse() {
 
 #[test]
 fn layered_overlap_unrelated_newest_with_helpful_older() {
-    // Mirrors the conversation's second walkthrough:
     //   queue=[abcde, abcdf, awxyz], P_new=abcdg, kv empty
     //   per_dispatch (oldest first) = [4, 4, 1]
     // newest L0 (awxyz) covers 1 block ("a"); L1 (abcdf) adds 3
@@ -993,12 +932,11 @@ fn layered_overlap_unrelated_newest_with_helpful_older() {
 
 #[test]
 fn layered_overlap_never_debits_when_newer_is_larger() {
-    // The bug the old formula had: when the most-recent dispatch
-    // has more overlap than older sources, the arithmetic
-    // difference went negative and the sum undercounted.
+    // The newest dispatch has more overlap than older ones; no layer may
+    // subtract.
     //
-    // per_dispatch=[3, 6] (oldest first) — newest has more
-    // overlap than older. Correct answer at α=1 is max(3, 6, 0) = 6.
+    // per_dispatch=[3, 6] (oldest first). At α=1 the answer is
+    // max(3, 6, 0) = 6.
     approx(compute_layered_overlap(&[3.0, 6.0], 0.0, 1.0), 6.0);
     // At α=0.5: newest contributes 6, older covered by newest
     // (no new blocks), KV no contribution.
@@ -1026,10 +964,8 @@ fn fresh_inflight_charged_near_full_prefill() {
     };
     let w = make_worker("a:1", 0, 100, 0, 1.0, 0.0);
     let pred = predicted_wait_ms(&w, &predictor, &[summary(100, 10)], Instant::now());
-    // Allow some tolerance: scheduler clock between summary
-    // creation and Instant::now() in this test adds a few ms of
-    // additional progress. 99% upper bound vs 95% lower bound is
-    // comfortable.
+    // Tolerance for the few ms between creating the summary and
+    // `Instant::now()`.
     assert!(
         pred.q_ms >= 0.95 * 100.0 * 10.0 && pred.q_ms <= 1.01 * 100.0 * 10.0,
         "fresh inflight should be charged near full prefill: got {}",
@@ -1080,10 +1016,8 @@ fn half_done_inflight_charged_at_half() {
 
 #[test]
 fn warm_hit_inflight_contributes_nothing_regardless_of_age() {
-    // An inflight with 0 uncached blocks (pure warm hit) has no
-    // prefill to wait through, so its discount short-circuits to
-    // 0.0 and the inflight contributes nothing to q_ms, no matter
-    // how recently it was dispatched.
+    // An inflight with 0 uncached blocks contributes nothing to q_ms, however
+    // recently it was dispatched.
     let predictor = PredictorConfig {
         attention_uncached_block_ms: 10.0,
         attention_uncached_per_every_block_ms: 0.0,
@@ -1128,9 +1062,8 @@ fn overflow_position_charged_at_full_prefill_regardless_of_age() {
 
 #[test]
 fn queue_waiting_disables_time_discount() {
-    // Once q_waiting > 0, vLLM is already queuing new arrivals;
-    // the batch is at capacity. Every inflight is charged at full
-    // prefill cost regardless of time-progress.
+    // With q_waiting > 0 the batch is at capacity, so every inflight is
+    // charged its full prefill cost.
     let predictor = PredictorConfig {
         attention_uncached_block_ms: 10.0,
         attention_uncached_per_every_block_ms: 0.0,
@@ -1208,10 +1141,8 @@ fn capacity_one_charges_fresh_inflight_near_full_prefill() {
 
 // ─── Cache-replication override ─────────────────────────────────
 
-/// Build a minimal config pair geared for replication tests: zero
-/// queue/cache penalties and a flat 10ms-per-uncached-block prefill
-/// (linear-only — set the quadratic coefficient to 0). Cheap to
-/// reason about. The caller adjusts the replication knobs as needed.
+/// Config for replication tests: zero queue/cache penalties and a flat
+/// 10ms-per-uncached-block prefill.
 fn replication_cfg() -> (PredictorConfig, PickerConfig) {
     let predictor = PredictorConfig {
         base_ms: 0.0,
@@ -1222,15 +1153,11 @@ fn replication_cfg() -> (PredictorConfig, PickerConfig) {
         inflight_concurrent_capacity: 5,
         attention_uncached_block_ms: 10.0,
         attention_uncached_per_every_block_ms: 0.0,
-        // Disable the U-shape penalty in replication tests — those
-        // tests reason about a flat 10ms-per-uncached-block prefill
-        // and would have to add q_running_ms back into every
-        // assertion otherwise.
+        // No U-shape penalty, to keep the arithmetic flat.
         q_running_penalty_peak_ms: 0.0,
         q_running_penalty_peak_qr: 2,
         q_running_penalty_falloff_qr: 5,
-        // Decode-contention term off by default; replication tests
-        // don't reason about decode pricing.
+        // No decode contention either.
         forward_pass_ms: 0.0,
         expected_overlap_alpha: 1.0,
     };
@@ -1239,9 +1166,7 @@ fn replication_cfg() -> (PredictorConfig, PickerConfig) {
         top_k_fraction: 0.0,
         inflight_tracking: false,
         tie_tolerance_ms: 0.0,
-        // 500% slowdown allowed — generous so most "fires"
-        // tests pass without per-test overrides. Tests that need
-        // tighter thresholds set it explicitly.
+        // 500% slowdown allowed; tests that need tighter set their own.
         replication_threshold_pct: 500.0,
         replication_warm_target: 2,
         replication_warm_threshold_fraction: 0.5,
@@ -1402,8 +1327,8 @@ fn replication_skips_about_to_be_warm_candidates() {
     // (in-flight prefill warming it), so it's excluded as a
     // replication candidate; cold:2 (truly cold, matched=0) is
     // the only candidate. (warm:1 deliberately at matched=80
-    // not 100 so best_ms is non-zero — otherwise the pct-based
-    // threshold would trivially reject every candidate.)
+    // not 100 so best_ms is non-zero; otherwise the percentage
+    // threshold would reject every candidate.)
     let (predictor, picker) = replication_cfg();
     let workers = vec![
         make_worker("warm:1", 80, 100, 0, 1.0, 0.0),
@@ -1468,18 +1393,10 @@ fn replication_picks_cheapest_candidate() {
 
 #[test]
 fn replication_threshold_pct_is_scale_invariant() {
-    // The whole point of the pct formulation: the same threshold
-    // produces the same fire/skip decision regardless of prompt
-    // size. Both small (100-block) and large (1000-block)
-    // prompts have warm:1 at 60% matched and cold:1 fully cold,
-    // so the Δ:best ratio is identical (1.5x). A single
-    // replication_threshold_pct should drive both to the same
-    // decision.
-    //
-    // The old absolute-ms threshold would have skipped large
-    // prompts (Δ=6000ms ≫ 1000ms cap) while firing on small
-    // prompts (Δ=600ms < 1000ms cap) — which is exactly the
-    // bug we're fixing by switching to a percentage.
+    // The percentage threshold gives the same decision regardless of prompt
+    // size. Small (100-block) and large (1000-block) prompts both have
+    // warm:1 at 60% matched and cold:1 fully cold, so Δ:best is 1.5x in
+    // both.
     let (base_predictor, base_picker) = replication_cfg();
 
     let run = |predictor: &PredictorConfig, picker: &PickerConfig, scale: u32| -> String {
