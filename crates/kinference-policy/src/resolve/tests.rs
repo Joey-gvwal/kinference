@@ -1,6 +1,4 @@
-//! Resolution is driven directly against hand-seeded reflector stores — no
-//! cluster, no HTTP mock — the same approach as
-//! `discovery::kubernetes`'s tests.
+//! Resolution is driven directly against hand-seeded reflector stores.
 use super::*;
 use crate::crd::{
     BackendObjectRef, Destination, HTTPRouteRule, InferencePolicySpec, InferencePoolSpec,
@@ -9,17 +7,14 @@ use crate::crd::{
 };
 use kube::core::ObjectMeta;
 
-/// The Nth destination as a worker set. Every test written before providers
-/// existed is asserting about a local one, and panicking here beats an
-/// `unwrap` that would read as incidental.
+/// The Nth destination as a worker set; panics if it is a provider.
 fn local(p: &ResolvedPool, i: usize) -> &ResolvedWorkerSet {
     p.destinations[i]
         .as_local()
         .expect("test expects a local destination")
 }
 
-/// `resolve` with no providers and no grants — the shape every pre-provider
-/// test wants, and saying so beats two `&[]` at each call site.
+/// `resolve` with no providers and no grants.
 fn resolve_local(
     pools: &[Arc<InferencePool>],
     policies: &[Arc<InferencePolicy>],
@@ -66,9 +61,7 @@ fn worker_set(name: &str, service: &str, labels: &[(&str, &str)]) -> Arc<Inferen
                 name: service.into(),
                 port: None,
             },
-            // Valid by default: the CRD requires both, and a fixture that
-            // omitted them would make every test resolve as a REJECTION
-            // rather than exercising the thing it means to.
+            // Required by the CRD, so set by default.
             profile: Some("h100".into()),
             kv_block_size: Some(16),
             ..Default::default()
@@ -109,13 +102,12 @@ fn provider(
                 namespace: backend_ns.map(str::to_string),
             }),
             api: Some(ApiFormat::OpenAI),
-            // Set per-test; the overwhelming case is a provider that speaks
-            // the path the client already sent.
+            // Set per-test.
             path: None,
             models: models
                 .into_iter()
-                // (canonical, upstream, ctx) — the canonical is now an
-                // alias of the upstream, so existing cases are unchanged.
+                // (canonical, upstream, ctx); the canonical becomes an alias
+                // of the upstream.
                 .map(|(n, up, ctx)| ProviderModel {
                     name: Some(up.into()),
                     aliases: if n == up { vec![] } else { vec![n.into()] },
@@ -174,9 +166,8 @@ fn grant_from(
     })
 }
 
-/// A one-rule InferencePolicy. `type: Local` on the tier because the CRD's
-/// Local-only rule requires it for `PredictedTTFT`, and a fixture that would
-/// be rejected on the cluster is a poor stand-in for one.
+/// A one-rule InferencePolicy. `type: Local` on the tier because the CRD
+/// requires it for `PredictedTTFT`.
 fn policy(name: &str) -> Arc<InferencePolicy> {
     Arc::new(InferencePolicy {
         metadata: meta(name, "infra"),
@@ -199,13 +190,8 @@ fn dest_named(name: &str) -> Destination {
     }
 }
 
-/// The identity index the resolver consults: (namespace, name) → pool.
-///
-/// In production this comes off the live pool set, where every entry exists
-/// because a worker set materialized into it. These tests build it from
-/// every name the module uses, so resolution failures in a test mean the
-/// thing under test failed rather than the fixture being incomplete — the
-/// cases that WANT a miss build their own index.
+/// The identity index the resolver consults, (namespace, name) to pool, with
+/// every name these tests use. Tests that want a miss build their own.
 fn pools() -> PoolIndex {
     [
         "a",
@@ -226,9 +212,8 @@ fn pools() -> PoolIndex {
     .collect()
 }
 
-/// A `lookup` miss means two opposite things — "no such pool" and "I have
-/// not listed yet" — and the pick path reacts differently to each. Only a
-/// snapshot built from listed stores may be read as authoritative.
+/// Only a snapshot built from listed stores is marked listed, so a `lookup`
+/// miss can be told apart from "not listed yet".
 #[test]
 fn the_default_snapshot_is_not_listed_but_a_resolved_one_is() {
     assert!(
@@ -258,11 +243,8 @@ fn worker_set_binds_to_the_pool_with_the_matching_service() {
     assert!(p.unresolved.is_empty());
 }
 
-/// A worker set the router has not materialized into a pool. Normally the
-/// brief window between the object appearing and the reconcile running, so
-/// it fails open — the pool is still served by whatever else resolved —
-/// and says so on status rather than silently listing one destination
-/// fewer.
+/// A worker set the router has not materialized into a pool is reported as
+/// `NoMatchingPool` rather than dropped.
 #[test]
 fn a_worker_set_with_no_pool_yet_is_unresolved() {
     let idx = resolve_local(
@@ -364,9 +346,8 @@ fn a_set_matched_twice_is_only_added_once() {
     );
 }
 
-/// The `dummy` case: an `InferenceWorkerSet` no `InferencePool` names must
-/// still appear in the index, or the status writer never sees it and the
-/// object keeps no `status` key at all.
+/// An `InferenceWorkerSet` no `InferencePool` names still appears in the
+/// index, so it gets status.
 #[test]
 fn a_worker_set_no_pool_names_is_still_published() {
     let idx = resolve_local(
@@ -402,8 +383,7 @@ fn a_worker_set_no_pool_names_is_still_published() {
     );
 }
 
-/// Two pools routing to one set both get named. A bool would have lost the
-/// second, and which pool is the actionable half of the report.
+/// Two pools routing to one set are both named.
 #[test]
 fn a_worker_set_reached_by_two_pools_lists_both_sorted() {
     let idx = resolve_local(
@@ -424,10 +404,8 @@ fn a_worker_set_reached_by_two_pools_lists_both_sorted() {
     );
 }
 
-/// A pool with no `destinations` means "every set in this namespace", and a
-/// set reached that way is as referenced as one named outright — which is
-/// why `referenced_by` is accumulated from the RESOLVED destinations rather
-/// than from `spec.destinations`.
+/// A set reached through an empty `destinations` ("every set in this
+/// namespace") counts as referenced.
 #[test]
 fn an_implicitly_reached_worker_set_counts_as_referenced() {
     let idx = resolve_local(
@@ -442,8 +420,7 @@ fn an_implicitly_reached_worker_set_counts_as_referenced() {
     assert_eq!(e.referenced_by, vec!["chat".to_string()]);
 }
 
-/// A set kinference has no pool for is published too, carrying the reason. Its
-/// own object is the only place that can be said when no pool names it.
+/// A set kinference has no pool for is published too, carrying the reason.
 #[test]
 fn a_worker_set_with_no_pool_is_published_with_its_reason() {
     let idx = resolve_local(
@@ -461,9 +438,8 @@ fn a_worker_set_with_no_pool_is_published_with_its_reason() {
     );
 }
 
-/// `policyRef.group`/`kind` were parsed and then discarded, so
-/// `{kind: ConfigMap, name: x}` quietly resolved to the InferencePolicy named
-/// `x`. Either the fields mean something or they should not be in the CRD.
+/// A `policyRef` naming another kind, like `{kind: ConfigMap, name: x}`,
+/// doesn't resolve to the InferencePolicy named `x`.
 #[test]
 fn a_policy_ref_naming_the_wrong_kind_dangles() {
     let mut p = pool("chat", vec![dest_named("workers-h100")], Some("real"));
@@ -677,8 +653,7 @@ fn unsupported_destination_kind_is_reported() {
 }
 
 /// Identity carries the namespace, so a same-named set in another namespace
-/// is a different pool. Getting this wrong would merge two fleets' prefix
-/// models while every request still succeeded.
+/// is a different pool.
 #[test]
 fn a_pool_in_another_namespace_does_not_claim_this_worker_set() {
     let elsewhere: PoolIndex = [(
@@ -703,12 +678,8 @@ fn a_pool_in_another_namespace_does_not_claim_this_worker_set() {
     );
 }
 
-/// A pool must report WHY a destination is unusable, not just that it is.
-///
-/// The reason comes from the resolver, which is the only thing that knows
-/// whether a profile exists — this module cannot see the router's TOML. A
-/// generic `NoMatchingPool` here would send an operator to inspect Services
-/// over a typo in a config file.
+/// A pool reports the recorded rejection reason for an unusable destination,
+/// not a generic `NoMatchingPool`.
 #[test]
 fn an_unresolved_destination_reports_the_resolvers_reason() {
     use crate::rejection::{RejectReason, Rejection};
@@ -753,9 +724,7 @@ fn an_unresolved_destination_reports_the_resolvers_reason() {
     );
 }
 
-/// With nothing recorded against it, a set with no pool is simply "no pool
-/// yet" — the ordinary window between the object appearing and the
-/// reconcile running, which must not be dressed up as a misconfiguration.
+/// With no rejection recorded, a set with no pool is `NoMatchingPool`.
 #[test]
 fn an_unrecorded_miss_stays_no_matching_pool() {
     let idx = resolve_local(
@@ -783,9 +752,8 @@ fn set_with_aliases(aliases: &[(&str, &str)]) -> ResolvedWorkerSet {
         kv_events_declared: false,
         aliases: aliases
             .iter()
-            // Fixtures still pass (canonical, upstream); under the new shape
-            // the canonical is an ALIAS of the upstream, so every existing
-            // case asks the same question.
+            // Fixtures pass (canonical, upstream); the canonical becomes an
+            // alias of the upstream.
             .map(|(n, u)| ModelAlias {
                 name: Some(u.to_string()),
                 aliases: if n == u { vec![] } else { vec![n.to_string()] },
@@ -852,8 +820,7 @@ fn a_provider_destination_resolves_to_a_backend_reference() {
         &[prov],
         &[],
         &[],
-        // Deliberately EMPTY: a provider resolves without any pool at all.
-        // It is not backed by one, which is the whole difference.
+        // Empty: a provider resolves without any pool.
         &PoolIndex::new(),
         &RejectionIndex::new(),
     );
@@ -861,8 +828,7 @@ fn a_provider_destination_resolves_to_a_backend_reference() {
     assert!(p.unresolved.is_empty(), "{:?}", p.unresolved);
     let got = p.destinations[0].as_provider().expect("provider");
     assert_eq!(got.name, "together");
-    // The namespace is defaulted HERE, so the pick response is always fully
-    // qualified and the caller never has to guess one.
+    // The namespace is defaulted, so the pick response is fully qualified.
     assert_eq!(got.backend_ref, ObjectKey::new("infra", "together-backend"));
     assert_eq!(
         got.upstreams_for("bar"),
@@ -870,11 +836,7 @@ fn a_provider_destination_resolves_to_a_backend_reference() {
     );
 }
 
-/// The path is carried, not interpreted: kinference has no URL to check it against.
-///
-/// Absence and emptiness collapse to the same `None`, because the wire spells
-/// "no rewrite" as an empty field and a value that means exactly what absence
-/// means should not travel four hops pretending to be a decision.
+/// The path is carried, not interpreted. Absent and empty both become `None`.
 #[test]
 fn a_provider_path_travels_verbatim_and_empty_means_absent() {
     let mut prov = provider("together", "infra", "b", None, vec![("bar", "up", None)]);
@@ -887,8 +849,7 @@ fn a_provider_path_travels_verbatim_and_empty_means_absent() {
         "the query string is part of the path the caller dispatches on"
     );
 
-    // Whitespace is not a path either, and an operator who clears the field by
-    // blanking it means the same as one who deletes it.
+    // Whitespace is not a path either.
     for blank in ["", "   "] {
         Arc::get_mut(&mut prov).unwrap().spec.path = Some(blank.into());
         assert_eq!(resolve_provider(&prov, &[]).expect("resolves").path, None);
@@ -898,12 +859,8 @@ fn a_provider_path_travels_verbatim_and_empty_means_absent() {
     assert_eq!(resolve_provider(&prov, &[]).expect("resolves").path, None);
 }
 
-/// A path is never a reason to refuse a destination.
-///
-/// Unlike `backendRef` and `api`, nothing downstream needs it to be well-formed
-/// to produce a candidate, and a provider that would otherwise serve is worth
-/// more than the typo it was applied with — which the schema's `^/` catches
-/// anyway, for everything not applied with `--validate=false`.
+/// A path is never a reason to refuse a destination; the schema's `^/` is the
+/// only check.
 #[test]
 fn a_malformed_provider_path_does_not_unresolve_the_provider() {
     let mut prov = provider("together", "infra", "b", None, vec![("bar", "up", None)]);
@@ -914,8 +871,7 @@ fn a_malformed_provider_path_does_not_unresolve_the_provider() {
 
 #[test]
 fn a_provider_missing_a_required_field_is_incomplete_not_dropped() {
-    // Required by the CRD schema, `Option` in Rust on purpose — so this is the
-    // layer that has to enforce it, and it must report rather than skip.
+    // Required by the schema but `Option` in Rust, so enforced here.
     let mut prov = provider("together", "infra", "b", None, vec![("bar", "up", None)]);
     Arc::get_mut(&mut prov).unwrap().spec.api = None;
     let idx = resolve(
@@ -954,9 +910,7 @@ fn a_provider_with_no_usable_model_row_is_incomplete() {
 
 #[test]
 fn a_destination_with_no_kind_is_rejected_rather_than_assumed_local() {
-    // `kind` has no default now that a destination can be either class.
-    // Guessing between a pod fleet and a paid vendor is not a guess to make
-    // silently.
+    // `kind` has no default.
     let dest = Destination {
         kind: None,
         name: Some("a".into()),
@@ -978,9 +932,7 @@ fn a_destination_with_no_kind_is_rejected_rather_than_assumed_local() {
 
 #[test]
 fn a_name_shared_across_kinds_is_ambiguous_and_neither_is_admitted() {
-    // A policy names a destination by bare string, so admitting both would
-    // make `backends.names: [a]` mean two different things at once and leave
-    // `order` unable to express a preference between them.
+    // A policy names destinations by bare string, so both would be ambiguous.
     let idx = resolve(
         &[pool(
             "chat",
@@ -1023,9 +975,7 @@ fn a_cross_namespace_backend_ref_needs_a_grant_and_fails_closed() {
         )
     };
 
-    // No grant: refused. This is the boundary that stops one namespace
-    // spending another's vendor credential, so an unseen grant has to read as
-    // an absent one.
+    // No grant: refused.
     let p = call(&[]);
     let p = p.lookup("infra", "chat").expect("pool");
     assert!(p.destinations.is_empty());
@@ -1041,16 +991,15 @@ fn a_cross_namespace_backend_ref_needs_a_grant_and_fails_closed() {
         UnresolvedReason::CrossNamespaceNotGranted
     );
 
-    // A grant naming a DIFFERENT backend does not help.
+    // A grant naming a different backend does not help.
     let p = call(&[grant("vendors", "infra", Some("other-backend"))]);
     assert_eq!(
         p.lookup("infra", "chat").unwrap().unresolved[0].reason,
         UnresolvedReason::CrossNamespaceNotGranted
     );
 
-    // Nor does one for InferencePools. `from` names the kind holding the
-    // reference, and here that is the provider: the namespace's owner granted
-    // pools something, not providers its credential.
+    // Nor does one for InferencePools: `from` names the kind holding the
+    // reference, here the provider.
     let p = call(&[grant_from(
         "InferencePool",
         "infra",
@@ -1145,8 +1094,8 @@ fn a_cross_namespace_destination_needs_a_grant_for_pools() {
 
 #[test]
 fn an_omitted_destinations_list_never_picks_up_a_provider() {
-    // "Omit to mean every InferenceWorkerSet in this namespace" — Local only,
-    // so reaching something that costs money always requires naming it.
+    // An empty `destinations` covers worker sets only; providers must be
+    // named.
     let idx = resolve(
         &[pool("chat", vec![], None)],
         &[],
@@ -1168,9 +1117,8 @@ fn an_omitted_destinations_list_never_picks_up_a_provider() {
     assert!(p.destinations[0].as_local().is_some());
 }
 
-/// The shape: `name` is the VENDOR's spelling and matches on its own;
-/// `aliases` add client-facing names on top. A row with no aliases is still
-/// reachable, which is what removes the need for a separate `upstreamName`.
+/// `name` is the vendor's spelling and matches on its own; `aliases` add
+/// client-facing names on top.
 #[test]
 fn a_provider_model_matches_its_own_name_and_every_alias() {
     use crate::crd::ProviderModel;
@@ -1181,8 +1129,7 @@ fn a_provider_model_matches_its_own_name_and_every_alias() {
             aliases: vec!["qwen-2.5".into(), "qwen-simple".into()],
             context_window: Some(32768),
         },
-        // No aliases at all — the case the old shape could not express
-        // without repeating the name twice.
+        // No aliases at all.
         ProviderModel {
             name: Some("meta/llama-3.3-70b".into()),
             aliases: vec![],
@@ -1206,8 +1153,7 @@ fn a_provider_model_matches_its_own_name_and_every_alias() {
         upstream("meta/llama-3.3-70b"),
         vec!["meta/llama-3.3-70b".to_string()]
     );
-    // And nothing else is. `models[]` is exhaustive for a provider — there is
-    // no discovery to widen it.
+    // And nothing else is: there is no discovery for a provider.
     assert!(upstream("gpt-4").is_empty());
 
     // The context window travels with the row, so every alias inherits it.
@@ -1238,14 +1184,11 @@ fn provider_served_names_report_what_is_declared() {
         ],
     );
     let r = resolve_provider(&prov, &[]).expect("resolves");
-    // Both spellings of every row: the vendor's own name matches with no
-    // alias involved, so `up-1` is as routable as the `bar` that aliases it.
+    // The vendor's own name matches as well as its aliases.
     assert_eq!(r.served_names(), vec!["bar", "foo", "up-1", "up-2", "up-3"]);
-    // Two rows sharing one alias are two candidates, exactly as two
-    // worker-set aliases would be.
+    // Two rows sharing one alias are two candidates.
     assert_eq!(r.upstreams_for("bar").len(), 2);
-    // And the upstream name resolves to itself — the identity case a row
-    // with no aliases relies on.
+    // And the upstream name resolves to itself.
     assert_eq!(
         r.upstreams_for("up-2"),
         vec![("up-2".to_string(), None)],
@@ -1253,12 +1196,8 @@ fn provider_served_names_report_what_is_declared() {
     );
 }
 
-/// With no grants visible, no cross-namespace reference is permitted.
-///
-/// The direction matters: an absent ReferenceGrant CRD and an empty one are
-/// indistinguishable here, and both have to mean "not granted". A check whose
-/// job is to stop one namespace spending another's vendor credential cannot
-/// fail open on its own unavailability.
+/// With no grants visible (including when the ReferenceGrant CRD is absent),
+/// no cross-namespace reference is permitted.
 #[test]
 fn an_absent_grant_store_permits_nothing() {
     assert!(!grant_permits(
@@ -1289,9 +1228,7 @@ fn a_policy_no_pool_references_is_still_published() {
         .policies()
         .map(|p| (p.name.as_str(), p.referenced_by.len()))
         .collect();
-    // Both appear. Reaching policies only through pools is what left an
-    // unattached one with no status at all, and therefore indistinguishable
-    // from one that had failed to compile.
+    // Both appear.
     assert_eq!(got, vec![("attached", 1), ("orphan", 0)]);
 }
 
@@ -1311,8 +1248,7 @@ fn referenced_by_names_the_pools() {
     let p = idx.policies().next().expect("policy");
     let mut by = p.referenced_by.clone();
     by.sort();
-    // Naming the pools is what makes the status actionable, and a policy
-    // reached by two pools is legal rather than an error.
+    // A policy reached by two pools names both.
     assert_eq!(by, vec!["batch", "chat"]);
 }
 
@@ -1326,8 +1262,8 @@ fn a_dangling_policy_ref_leaves_no_policy_to_publish() {
         &pools(),
         &RejectionIndex::new(),
     );
-    // Nothing to publish: there is no object named `typo`. The pool reports it
-    // instead, which is the only place it CAN be reported.
+    // Nothing to publish: there is no object named `typo`. The pool reports
+    // it instead.
     assert_eq!(idx.policies().count(), 0);
     let p = idx.lookup("infra", "chat").expect("pool");
     assert_eq!(p.dangling_policy.as_ref().map(|d| d.name()), Some("typo"));
@@ -1335,8 +1271,7 @@ fn a_dangling_policy_ref_leaves_no_policy_to_publish() {
 
 #[test]
 fn the_published_order_is_stable() {
-    // The status writer's last-written comparison is what breaks the write
-    // loop; an unstable order would make it miss and rewrite every tick.
+    // Stable order, for the status writer's last-written comparison.
     let call = || {
         resolve_local(
             &[pool("chat", vec![], Some("b"))],
@@ -1376,8 +1311,7 @@ fn a_policy_shared_by_two_pools_is_compiled_once() {
 
 // --- OpenAI-compatible only --------------------------------------------
 
-/// The scope gate. A format nothing translates to must not become a
-/// destination, because every request routed there would fail.
+/// A format nothing translates to doesn't become a destination.
 #[test]
 fn a_non_openai_api_is_refused() {
     for api in [
@@ -1408,13 +1342,8 @@ fn a_non_openai_api_is_refused() {
     }
 }
 
-/// Enforced at RESOLVE, not only in the CRD enum.
-///
-/// The schema stops a new write; this stops an object that predates the
-/// narrowing, or was applied with `--validate=false`. And `ApiFormat` keeps
-/// every variant on purpose so such an object still deserializes — failing to
-/// parse it would fail the whole watcher list page and take provider
-/// discovery down for the namespace. Parse it, then refuse it.
+/// Enforced at resolve, not only in the CRD enum: an object that bypassed
+/// the schema still deserializes, and is then refused.
 #[test]
 fn a_bypassed_object_still_parses_before_it_is_refused() {
     let spec: crate::crd::InferenceProviderSpec = serde_json::from_value(serde_json::json!({
@@ -1436,8 +1365,7 @@ fn a_bypassed_object_still_parses_before_it_is_refused() {
     );
 }
 
-/// `api` is validated and then discarded — the wire carries no format, so the
-/// value has one legal setting and nothing downstream reads it.
+/// `api` is validated and then discarded; the wire carries no format.
 #[test]
 fn openai_still_resolves() {
     let prov = provider("p", "infra", "b", None, vec![("bar", "up", None)]);
@@ -1446,9 +1374,8 @@ fn openai_still_resolves() {
     assert_eq!(r.backend_ref, ObjectKey::new("infra", "b"));
 }
 
-/// The `Service` view is ATTACHED to a snapshot, not resolved into it — so a
-/// bare `resolve` carries an unlisted one, and a consumer that reads a miss as
-/// an absence would be wrong to trust it.
+/// A bare `resolve` carries an unlisted `Service` view; the watcher attaches
+/// the real one.
 #[test]
 fn a_resolved_snapshot_carries_no_services_until_the_watcher_attaches_them() {
     let idx = resolve_local(&[], &[], &[], &[], &pools(), &RejectionIndex::new());
