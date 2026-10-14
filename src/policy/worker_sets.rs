@@ -1,30 +1,14 @@
-//! `InferenceWorkerSet` CRs → [`PoolSpec`]s, and the watch that keeps them current.
+//! `InferenceWorkerSet` CRs to [`PoolSpec`]s, and the watch that keeps them
+//! current.
 //!
-//! In Kubernetes mode the CR is the source of truth for TOPOLOGY — which
-//! Service, which ports, which block size — and TOML keeps only the
-//! `[[profile]]` blocks, because routing tuning is the router's own calibration
-//! rather than a property of the fleet. An operator creates an
-//! `InferenceWorkerSet`, names a profile, and kinference routes to it. No TOML change
-//! per fleet.
+//! In Kubernetes mode the CR supplies the topology (Service, ports, block size)
+//! and TOML supplies only the `[[profile]]` tuning.
 //!
-//! ## Why the CR fields are `Option` in Rust and required in the schema
-//!
-//! `kube::runtime::watcher` deserializes list pages **wholesale**. A single
-//! object predating the schema change — or applied with `--validate=false` —
-//! fails the entire page, producing a `watcher::Error`, backoff, and retry
-//! forever. That is not "one bad object is skipped": it is **discovery down for
-//! every worker set in the namespace**. So the types parse permissively,
-//! [`desired_pools`] enforces, and a violation becomes a [`Rejection`] rather
-//! than a dead watch.
-//!
-//! ## Why the listed gate matters more here than anywhere else
-//!
-//! [`desired_pools`] is total: whatever it returns IS the desired set, and
-//! `PoolManager::reconcile` retires everything absent from it. Reconciling
-//! against a store that has not finished its initial list therefore deletes
-//! **every pool in the fleet** — and then recreates them a moment later, having
-//! discarded every prefix cache in between. The gate is what makes a watch
-//! reconnect invisible instead of a fleet-wide cache flush.
+//! The CR fields are `Option` in Rust although the schema requires them:
+//! `kube::runtime::watcher` deserializes list pages wholesale, so one
+//! nonconforming object would fail the whole page and stall the watch for every
+//! worker set. The types parse permissively and [`desired_pools`] turns a
+//! violation into a [`Rejection`].
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -43,16 +27,9 @@ use crate::config::{
     DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PoolSpec, PortRef, PortRefs, ProfileConfig,
 };
 
-/// Worker sets that produced no pool, published for the status writer.
-///
-/// A rejected set gets no pool, so it appears in no `PolicyIndex` and the
-/// status writer would otherwise never touch it — leaving the object with a
-/// stale `Accepted=True` from before the break, or no condition at all. An
-/// operator would then have to read the router's logs to find out why nothing
-/// routes to their worker set, which is exactly what status exists to avoid.
-///
-/// Same publish/snapshot shape as `PolicyStore`: take the lock, clone the
-/// `Arc`, release.
+/// Worker sets that produced no pool, published for the status writer. A
+/// rejected set appears in no `PolicyIndex`, so this is the only way its status
+/// gets updated.
 #[derive(Default)]
 pub struct RejectionStore {
     current: std::sync::RwLock<std::sync::Arc<Vec<Rejection>>>,
@@ -77,14 +54,9 @@ impl RejectionStore {
 
 /// Resolve every `InferenceWorkerSet` into a `PoolSpec`, or a `Rejection`.
 ///
-/// Pure: no I/O, no clock, no cluster. That is what makes the interesting cases
-/// — an unknown profile, a set with no `kvBlockSize`, two same-named Services in
-/// different namespaces — testable against hand-seeded reflector stores instead
-/// of against a cluster.
-///
-/// The result is a `BTreeMap`, so the desired set has one stable order
-/// regardless of the order the watch happened to deliver objects in. Two
-/// replicas that connected at different times then build identical fleets.
+/// The result is total: `PoolManager::reconcile` retires every pool absent from
+/// it. It is a `BTreeMap` so replicas build identical fleets regardless of the
+/// order the watch delivered objects in.
 pub fn desired_pools(
     sets: &[InferenceWorkerSet],
     profiles: &[ProfileConfig],
@@ -96,10 +68,9 @@ pub fn desired_pools(
     let mut rejected = Vec::new();
 
     for iws in sets {
-        // A namespaced key, always. Two same-named Services in different
-        // namespaces are different fleets, and collapsing them into one pool
-        // would merge their prefix models silently — the worst kind of wrong,
-        // because every request still succeeds.
+        // Always namespaced: same-named sets in different namespaces are
+        // different fleets, and merging them would silently mix their prefix
+        // models.
         let key = PoolKey::namespaced(iws.namespace().unwrap_or_default(), iws.name_any());
         let spec = &iws.spec;
 
@@ -140,10 +111,6 @@ pub fn desired_pools(
             });
             continue;
         }
-        // Refused rather than read one of the two silent ways: connecting to a
-        // default socket that will never speak, or downgrading the set to
-        // "publishes nothing" and reporting a healthy pool whose prefix model
-        // stays permanently empty. Both serve traffic while lying about it.
         if spec.models.iter().any(|m| m.name.is_none()) {
             rejected.push(Rejection {
                 key,
@@ -151,6 +118,9 @@ pub fn desired_pools(
             });
             continue;
         }
+        // A `kvEvents` block without a port is refused. Defaulting the port or
+        // treating it as "publishes nothing" would both yield a healthy-looking
+        // pool whose prefix model stays empty.
         if spec.kv_events.as_ref().is_some_and(|k| k.port.is_none()) {
             rejected.push(Rejection {
                 key,
@@ -168,17 +138,13 @@ pub fn desired_pools(
                 predictor: profile.predictor.clone(),
                 picker: profile.picker.clone(),
                 tokenize_mode: profile.tokenize.mode,
-                // Deliberately none: a render URL is a per-endpoint fact and a
-                // CR-driven pool has no dedicated render box. Render/compare
-                // rotate across the pool's own workers, which is right
-                // in-cluster.
+                // Renders rotate across the pool's own workers.
                 render_url: None,
                 discovery: DiscoveryConfig {
                     mode: DiscoveryMode::Kubernetes,
                     workers_file: None,
-                    // ALWAYS the set's own namespace, never `None` (which would
-                    // mean "watch every namespace"). Otherwise two same-named
-                    // Services in different namespaces merge into one pool.
+                    // Never `None`, which would watch every namespace and merge
+                    // same-named Services into one pool.
                     namespace: Some(key.namespace.clone().unwrap_or_default()),
                     service_name: Some(spec.service_ref.name.clone()),
                     workerset: Some(key.to_string()),
@@ -196,9 +162,7 @@ pub fn desired_pools(
                             .as_ref()
                             .and_then(|k| k.replay_port.as_ref())
                             .and_then(port_ref),
-                        // The CR is authoritative here: no `kvEvents` block
-                        // means these engines don't publish, and honoring that
-                        // beats connecting to a default that will never speak.
+                        // No `kvEvents` block means these engines don't publish.
                         kv_events_declared_absent: spec.kv_events.is_none(),
                     },
                 },
@@ -211,8 +175,7 @@ pub fn desired_pools(
                     .as_ref()
                     .filter(|m| m.mode == ModelDiscoveryMode::Static)
                     .map(|_| {
-                        // `name` IS the upstream now — what the engine reports —
-                        // so a Static set declares exactly the strings discovery
+                        // `name` is what the engine reports, i.e. what discovery
                         // would otherwise have found.
                         spec.models.iter().filter_map(|m| m.name.clone()).collect()
                     }),
@@ -225,11 +188,8 @@ pub fn desired_pools(
 
 /// `spec.modelDiscovery.interval` in whole seconds.
 ///
-/// An unparseable or sub-second value falls back to the fleet default with a
-/// WARN rather than failing the whole set: the interval is a tuning knob, and
-/// refusing to route over it would be wildly out of proportion. Sub-second is
-/// clamped to 1s — the scrape is an HTTP round-trip per worker, and a fleet
-/// hammering `/v1/models` at 100Hz is a worse outcome than a slow refresh.
+/// An unparseable or non-positive value falls back to the fleet default with a
+/// warning rather than rejecting the set. Sub-second values are clamped to 1s.
 fn refresh_secs(interval: &str, key: &PoolKey) -> Option<u64> {
     match super::predicate::parse_duration_ms(interval) {
         Ok(ms) if ms >= 1.0 => Some(((ms / 1000.0).round() as u64).max(1)),
@@ -256,10 +216,9 @@ fn refresh_secs(interval: &str, key: &PoolKey) -> Option<u64> {
     }
 }
 
-/// A CR port reference in the form discovery consumes. A number that cannot be
-/// a port (negative, or above 65535) is dropped rather than truncated, so the
-/// role falls back to its conventional name instead of dialing something
-/// arbitrary.
+/// A CR port reference in the form discovery consumes. A number that isn't a
+/// valid port is dropped rather than truncated, so the role falls back to its
+/// conventional name.
 fn port_ref(v: &IntOrString) -> Option<PortRef> {
     match v {
         IntOrString::Str(s) if !s.trim().is_empty() => Some(PortRef::Name(s.clone())),
@@ -273,9 +232,8 @@ fn port_ref(v: &IntOrString) -> Option<PortRef> {
 
 /// Watch `InferenceWorkerSet`s and drive [`crate::pool_manager::PoolManager`].
 ///
-/// Owns the manager outright — the plan's "one reconcile task, so the live map
-/// needs no lock" — and is also where the periodic reap sweep lives, since both
-/// want `&mut PoolManager`.
+/// Owns the manager, so the live map needs no lock; the periodic reap sweep
+/// runs here for the same reason.
 pub struct WorkerSetWatcher {
     namespace: Option<String>,
     selector: Option<String>,
@@ -287,16 +245,13 @@ pub struct WorkerSetWatcher {
     rejected: Vec<Rejection>,
     /// The current generation's store. Rebuilt with the watch.
     store: Option<reflector::Store<InferenceWorkerSet>>,
-    /// Published for the status writer, which cannot see rejections any other
-    /// way — a rejected set has no pool and so appears in no policy snapshot.
     rejection_store: std::sync::Arc<RejectionStore>,
     prom: std::sync::Arc<crate::prom::PromMetrics>,
 }
 
 impl WorkerSetWatcher {
-    /// The kube client is handed to [`Self::run`] rather than held here: it is
-    /// needed only by the watch, and keeping it out means the resolution and
-    /// reconcile logic can be driven in tests without one.
+    /// The kube client is passed to [`Self::run`] instead, so tests can drive
+    /// reconciles without one.
     pub fn new(
         kube_cfg: &crate::config::KubernetesConfig,
         profiles: Vec<ProfileConfig>,
@@ -318,12 +273,6 @@ impl WorkerSetWatcher {
     }
 
     /// Run until cancelled, rebuilding the watch whenever its stream ends.
-    ///
-    /// A stream that ends is ordinary — an apiserver restart, a rolled
-    /// connection — and must not be terminal: the pool set would freeze at
-    /// whatever it last saw with nothing to say so. The sweep keeps running
-    /// across rebuilds, so a retired pool is still reaped while the watch is
-    /// reconnecting.
     pub async fn run(mut self, client: kube::Client, cancel: CancellationToken) {
         const REBUILD_DELAY: Duration = Duration::from_secs(2);
         loop {
@@ -371,11 +320,9 @@ impl WorkerSetWatcher {
 
         let mut sweep = tokio::time::interval(Duration::from_secs(10));
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Until the initial list completes the store is partial, and
-        // `desired_pools` is TOTAL — so reconciling now would retire every pool
-        // in the fleet and rebuild them a moment later, having thrown away every
-        // prefix cache in between. Reaping is safe meanwhile; only reconciling
-        // is gated.
+        // Until the initial list completes the store is partial, and since
+        // `desired_pools` is total, reconciling would retire every pool and
+        // discard its prefix cache. Only reconciling is gated; reaping is safe.
         let mut listed = false;
         loop {
             tokio::select! {
@@ -419,9 +366,7 @@ impl WorkerSetWatcher {
             &self.profiles,
             &self.defaults,
         );
-        // Log each rejection ONCE per transition, not per event: a set naming a
-        // missing profile stays broken until an operator acts, and re-logging it
-        // on every watch tick buries everything else.
+        // Log each rejection once per transition, not on every watch event.
         for r in &rejected {
             if !self.rejected.contains(r) {
                 tracing::warn!(
