@@ -1,22 +1,12 @@
-//! The `Service` watch: `(namespace, name)` → the live object, plus the one
-//! question the rest of kinference asks of it — what NUMBER a port reference means.
+//! The `Service` index: `(namespace, name)` to the live object, and what port
+//! number a port reference means.
 //!
-//! ## Deliberately NOT in the publish gate
-//!
-//! The router's `store::PolicyWatcher` blocks its first publish until every CRD
-//! kind has completed its initial list, because resolving mid-list would
-//! publish a snapshot claiming every pool had vanished. Services are
-//! deliberately outside that gate: no pool, policy, destination or status field
-//! is derived from a Service, so letting one hold the gate would mean a cluster
-//! that upgraded kinference WITHOUT adding the `services` grant lost policy routing
-//! entirely — a 403 is retried forever, the flag would never flip, and the
-//! symptom (no routing at all) would point nowhere near the cause.
-//!
-//! So the index carries its own [`ServiceIndex::listed`] instead, and a lookup
-//! against an unlisted index answers [`UnresolvedPort::NotListed`] rather than
-//! reporting a Service absent that has merely not been read yet. A consumer
-//! that must not guess — a controller about to write a `BackendBinding`, say —
-//! waits for that flag; everything else keeps working exactly as before.
+//! Services are outside the router's policy publish gate, since nothing in
+//! pool or policy resolution reads them; gating on them would let a missing
+//! `services` RBAC grant disable policy routing entirely. Instead the index
+//! carries its own [`ServiceIndex::listed`], and a lookup against an unlisted
+//! index answers [`UnresolvedPort::NotListed`] rather than reporting the
+//! Service absent.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,62 +19,42 @@ use super::resolve::ObjKey;
 
 /// Every `Service` in scope, keyed by identity.
 ///
-/// Holds the whole object rather than a projection of its ports. The reflector
-/// owns these allocations either way, so the index costs one map of pointers,
-/// and a projection would have to be widened every time a consumer wants one
-/// more field (`spec.type`, `appProtocol`, labels) — which is guesswork this
-/// early.
+/// Holds the whole object; the reflector owns the allocations anyway.
 #[derive(Debug, Default)]
 pub struct ServiceIndex {
     by_key: HashMap<ObjKey, Arc<Service>>,
-    /// False until the reflector's initial list completes. See the module
-    /// header: this is per-index rather than folded into the policy publish
-    /// gate on purpose.
+    /// False until the reflector's initial list completes.
     listed: bool,
 }
 
 /// Why a port reference did not resolve to a number.
 ///
-/// Separate from [`super::resolve::UnresolvedReason`] because these are facts
-/// about a Service, not about a destination, and every one of them is a
-/// different fix: `NotListed` is wait, `ServiceNotFound` is a typo in
-/// `serviceRef.name`, `UnknownPortName` is a typo in `serviceRef.port`, and
-/// `AmbiguousPort` is an omission the operator has to resolve because kinference
-/// picking one of several ports would be a guess that routes traffic.
+/// These are facts about a Service, not a destination, so they are separate
+/// from [`super::resolve::UnresolvedReason`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnresolvedPort {
-    /// The index has not listed yet, so the answer is UNKNOWN — not negative.
-    /// Reported rather than treated as absent so a caller cannot mistake
-    /// startup for a missing Service and act on it.
+    /// The index has not listed yet, so the answer is unknown rather than
+    /// negative.
     NotListed,
-    /// No `Service` of that name in that namespace. Namespace is part of the
-    /// key, so a same-named Service elsewhere is not a match.
+    /// No `Service` of that name in that namespace.
     ServiceNotFound,
-    /// The Service exposes no port kinference can dial: `spec.ports` is empty, or
-    /// the only candidate carries a number outside `1..=65535` (which the
-    /// apiserver rejects, but an object predating a validation change might
-    /// still hold).
+    /// The Service exposes no port kinference can dial: `spec.ports` is empty,
+    /// or the matching port's number doesn't fit a `u16`.
     NoUsablePort,
     /// `serviceRef.port` named a port the Service does not expose.
     UnknownPortName,
     /// `serviceRef.port` gave a number the Service does not expose.
     ///
-    /// Refused rather than passed through, and that is the whole point of
-    /// reading the Service: a `BackendBinding` naming a port with no listener
-    /// resolves, programs a route, and then fails every request — whereas an
-    /// unresolved ref can be REPORTED. Note this is the opposite of what
-    /// discovery does with an unmatched number, correctly: there the number is
-    /// used verbatim with a WARN, because the target port usually equals the
-    /// service port and dialing a pod is recoverable.
+    /// Unlike discovery, which uses an unmatched number verbatim with a
+    /// warning, this is refused: a `BackendBinding` naming a port with no
+    /// listener would program a route that fails every request.
     PortNotExposed,
-    /// The reference was omitted and the Service exposes more than one port, so
-    /// there is no unambiguous choice to make.
+    /// The reference was omitted and the Service exposes more than one port.
     AmbiguousPort,
 }
 
 impl UnresolvedPort {
-    /// Stable string for status conditions and logs, in the same style as
-    /// [`super::resolve::UnresolvedReason::as_str`].
+    /// Stable string for status conditions and logs.
     pub fn as_str(&self) -> &'static str {
         match self {
             UnresolvedPort::NotListed => "NotListed",
@@ -116,10 +86,8 @@ impl std::fmt::Display for UnresolvedPort {
 impl ServiceIndex {
     /// Build from a reflector store that has completed its initial list.
     ///
-    /// A Service with no namespace is dropped rather than keyed under `""`:
-    /// Service is namespace-scoped, so that cannot happen against a real
-    /// apiserver, and inventing a key for it would make a bogus object
-    /// shadow lookups.
+    /// A Service with no namespace, which a real apiserver never returns, is
+    /// dropped.
     pub fn build(services: &[Arc<Service>]) -> Self {
         let by_key = services
             .iter()
@@ -131,8 +99,7 @@ impl ServiceIndex {
         }
     }
 
-    /// The state before the first list completes — empty, and saying so.
-    /// [`Default`] is the same thing; this names it at the call site.
+    /// The state before the first list completes. Same as [`Default`].
     pub fn unlisted() -> Self {
         Self::default()
     }
@@ -187,10 +154,8 @@ impl ServiceIndex {
     /// `want` is `serviceRef.port` / `kvEvents.port` shaped: a port name, a
     /// number, or absent.
     ///
-    /// Absent resolves only when the Service exposes exactly one port. That is
-    /// the sole case where omission has one meaning; with two ports, choosing
-    /// would be a guess, and a guess here silently sends traffic to the metrics
-    /// endpoint.
+    /// Absent resolves only when the Service exposes exactly one port;
+    /// otherwise choosing would be a guess, possibly the metrics port.
     pub fn port_number(
         &self,
         namespace: &str,
@@ -209,11 +174,8 @@ impl ServiceIndex {
         {
             return number(p).ok_or(UnresolvedPort::NoUsablePort);
         }
-        // Falling through from a NAME that matched nothing is deliberate: no
-        // legal Service port name is all digits (`IANA_SVC_NAME` requires a
-        // letter), so a numeric string can only have been meant as the number
-        // the apiserver would have accepted for `port: 8000`. `as_number`
-        // already parses both spellings.
+        // A name that matched nothing may still be a numeric string: no legal
+        // port name is all digits (`IANA_SVC_NAME` requires a letter).
         match want.as_number() {
             Some(n) if ports.iter().any(|p| p.port == i32::from(n)) => Ok(n),
             Some(_) => Err(UnresolvedPort::PortNotExposed),
@@ -222,9 +184,7 @@ impl ServiceIndex {
     }
 }
 
-/// A `ServicePort`'s number as something dialable, or `None` for a value no
-/// socket could carry. `port` is `i32` on the wire and `1..=65535` by
-/// validation, so this narrows rather than converts.
+/// A `ServicePort`'s number as a `u16`, or `None` if it doesn't fit.
 fn number(p: &ServicePort) -> Option<u16> {
     u16::try_from(p.port).ok()
 }
