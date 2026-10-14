@@ -143,8 +143,7 @@ service_name = "svc"
 
 /// `renew_grace >= lease_duration` makes the holder permanently due for
 /// renewal, so the elector never sleeps and rewrites the Lease as fast as
-/// the apiserver will accept it. Has to be caught at load — in production it
-/// looks like an apiserver problem, not a config one.
+/// the apiserver will accept it. Caught at load.
 #[test]
 fn renew_grace_at_or_above_lease_duration_is_rejected() {
     for grace in [15, 16, 100] {
@@ -179,9 +178,7 @@ fn zero_and_empty_leader_election_settings_are_rejected() {
     }
 }
 
-/// Disabled is the default, and while disabled the timings are not consulted
-/// — so a nonsensical pair must not block startup for someone who never
-/// turned the feature on.
+/// While disabled (the default), the timings are not validated.
 #[test]
 fn leader_election_defaults_off_and_is_not_validated_when_off() {
     let cfg = cfg_with_leader_election("");
@@ -224,9 +221,8 @@ service_name = "svc"
     assert_eq!(spec.tokenize_mode, TokenizeMode::default());
 }
 
-/// An undefined profile must name BOTH sides and list what is defined:
-/// the fix is editing TOML, which is a completely different action from
-/// "the worker set is missing", so the two errors must not read alike.
+/// An undefined profile error names both the worker set and the profile,
+/// and lists the defined profiles.
 #[test]
 fn an_undefined_profile_is_rejected_and_names_both_sides() {
     let toml_str = r#"
@@ -261,8 +257,7 @@ service_name = "svc"
     );
 }
 
-/// The whole point of profiles: two sets that share one get byte-identical
-/// tuning, so retuning is one edit rather than N that can drift.
+/// Two sets sharing a profile get identical tuning.
 #[test]
 fn two_worker_sets_sharing_a_profile_get_identical_tuning() {
     let toml_str = r#"
@@ -305,8 +300,7 @@ service_name = "svc-b"
     assert_eq!(specs[0].tokenize_mode, TokenizeMode::Local);
     assert_eq!(specs[0].predictor, specs[1].predictor);
     assert_eq!(specs[0].picker, specs[1].picker);
-    // ...but block size stays per-set: it mirrors a launch flag, and a
-    // profile carrying it would drain a set whose engines disagree.
+    // ...but block size stays per set, since it depends on the engines.
     assert_eq!(specs[0].kv_block_size, 16);
     assert_eq!(specs[1].kv_block_size, 64);
 }
@@ -338,9 +332,7 @@ service_name = "svc"
     assert!(err.to_string().contains("duplicate profile name"));
 }
 
-/// `profile` has no default and no inline fallback: a worker set that omits
-/// it fails to PARSE, which is the earliest and least ambiguous place to
-/// find out.
+/// `profile` has no default: a worker set that omits it fails to parse.
 #[test]
 fn a_workerset_without_a_profile_does_not_parse() {
     let toml_str = r#"
@@ -419,13 +411,8 @@ fn tenant_labels_accepts_its_three_forms() {
     assert_eq!(parse("[metrics]\ntenant_labels = []\n"), TenantLabels::None);
 }
 
-/// A MISTYPED value must fail the parse, not fall back to the default.
-///
-/// This is the whole reason `TenantLabels` has a hand-written `Deserialize`.
-/// This knob defaults to OFF, so a typo that silently degraded to `none`
-/// would leave an operator believing
-/// per-tenant metrics were on while every series said `default`. The error also
-/// has to NAME the accepted forms, or the failure is unactionable.
+/// A mistyped value fails the parse, with an error naming the accepted
+/// forms, rather than falling back to the default.
 #[test]
 fn a_mistyped_tenant_labels_value_is_rejected_rather_than_defaulted() {
     let toml_str = r#"
@@ -450,11 +437,8 @@ tenant_labels = "sure"
 
 /// The body caps are configured in KB and parse as written.
 ///
-/// Renamed from `_bytes` to `_kb`, so the risk is an old config's byte value
-/// being read as KB — 268435456 would become 256 GiB rather than 256 MiB. A
-/// valid integer is a valid integer, so the guards are that the DEFAULT is the
-/// KB figure and that the old top-level key is rejected by
-/// `deny_unknown_fields` rather than ignored.
+/// The default is the KB figure, and the old `_bytes` keys are rejected by
+/// `deny_unknown_fields`, so a byte value can't be read as KB.
 #[test]
 fn body_caps_are_configured_in_kb() {
     let toml_str = r#"
@@ -468,9 +452,7 @@ body_max_request_kb = 64
     assert_eq!(cfg.body_max_total_kb, Some(1024));
     assert_eq!(cfg.body_max_request_kb, Some(64));
 
-    // The pre-rename spelling is now a startup ERROR, not a silent default.
-    // Reading a byte value as KB would be a 1024x mistake, so failing loudly is
-    // the only safe answer.
+    // The old spelling is a startup error.
     let stale = r#"
 listen = "127.0.0.1:50051"
 mock_mode = true
