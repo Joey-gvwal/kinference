@@ -1,27 +1,18 @@
 //! Structured findings about an `InferencePolicy`.
 //!
-//! Every check the compiler and the name lint make reports one of these. Three
-//! audiences read them, and each needs a different part:
+//! Every check the compiler and the name lint make reports one of these.
+//! `status.warnings` holds them rendered as `Code: path: message`;
+//! `kinfctl check -o json` and the policy API serialize them as structured
+//! JSON.
 //!
-//! - **An operator** reads `status.warnings`, a `[]string`, so the CRD schema
-//!   stays put. Each entry renders through [`Display`](std::fmt::Display) as
-//!   `Code: path: message`.
-//! - **An agent** reads the JSON from `kinfctl check -o json` or the policy
-//!   API, and acts on `code` and `path` rather than parsing prose.
-//! - **The docs** list every [`WarningCode`] with how to fix it. A test fails
-//!   when a code is missing from `inferencepolicy.md`, because a code nobody
-//!   can look up is just a louder string.
-//!
-//! `path` points into the manifest as written — `spec.rules[2].route.exclude[0]
-//! .drop.kvCacheUsage` — so a reader can find the line to edit. Messages still
-//! name the rule, since an index is what a tool wants and a name is what a
-//! person remembers.
+//! `path` points into the manifest as written, e.g.
+//! `spec.rules[2].route.exclude[0].drop.kvCacheUsage`. Messages also name the
+//! rule.
 
 use std::fmt;
 
-/// What a finding is about. The spelling of each variant IS the wire format —
-/// it is what `as_str` returns and what serde emits — so renaming one is a
-/// breaking change for anyone matching on it.
+/// What a finding is about. Each variant's spelling is the wire format (from
+/// both `as_str` and serde), so renaming one is a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub enum WarningCode {
     // --- spec checks: decidable from the policy alone -----------------------
@@ -76,7 +67,7 @@ pub enum WarningCode {
 }
 
 impl WarningCode {
-    /// Every code, in declaration order. The doc-drift test walks this.
+    /// Every code, in declaration order.
     #[cfg(test)]
     pub const ALL: &'static [WarningCode] = &[
         WarningCode::InvalidTerm,
@@ -102,10 +93,10 @@ impl WarningCode {
         WarningCode::UnknownModel,
     ];
 
-    /// Whether the finding is about the pools the policy serves rather than
-    /// the policy itself: a name check. A policy can serve several pools, and a
-    /// name one of them lacks may be right for another, so `kinfctl` reports
-    /// these as warnings (`W`) and every other code as an error (`E`).
+    /// Whether this is a name check, about the pools the policy serves rather
+    /// than the policy itself. A name one pool lacks may be right for another,
+    /// so `kinfctl` reports these as warnings (`W`) and the rest as errors
+    /// (`E`).
     pub fn is_name_check(self) -> bool {
         matches!(
             self,
@@ -167,9 +158,7 @@ impl PolicyWarning {
         }
     }
 
-    /// Substring test over the rendered form, so a check written against the
-    /// prose — `w.contains("never matches")` — reads the same as it did when
-    /// warnings were bare strings, and still sees the code and the path.
+    /// Substring test over the rendered form, including code and path.
     #[cfg(test)]
     pub fn contains(&self, needle: &str) -> bool {
         self.to_string().contains(needle)
@@ -186,9 +175,8 @@ impl fmt::Display for PolicyWarning {
 /// plausible typo. Used for "did you mean" hints on field and backend names.
 ///
 /// Optimal-string-alignment distance, so a transposition (`tennat`) costs one
-/// edit rather than two. The cutoff scales with length: one edit for short
-/// words, up to a third of the word for long ones — a `databriks` should find
-/// `databricks`, while `gpu` should not find `cpu-pool`.
+/// edit. The cutoff is a third of the word's length, at least one, so
+/// `databriks` finds `databricks` while `gpu` doesn't find `cpu-pool`.
 pub fn did_you_mean<'a>(
     word: &str,
     candidates: impl IntoIterator<Item = &'a str>,

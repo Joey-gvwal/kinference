@@ -7,9 +7,7 @@ fn key() -> ObjectKey {
 #[test]
 fn no_samples_means_no_figure_rather_than_zero() {
     let s = ProviderHealthStore::new();
-    // The distinction the whole design rests on: an unobserved provider has
-    // NO latency, which keeps it eligible, rather than a latency of zero,
-    // which would make it win every ranking.
+    // An unobserved provider has no latency, not a latency of zero.
     assert_eq!(s.observed_ttft_ms(&key()), None);
 }
 
@@ -20,10 +18,6 @@ fn p95_is_an_observed_value() {
         s.record_success(&key(), ms);
     }
     // Nearest-rank over 5 samples: index ceil(5 * 0.95) - 1 = 4.
-    //
-    // A NUMBER, and the only form this value now takes: it feeds
-    // `EstimatedTTFT` ranking and `backend.observedTTFTP95` predicates, and
-    // is no longer formatted for status.
     assert_eq!(s.observed_ttft_ms(&key()), Some(900.0));
 }
 
@@ -45,8 +39,7 @@ fn suppression_needs_consecutive_failures_and_a_success_resets() {
     assert!(s.record_failure(&key(), FailureKind::Upstream, "503"));
     assert!(s.is_suppressed(&key()));
 
-    // The transition is reported once, so the log records a state change
-    // rather than one line per failed request.
+    // The transition is reported once.
     assert!(!s.record_failure(&key(), FailureKind::Upstream, "503"));
 
     s.record_success(&key(), 120.0);
@@ -67,8 +60,7 @@ fn health_reports_the_last_failure_alongside_a_working_provider() {
     s.record_success(&key(), 200.0);
     let h = s.health(&key());
     assert!(!h.suppressed);
-    // Recovered, but the operator still gets to see what happened — a wrong
-    // Secret key that starts working is worth knowing about.
+    // Recovered, but the last failure is still reported.
     assert_eq!(
         h.last_failure.map(|(k, _)| k),
         Some(FailureKind::Unauthorized)
@@ -87,15 +79,8 @@ fn sweep_drops_providers_with_nothing_to_say() {
 
 /// A non-streaming success clears the failure streak but contributes no sample.
 ///
-/// Both halves matter and they pull in opposite directions. The sample must be
-/// excluded because a non-streaming response's reported first-token time is
-/// really total latency, and this p95 is not merely published — `EstimatedTTFT`
-/// ranks providers by it and `backend.observedTTFTP95` predicates compare
-/// against it, so admitting it would cost the provider picks it should win.
-///
-/// The recovery must still happen, which is why this is not simply "skip the
-/// call": a provider serving only non-streaming traffic would otherwise stay
-/// suppressed forever after a single transient failure.
+/// A non-streaming response's first-token time is really total latency, but
+/// the request still succeeded.
 #[test]
 fn an_untimed_success_recovers_without_contributing_a_sample() {
     let s = ProviderHealthStore::new();

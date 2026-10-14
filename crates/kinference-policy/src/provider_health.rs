@@ -1,29 +1,17 @@
 //! What kinference learns about a provider from the caller, and nothing else.
 //!
-//! A local endpoint is observable: kinference scrapes its metrics, subscribes to its
-//! KV events, and counts its own dispatches. A provider is not. kinference does not
-//! read the `GatewayBackend`, holds no credential, and never speaks to the
-//! vendor — so every fact in this module arrives second-hand, over
-//! `ReportFirstToken` and `Abort`.
+//! kinference never talks to a provider or reads its `GatewayBackend`, so
+//! everything here arrives from the caller, over `ReportFirstToken` and
+//! `Abort`:
 //!
-//! Two facts, and they are the only ones a provider has:
+//! - Latency, as a trailing-window p95 of caller-reported TTFT, used by
+//!   `EstimatedTTFT` and `backend.observedTTFTP95` predicates.
+//! - Whether it works at all. A dangling `backendRef` or a bad credential is
+//!   invisible to kinference, so without these reports a misconfigured provider
+//!   would keep winning picks.
 //!
-//! - **Latency**, as a trailing-window p95 of caller-reported TTFT. Published as
-//!   `status.observed.observedTTFTP95` and read by `EstimatedTTFT`. An aggregate,
-//!   with no visibility into the vendor's queue, which is why the CRD calls it a
-//!   gate rather than a ranking key and why tiering exists as the alternative.
-//! - **Whether it works at all.** This is the load-bearing one, and it exists
-//!   because of the split: a dangling `backendRef`, a Secret with the wrong key,
-//!   a revoked API key, a `ReferenceGrant` the caller declines to honor — kinference
-//!   cannot see ANY of these. Without the caller reporting them, a misconfigured
-//!   provider keeps winning picks forever while every object kinference can read looks
-//!   healthy. There is no dispatch retry anywhere in this design, so every one of
-//!   those picks is a failed request.
-//!
-//! Suppression is deliberately local to the replica and short. It is not a
-//! circuit breaker with a considered failure model — it is the minimum that stops
-//! a broken destination from being a black hole, and it has to expire on its own
-//! because the recovery signal (the ref now resolves) is invisible here too.
+//! Repeated failures suppress a provider briefly, per replica. Suppression
+//! expires on its own, since recovery is also invisible here.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -31,33 +19,28 @@ use std::time::{Duration, Instant};
 
 use super::engine::ObjectKey;
 
-/// Samples kept per provider for the p95. Small on purpose: this is a gate, and
-/// a long window would hold a stale figure across a vendor's own bad patch.
+/// Samples kept per provider for the p95. Small, so the figure tracks recent
+/// behavior.
 const WINDOW: usize = 128;
 
-/// How long a sample stays in the window. Stated because an aggregate with no
-/// window is uninterpretable — and because `EstimatedTTFT` ranks a per-request
-/// prediction against it, so a reader has to know what they are comparing.
+/// How long a sample stays in the window.
 const SAMPLE_TTL: Duration = Duration::from_secs(300);
 
 /// Consecutive dispatch failures before a provider stops producing candidates.
 ///
-/// Consecutive, not a rate: a single 500 from a busy vendor is noise, while three
-/// in a row with nothing in between is a destination that is not working. One
-/// success resets the count, so a provider that is merely flaky keeps serving.
+/// Consecutive, not a rate: one success resets the count, so a merely flaky
+/// provider keeps serving.
 const FAILURES_BEFORE_SUPPRESS: u32 = 3;
 
-/// How long suppression lasts. Short, because recovery is unobservable from here
-/// — the only way to find out that a fixed `backendRef` now resolves is to try it
-/// again.
+/// How long suppression lasts. Short, since the only way to detect recovery is
+/// to try again.
 const SUPPRESS_FOR: Duration = Duration::from_secs(30);
 
 /// Why a provider stopped being dispatched to. Ordered by how actionable it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
-    /// `Abort(BACKEND_UNRESOLVED)` — the caller could not resolve the
-    /// `GatewayBackend` at all. A configuration error, and the one kinference is
-    /// structurally blind to.
+    /// `Abort(BACKEND_UNRESOLVED)`: the caller could not resolve the
+    /// `GatewayBackend`.
     Unresolved,
     /// `Abort(BACKEND_UNAUTHORIZED)`, or a 401/403 from the vendor.
     Unauthorized,
@@ -76,11 +59,8 @@ impl FailureKind {
 
     /// Whether an operator has to change something for this to clear.
     ///
-    /// Drives the condition on the CR: a config error is reported as
-    /// `ResolvedRefs=False`, which says "this object is wrong", while an upstream
-    /// error is `Ready=False`, which says "the far end is unwell". Sending an
-    /// operator to edit a manifest over a vendor's outage wastes their time, and
-    /// the reverse leaves a typo looking like someone else's problem.
+    /// A configuration error is reported as `ResolvedRefs=False`, an upstream
+    /// error as `Ready=False`.
     pub fn is_configuration_error(self) -> bool {
         matches!(self, Self::Unresolved | Self::Unauthorized)
     }
@@ -93,8 +73,7 @@ struct Entry {
     consecutive_failures: u32,
     /// Set while this provider is producing no candidates.
     suppressed_until: Option<Instant>,
-    /// The most recent failure, retained past suppression so status can say what
-    /// went wrong rather than only that something did.
+    /// The most recent failure, retained past suppression for status.
     last_failure: Option<(Instant, FailureKind, String)>,
 }
 
@@ -108,8 +87,7 @@ pub struct ProviderHealth {
 /// Per-provider caller feedback.
 ///
 /// One lock over a small map, taken on the feedback path and once per candidate
-/// generation. Not a `DashMap`: the status writer iterates every provider each
-/// tick, and a torn view would publish one provider's health against another's.
+/// generation.
 #[derive(Debug, Default)]
 pub struct ProviderHealthStore {
     inner: RwLock<HashMap<ObjectKey, Entry>>,
@@ -120,10 +98,8 @@ impl ProviderHealthStore {
         Self::default()
     }
 
-    /// A successful first token WITH a usable TTFT sample.
-    ///
-    /// Streaming responses only. See [`Self::record_success_untimed`] for why
-    /// the two are separate.
+    /// A successful first token with a usable TTFT sample. Streaming responses
+    /// only; see [`Self::record_success_untimed`].
     pub fn record_success(&self, provider: &ObjectKey, ttft_ms: f32) {
         let now = Instant::now();
         let mut g = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -133,27 +109,10 @@ impl ProviderHealthStore {
         clear_failures(e);
     }
 
-    /// A success whose timing is NOT a time-to-first-token.
+    /// A success whose timing is not a time-to-first-token.
     ///
-    /// For a non-streaming response the caller's first byte arrives at
-    /// completion, so the interval it reports is total latency. Folding that
-    /// into `samples` would inflate the p95 — and that p95 is not merely
-    /// published: `EstimatedTTFT` RANKS providers by it and
-    /// `backend.observedTTFTP95` predicates compare against it, so a vendor
-    /// serving non-streaming traffic would lose picks it should win and could
-    /// be excluded outright.
-    ///
-    /// The recovery half still applies, and that is the whole reason this
-    /// exists rather than simply skipping the call: the request demonstrably
-    /// worked, so the failure streak must clear. Without it a provider serving
-    /// only non-streaming traffic would stay suppressed forever after one
-    /// transient failure.
-    ///
-    /// A provider with no timed sample at all stays eligible under
-    /// `EstimatedTTFT` and sorts last — see the `unobserved_provider` case in
-    /// `policy::engine` — so contributing no sample degrades gracefully instead
-    /// of removing the provider from consideration. The end-to-end figure is
-    /// still recorded, by `kinference_request_duration_ms`.
+    /// For a non-streaming response the first byte arrives at completion, so
+    /// recording it would inflate the p95. The failure streak still clears.
     pub fn record_success_untimed(&self, provider: &ObjectKey) {
         let mut g = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let e = g.entry(provider.clone()).or_default();
@@ -177,9 +136,6 @@ impl ProviderHealthStore {
     }
 
     /// Trailing-window p95 in milliseconds, or `None` with no samples.
-    ///
-    /// Returned as a number here and formatted only at the status boundary, so
-    /// the ranking path never parses a string it just printed.
     pub fn observed_ttft_ms(&self, provider: &ObjectKey) -> Option<f32> {
         let now = Instant::now();
         let g = self.inner.read().unwrap_or_else(|e| e.into_inner());
@@ -208,9 +164,7 @@ impl ProviderHealthStore {
         };
         ProviderHealth {
             suppressed: e.suppressed_until.is_some_and(|t| t > now),
-            // Retained past suppression, but not forever: a failure older than
-            // the sample window is history, and reporting it would leave a
-            // recovered provider looking broken.
+            // Failures older than the sample window are no longer reported.
             last_failure: e
                 .last_failure
                 .as_ref()
@@ -246,16 +200,13 @@ fn prune(samples: &mut Vec<(Instant, f32)>, now: Instant) {
     }
 }
 
-/// Nearest-rank p95 over the live samples.
 /// Recovery: a provider that just worked is neither failing nor suppressed.
-///
-/// Shared by both success paths so a timed and an untimed success cannot drift
-/// apart on what "recovered" means.
 fn clear_failures(e: &mut Entry) {
     e.consecutive_failures = 0;
     e.suppressed_until = None;
 }
 
+/// Nearest-rank p95 over the live samples.
 fn p95(samples: &[(Instant, f32)], now: Instant) -> Option<f32> {
     let mut live: Vec<f32> = samples
         .iter()
@@ -266,9 +217,7 @@ fn p95(samples: &[(Instant, f32)], now: Instant) -> Option<f32> {
         return None;
     }
     live.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    // Nearest-rank rather than interpolated: with a handful of samples an
-    // interpolated p95 invents a value between two observations, and this figure
-    // is meant to be a real one a request actually saw.
+    // Nearest-rank, so the result is a value a request actually saw.
     let idx = (((live.len() as f64) * 0.95).ceil() as usize).saturating_sub(1);
     Some(live[idx.min(live.len() - 1)])
 }
