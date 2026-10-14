@@ -21,8 +21,8 @@
 //!   [`provider_health`]).
 //!
 //! This crate holds the resource types and everything that can be computed
-//! without a cluster. `kinfctl` builds on it, and the router re-exports it as
-//! its `policy` module, alongside the watchers and status writers.
+//! without a cluster. `kinfctl` builds on it, and the router imports it; the
+//! router's own `policy` module holds the watchers and status writers.
 //!
 //! - [`crd`]: the resource types. `charts/kinference-crds/templates/*.yaml` is
 //!   the source of truth.
