@@ -1,13 +1,11 @@
 //! Policy evaluation: rule selection, candidate filtering, and ranking.
 //!
-//! Everything here is **pure** over its inputs. Candidate *generation* needs to
-//! tokenize and query the KV index, so it is async and lives in
-//! `crate::monitor`; this module takes an already-scored candidate set and
-//! decides. That split is what makes the semantics — which are the subtle part —
-//! testable without a cluster, a tokenizer, or a worker.
+//! Pure over its inputs. Candidate generation needs tokenization and the KV
+//! index, so it is async and lives in the router's `monitor`; this module takes
+//! an already-scored candidate set and decides.
 //!
-//! The caller orchestrates, because `onEmpty: FallThrough` needs to generate a
-//! fresh candidate set per rule:
+//! The caller orchestrates, since `onEmpty: FallThrough` needs a fresh
+//! candidate set per rule:
 //!
 //! ```text
 //! for rule in matching_rules(policy, attrs):
@@ -19,9 +17,8 @@
 //! // no rule matched at all -> spec.unmatched
 //! ```
 //!
-//! Order within `evaluate` follows the guide exactly: **context-window fitting
-//! is built in and runs before the author's exclusions**, then exclusions, then
-//! the ordered `select` tiers, then `tieBreak`.
+//! Within `evaluate`: the built-in context-window fit, then the author's
+//! exclusions, then the ordered `select` tiers, then `tieBreak`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,9 +30,8 @@ use super::compile::{
 use super::crd::{BackendType, OnEmpty, TieBreak, Unmatched};
 use super::predicate::{CandidateAttrs, RequestAttrs};
 
-/// One `(model, destination)` pair — the unit a policy chooses between. One
-/// decision covers which model serves the request AND where it runs, so a policy
-/// can trade a different model against a better-cached worker in a single pass.
+/// One `(model, destination)` pair, the unit a policy chooses between, so one
+/// decision covers both which model serves the request and where it runs.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     /// Client-facing name, as the request asked for it.
@@ -44,10 +40,9 @@ pub struct Candidate {
     /// `canonical_model` when an alias resolved, and usually differs for a
     /// provider, whose `models[].name` is the vendor's own spelling.
     pub upstream_model: String,
-    /// The destination's own name — `backend.name` in predicates. An
-    /// `InferenceWorkerSet` or an `InferenceProvider` depending on `target`.
+    /// The destination's own name; `backend.name` in predicates.
     pub backend: String,
-    /// Where this would actually go, and what can be known about it.
+    /// Where this would go, and what can be known about it.
     pub target: CandidateTarget,
     /// Precomputed predicate inputs for this candidate.
     pub attrs: CandidateAttrs,
@@ -57,12 +52,11 @@ pub struct Candidate {
     pub labels: Arc<BTreeMap<String, String>>,
 }
 
-/// The two kinds of destination, and the reason the candidate type had to split.
+/// The two kinds of destination.
 ///
-/// A provider candidate has **no endpoint at all** — not an empty one — and that
-/// single fact generates most of what is different about it: nothing to scrape,
-/// so no per-endpoint signals; no pool, so no radix tree, no inflight tracking
-/// and no critical section; and no per-request prediction, only an aggregate.
+/// A provider candidate has no endpoint, so no per-endpoint signals, no pool
+/// (no radix tree or inflight tracking), and no per-request prediction, only an
+/// aggregate.
 #[derive(Debug, Clone)]
 pub enum CandidateTarget {
     Local {
@@ -71,8 +65,7 @@ pub enum CandidateTarget {
         /// Index into the caller's per-(pool,model) score list, so the winner can
         /// be mapped back to its full scoring state for the critical section.
         score_idx: usize,
-        /// `picker::predicted_wait_ms`, i.e. exactly the `PredictedTTFT` the CRD
-        /// names.
+        /// `picker::predicted_wait_ms`, the CRD's `PredictedTTFT`.
         predicted_ttft_ms: f32,
     },
     Provider {
@@ -81,16 +74,12 @@ pub enum CandidateTarget {
         /// The `GatewayBackend` the caller must resolve. kinference never reads it.
         backend_ref: ObjectKey,
         /// `InferenceProvider.spec.path`, or `None` to dispatch on the path the
-        /// client sent.
-        ///
-        /// Rides on the candidate rather than being looked up again when one
-        /// wins, because `selection` has only the winning `CandidateTarget` in
-        /// hand by then; re-reading the store there would resolve the provider
-        /// a second time, against a snapshot that may already have moved.
+        /// client sent. Carried here so the winner doesn't need a second lookup
+        /// against a possibly newer snapshot.
         path: Option<String>,
         /// Trailing-window p95 of caller-reported TTFT. `None` until the first
-        /// report arrives, which is a state that has to stay *eligible* — a
-        /// provider cannot earn an observation without being picked.
+        /// report, and still eligible then, since a provider can't get an
+        /// observation without being picked.
         observed_ttft_ms: Option<f32>,
     },
 }
@@ -118,10 +107,7 @@ impl Candidate {
     /// This candidate's value for a tier's objective, or `None` when it cannot
     /// answer.
     ///
-    /// `None` is load-bearing and must never become a default: a missing latency
-    /// substituted with `0.0` is the *best* possible score, so the candidate that
-    /// knows least about itself would win every comparison. `rank` drops these
-    /// instead.
+    /// `None` must not be defaulted: `0.0` would be the best possible score.
     pub fn objective_ms(&self, rank: &Rank) -> Option<f32> {
         match (rank, &self.target) {
             (
@@ -130,10 +116,8 @@ impl Candidate {
                     predicted_ttft_ms, ..
                 },
             ) => Some(*predicted_ttft_ms),
-            // A provider has nothing to compute PredictedTTFT from, so it
-            // cannot be ranked in such a tier at all. The CRD's Local-only rule
-            // makes this unreachable for a well-formed policy; this is the code
-            // not depending on that.
+            // A provider has nothing to compute PredictedTTFT from. The CRD
+            // forbids this for a well-formed policy.
             (Rank::MinimizePredictedTtft, CandidateTarget::Provider { .. }) => None,
             (
                 Rank::MinimizeEstimatedTtft,
@@ -184,10 +168,8 @@ pub enum RejectReason {
     Unmatched,
 }
 
-/// Per-decision trace. The guide is emphatic that this ships with the first
-/// deployment, not after: because aliasing lets two upstream models share one
-/// canonical name, only a trace shows which model and endpoint actually served a
-/// request.
+/// Per-decision trace. Since aliasing lets two upstream models share one name,
+/// only a trace shows which model and endpoint served a request.
 #[derive(Debug, Clone, Default)]
 pub struct Trace {
     pub rule: Option<String>,
@@ -232,10 +214,8 @@ impl Trace {
 
 /// Outcome of evaluating ONE rule's route against a candidate set.
 ///
-/// `Chosen` is much larger than `Empty` and deliberately not boxed: exactly one
-/// of these exists per request, on a path whose other legs are HTTP round-trips,
-/// so an allocation to shrink a stack value would be a worse trade than the
-/// bytes.
+/// `Chosen` is much larger than `Empty` but not boxed: only one exists per
+/// request.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Outcome {
@@ -251,8 +231,8 @@ pub enum Outcome {
 
 /// Rules that match this request, in list order.
 ///
-/// First-match-wins means the caller normally takes the first; the rest matter
-/// only for `onEmpty: FallThrough`. A rule with no `matches` matches everything.
+/// The caller normally takes the first; the rest matter only for
+/// `onEmpty: FallThrough`. A rule with no `matches` matches everything.
 pub fn matching_rules<'a>(
     policy: &'a CompiledPolicy,
     attrs: &RequestAttrs,
@@ -263,28 +243,16 @@ pub fn matching_rules<'a>(
 /// Resolve a route's `consider` into the set of `(model, backends)` pairs to
 /// score.
 ///
-/// Weighted groups are sampled **first** — before exclusions and selection —
-/// which is what makes a 70/30 split compose with `minimize: PredictedTTFT`
-/// picking the best worker *inside* whichever group won. Unweighted groups union
-/// instead, which is how `consider` adds a model the client didn't ask for.
+/// Weighted groups are sampled first, before exclusions and selection, so a
+/// 70/30 split composes with `minimize` picking the best worker inside the
+/// chosen group. Unweighted groups union, which is how `consider` adds a model
+/// the client didn't ask for.
 ///
-/// Takes the request's whole model SET — upstream plus every declared alias,
-/// exactly what `RequestAttrs::model` carries — rather than one name.
-///
-/// That is what makes a provider reachable. Alias resolution happens ONCE,
-/// before any rule runs, collapsing the client's `qwen-2.5` to whichever
-/// upstream the local fleet serves (`Qwen/…-AWQ`). Scoring that single name
-/// asks every destination for a model only the local set has: a provider
-/// serving the same model under its own build (`Qwen/…-Turbo`) matches
-/// nothing, so it never becomes a candidate and a `select` tier of
-/// `type: Provider` is unreachable — for a policy whose whole point is
-/// provider failover. Carrying the set lets each destination resolve through
-/// its OWN alias table, which is where the vendor's spelling lives.
-///
-/// The cost is fan-out: a local endpoint routable under three names becomes
-/// three candidates differing only in `canonical_model`. They score
-/// identically, so `select` is unaffected; `drop: {model: {name}}` becomes
-/// per-NAME rather than per-endpoint, which is the useful reading.
+/// Takes the request's whole model set (upstream plus every declared alias, as
+/// in `RequestAttrs::model`), so each destination can resolve it through its
+/// own alias table. Otherwise a provider spelling the model differently would
+/// never become a candidate. As a result, a local endpoint routable under three
+/// names yields three candidates that score identically.
 pub fn models_to_score(route: &CompiledRoute, requested_models: &[String]) -> Vec<ScoreTarget> {
     let groups: Vec<&super::compile::CompiledConsiderGroup> = if route.consider.is_empty() {
         // Default: every name the request answers to, on every destination the
@@ -312,11 +280,8 @@ pub fn models_to_score(route: &CompiledRoute, requested_models: &[String]) -> Ve
             ModelChoice::Names(n) => n.clone(),
         };
         for m in models {
-            // Dedupe: two groups naming the same model with the same backend
-            // subset would otherwise score it twice. The WHOLE subset — class
-            // included. Comparing only names and labels made `[{type: Local},
-            // {type: Provider}]` look like one group twice, so the Provider
-            // group was dropped and providers were never considered.
+            // Dedupe groups naming the same model with the same backend subset,
+            // comparing the whole subset including the backend class.
             if out.iter().any(|t| t.model == m && t.backends == g.backends) {
                 continue;
             }
@@ -369,12 +334,10 @@ pub fn evaluate(
         ..Default::default()
     };
 
-    // --- built-in context-window fit (runs BEFORE author exclusions) -----
+    // --- built-in context-window fit (before author exclusions) ---------
     //
-    // "Context-window fitting is built in and runs before your exclusions; you
-    // do not write it." Admission uses the individual endpoint's effective
-    // window, so a rollout that shrinks --max-model-len stops attracting long
-    // requests instead of failing them.
+    // Uses each endpoint's effective window, so a rollout that shrinks
+    // --max-model-len stops attracting long requests instead of failing them.
     let need = required_context(attrs);
     let mut survivors: Vec<Candidate> = Vec::with_capacity(candidates.len());
     for c in candidates {
@@ -390,9 +353,7 @@ pub fn evaluate(
 
     // --- author exclusions (order-independent set subtraction) -----------
     for ex in &route.exclude {
-        // A guard that doesn't match means the whole exclusion sits this
-        // request out — that is why `if:` exists at all, since first-match-wins
-        // rules cannot compose exclusions.
+        // A guard that doesn't match skips the whole exclusion.
         if let Some(guard) = &ex.if_
             && !guard.matches(attrs)
         {
@@ -425,14 +386,12 @@ pub fn evaluate(
             {
                 continue;
             }
-            // A candidate that cannot answer this tier's objective is dropped
-            // from the tier, not given a stand-in value. `Order` ranks by name
-            // and so has no such notion.
+            // A candidate with no value for this tier's objective is dropped
+            // from the tier. `Order` ranks by name instead.
             if !matches!(tier.rank, Rank::Order(_)) && c.objective_ms(&tier.rank).is_none() {
-                // One exception, and it is the difference between a usable
-                // feature and a deadlock: under EstimatedTTFT a provider with no
-                // observation yet stays eligible and sorts last, because it
-                // cannot earn an observation without first being picked.
+                // Except an unobserved provider under EstimatedTTFT, which sorts
+                // last instead, since it can't get an observation without being
+                // picked.
                 let unobserved_provider = matches!(tier.rank, Rank::MinimizeEstimatedTtft)
                     && matches!(c.target, CandidateTarget::Provider { .. });
                 if !unobserved_provider {
@@ -451,9 +410,7 @@ pub fn evaluate(
         let (winner, tied) = rank(&tier.rank, in_tier, &route.tie_break);
         trace.tier = Some(i);
         trace.tied = tied;
-        // For an `order` tier the objective is a position, not a duration — but
-        // the winner's prediction is still the useful number in a log line, so
-        // fall back to it rather than reporting nothing.
+        // For an `order` tier, log the winner's prediction instead.
         trace.winner_ttft_ms = winner
             .objective_ms(&tier.rank)
             .or_else(|| winner.objective_ms(&Rank::MinimizeEstimatedTtft));
@@ -463,14 +420,14 @@ pub fn evaluate(
         };
     }
 
-    // Every tier was subsetted away — same shape as everything being excluded.
+    // No tier admitted any survivor.
     Outcome::Empty { trace }
 }
 
 /// Total context a request needs: prompt plus whatever it may generate.
 ///
-/// `maxTokens` is included because the KV cache has to hold both — a prompt that
-/// fits but whose completion cannot is still a request that will fail partway.
+/// `maxTokens` is included because the KV cache has to hold the completion
+/// too.
 fn required_context(attrs: &RequestAttrs) -> Option<i64> {
     match (attrs.input_tokens, attrs.max_tokens) {
         (None, _) => None,
@@ -482,7 +439,7 @@ fn required_context(attrs: &RequestAttrs) -> Option<i64> {
 /// Rank within one tier and return `(winner, how_many_tied)`.
 ///
 /// Every candidate handed here is rankable, or is an unobserved provider under
-/// `EstimatedTTFT`, which sorts last — `evaluate` has already dropped the rest.
+/// `EstimatedTTFT`, which sorts last; `evaluate` has dropped the rest.
 fn rank(rank: &Rank, mut candidates: Vec<Candidate>, tie_break: &[TieBreak]) -> (Candidate, usize) {
     // Establish the best key, then collect everything equal to it.
     let best_first = match rank {
@@ -503,9 +460,8 @@ fn rank(rank: &Rank, mut candidates: Vec<Candidate>, tie_break: &[TieBreak]) -> 
                 order
                     .iter()
                     .position(|n| n == &c.backend)
-                    // Unlisted destinations rank after every listed one rather
-                    // than being dropped — `order` expresses preference, not a
-                    // filter (that is what `backends` is for).
+                    // Unlisted destinations rank last rather than being
+                    // dropped; `backends` is the filter.
                     .unwrap_or(usize::MAX)
             };
             candidates.sort_by_key(key);
@@ -515,9 +471,7 @@ fn rank(rank: &Rank, mut candidates: Vec<Candidate>, tie_break: &[TieBreak]) -> 
     };
     let tied = best_first.max(1);
 
-    // PreferLocal is consulted before Random: it narrows a tie deterministically,
-    // and Random then breaks whatever is left. The reverse order would make
-    // PreferLocal dead whenever both are set.
+    // PreferLocal narrows the tie first, then Random breaks what is left.
     if tied > 1 && tie_break.contains(&TieBreak::PreferLocal) {
         let local = candidates[..tied]
             .iter()
@@ -544,7 +498,7 @@ fn pick_among(
             Err(_) => 0,
         }
     } else {
-        // No Random: stable, deterministic — the first in sorted order.
+        // No Random: the first in sorted order.
         0
     };
     (candidates.swap_remove(idx), tied)
@@ -552,9 +506,8 @@ fn pick_among(
 
 /// The route to apply when no rule matched.
 ///
-/// `ServeLocal` is fail-open, and deliberately carries no exclusions — not even
-/// a queue threshold — because "accepting the queue beats rejecting requests
-/// that queueing would have served."
+/// `ServeLocal` is fail-open and carries no exclusions, not even a queue
+/// threshold.
 pub fn unmatched_route(policy: &CompiledPolicy) -> Result<CompiledRoute, RejectReason> {
     match policy.unmatched {
         Unmatched::ServeLocal => Ok(CompiledPolicy::default_route()),

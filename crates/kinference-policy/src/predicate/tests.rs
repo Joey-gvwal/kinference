@@ -31,7 +31,7 @@ fn array_is_membership_for_a_scalar_attribute() {
 
 #[test]
 fn array_is_intersection_for_a_list_attribute() {
-    // The guide: "membership; intersects for list-valued signals".
+    // Membership; intersection for list-valued attributes.
     let m = compile_ok(json!(["ssn", "email"]), AttrKind::StrList);
     assert!(
         m.eval(Some(&AttrValue::List(vec!["email".into(), "phone".into()]))),
@@ -72,7 +72,6 @@ fn not_negates() {
 
 #[test]
 fn not_over_an_array_negates_membership() {
-    // The documented replacement for the absent `keep:`.
     let m = compile_ok(json!({"not": ["a", "b"]}), AttrKind::Str);
     assert!(m.eval(Some(&AttrValue::Str("c".into()))));
     assert!(!m.eval(Some(&AttrValue::Str("a".into()))));
@@ -103,8 +102,7 @@ fn exists_is_the_only_form_that_matches_absence() {
 
 #[test]
 fn absent_attribute_never_matches() {
-    // "A predicate over a signal the candidate does not carry does not
-    // match." This is also what makes the placeholder classifiers inert.
+    // A predicate over a signal the candidate does not carry does not match.
     for raw in [
         json!("foo"),
         json!(["foo"]),
@@ -123,10 +121,8 @@ fn absent_attribute_never_matches() {
 
 // --- model matching, alias-aware -------------------------------------
 
-/// The asymmetry this closed: `route.consider[].models.names[]` resolves
-/// through the alias table, so `qwen-simple` worked there — while
-/// `matches: {model: qwen-simple}` silently never fired, because the alias
-/// was rewritten to the upstream before any predicate ran.
+/// `matches: {model: ...}` matches aliases, as `consider[].models.names[]`
+/// does, even though the alias was rewritten to the upstream.
 #[test]
 fn a_model_predicate_matches_the_alias_the_client_actually_sent() {
     let attrs = RequestAttrs {
@@ -146,8 +142,8 @@ fn a_model_predicate_matches_the_alias_the_client_actually_sent() {
     }
 }
 
-/// Widening to a set must not widen what MATCHES. An unrelated model name is
-/// still a non-match, and `not` still means absent-from-the-set.
+/// An unrelated model name is still a non-match, and `not` means
+/// absent from the set.
 #[test]
 fn a_model_predicate_still_rejects_an_unrelated_name() {
     let attrs = RequestAttrs {
@@ -171,9 +167,7 @@ fn a_model_predicate_still_rejects_an_unrelated_name() {
     }
 }
 
-/// An undetermined model is an EMPTY set, not a wildcard — the same rule as
-/// `tag`. A body whose model could not be parsed must not satisfy every
-/// model-scoped rule in the policy.
+/// An undetermined model is an empty set, not a wildcard.
 #[test]
 fn an_empty_model_set_matches_no_named_model() {
     let attrs = RequestAttrs::default();
@@ -187,9 +181,9 @@ fn an_empty_model_set_matches_no_named_model() {
     assert!(!p.matches(&attrs));
 }
 
-/// A tag term is well-formed whatever it names; whether it can ever be
-/// SATISFIED is a separate question the compiler reports on. The classifier
-/// is resolved from the tag's prefix, not from the attribute.
+/// A tag term is well-formed whatever it names; the compiler separately warns
+/// when it can't be satisfied. The classifier is resolved from the tag's
+/// prefix.
 #[test]
 fn a_tag_term_resolves_its_classifier_from_the_tag_value() {
     let mut warnings = Vec::new();
@@ -200,14 +194,12 @@ fn a_tag_term_resolves_its_classifier_from_the_tag_value() {
         warnings.is_empty(),
         "a tag term is valid whatever it names: {warnings:?}"
     );
-    // Resolved by PREFIX, even though no classifier can emit this value —
-    // that is what makes the rule cost the PII classifier's latency once it
-    // is real, and what lets the compiler warn precisely.
+    // Resolved by prefix, even though no classifier can emit this value.
     assert_eq!(p.required_classifiers(), vec!["pii"]);
     assert_eq!(p.unemittable_tags(), vec!["pii-detected".to_string()]);
 
     // Nothing emits `pii-detected`, so the rule cannot fire even though
-    // `model` matches and the request IS tagged by the PII classifier.
+    // `model` matches and the request is tagged by the PII classifier.
     let mut attrs = req("bar");
     attrs.tag = super::super::classify::tags_for_request("test", Some("I live in Kansas"));
     assert!(!p.matches(&attrs));
@@ -217,10 +209,8 @@ fn a_tag_term_resolves_its_classifier_from_the_tag_value() {
     assert!(p.matches(&attrs));
 }
 
-/// A rule written against a tag the classifiers actually emit fires against
-/// real classifier output. Treating any `tag` term as inert — the old
-/// per-attribute rule — would have told an operator this rule never
-/// matches while it was matching live traffic.
+/// A rule written against a tag the classifiers emit fires against real
+/// classifier output.
 #[test]
 fn a_rule_on_an_emittable_tag_matches_real_classifier_output() {
     let mut w = Vec::new();
@@ -236,7 +226,7 @@ fn a_rule_on_an_emittable_tag_matches_real_classifier_output() {
         "a request with no PII keyword carries pii-none"
     );
 
-    // And the same predicate does NOT match one the classifier flagged.
+    // And the same predicate does not match one the classifier flagged.
     attrs.tag = super::super::classify::tags_for_request("test", Some("I live in Kansas"));
     assert!(
         !p.matches(&attrs),
@@ -244,11 +234,8 @@ fn a_rule_on_an_emittable_tag_matches_real_classifier_output() {
     );
 }
 
-/// Set semantics, per the CRD: a scalar RHS is CONTAINS, an array is
-/// INTERSECTS, `containsAll` is all-of, and `not` is absence-from-the-set.
-/// The scalar case is the one that would silently misbehave as equality —
-/// `tag: pii-unknown` would stop matching the moment a second classifier
-/// added its own tag.
+/// Set semantics: a scalar is contains (not equality), an array intersects,
+/// `containsAll` is all-of, and `not` is absence from the set.
 #[test]
 fn tag_matching_has_set_semantics() {
     let have: Vec<String> = ["complexity-unknown", "pii-unknown"]
@@ -304,10 +291,8 @@ fn tag_matching_has_set_semantics() {
     }
 }
 
-/// An empty tag set means no classifier answered. `{not: X}` matching it is
-/// the documented footgun, not a bug — which is exactly why the classifiers
-/// never emit nothing. Pinned so a future "return None when empty"
-/// simplification cannot quietly invert the absence rules.
+/// An empty tag set is present, not absent, so `{not: X}` matches it. This
+/// is why classifiers always emit a tag.
 #[test]
 fn an_empty_tag_set_is_present_but_matches_nothing_positive() {
     let attrs = RequestAttrs::default();
@@ -347,14 +332,14 @@ fn keys_within_one_predicate_are_anded() {
 
 #[test]
 fn empty_request_predicate_matches_everything() {
-    // "A rule with no matches matches everything."
+    // A rule with no matches matches everything.
     let p = CompiledRequestPredicate::default();
     assert!(p.matches(&RequestAttrs::default()));
 }
 
 #[test]
 fn empty_candidate_predicate_matches_nothing() {
-    // An exclusion that says nothing must remove nothing.
+    // An exclusion that says nothing removes nothing.
     let p = CompiledCandidatePredicate::default();
     assert!(!p.matches(&CandidateAttrs::default()));
 }
@@ -385,8 +370,7 @@ fn duration_predicate_compares_against_millis() {
 
 #[test]
 fn operator_type_mismatch_is_a_compile_error() {
-    // `model` is a string; ordering does not apply. Catching this once, at
-    // watch time, beats a rule that silently never matches.
+    // `model` is a string; ordering does not apply.
     let e = Matcher::compile(&json!({"greaterThan": 5}), AttrKind::Str).unwrap_err();
     assert!(e.contains("numeric"), "{e}");
     let e = Matcher::compile(&json!({"containsAll": ["a"]}), AttrKind::Str).unwrap_err();
@@ -395,7 +379,7 @@ fn operator_type_mismatch_is_a_compile_error() {
 
 #[test]
 fn quoted_numeric_threshold_is_rejected_with_guidance() {
-    // The guide is explicit: numbers, not strings.
+    // Numbers, not strings.
     let e = Matcher::compile(&json!({"greaterThan": "0.05"}), AttrKind::Float).unwrap_err();
     assert!(e.contains("numbers, not strings"), "{e}");
 }
@@ -422,12 +406,8 @@ fn unknown_operator_lists_the_valid_ones() {
     );
 }
 
-/// A bad term is reported AND kept, as a term that never matches.
-///
-/// Leaving it out — the old behaviour — widened the predicate: this entry
-/// compiled to just `qos: [batch]` and matched every batch request, though its
-/// author asked for something narrower. Kept as [`Matcher::never`], the entry
-/// matches nothing, which is the only direction that cannot surprise anyone.
+/// A bad term is reported and kept as [`Matcher::never`], so the entry
+/// matches nothing rather than being widened.
 #[test]
 fn bad_term_fails_closed_instead_of_widening_the_predicate() {
     let mut issues = Vec::new();
@@ -452,9 +432,7 @@ fn bad_term_fails_closed_instead_of_widening_the_predicate() {
     );
 }
 
-/// The same for a `drop`: the bad term keeps the predicate non-empty, so the
-/// "empty drop removes nothing" guard does not apply — the never-matching term
-/// is what makes it remove nothing.
+/// The same for a `drop`: the never-matching term makes it remove nothing.
 #[test]
 fn bad_candidate_term_fails_closed() {
     let mut issues = Vec::new();
@@ -536,16 +514,9 @@ fn candidate_nested_backend_and_model_paths_compile() {
     assert!(!p.matches(&c2), "model.name == bar fails the `not`");
 }
 
-/// `path` and `headers` are no longer part of the grammar: the route
-/// already matched on both to reach this pool, so re-matching them here
-/// duplicated routing logic in a weaker form.
-///
-/// One consequence to know rather than to fix. Neither key is in the CRD
-/// schema and `matches[]` does not preserve unknown fields, so the API
-/// server PRUNES them — kinference never sees them, and a rule written with
-/// `headers:` is admitted carrying only its remaining constraints, i.e.
-/// broader than its author wrote. Nothing here can warn about a field that
-/// was deleted before it arrived; the check belongs at apply time.
+/// `path` and `headers` are not part of the grammar; the route already
+/// matched on them. The API server prunes them, so a rule written with them
+/// is broader than intended, and only an apply-time check can catch that.
 #[test]
 fn path_and_header_keys_are_not_part_of_the_grammar() {
     let mut w = Vec::new();
@@ -571,10 +542,9 @@ fn path_and_header_keys_are_not_part_of_the_grammar() {
     }));
 }
 
-/// `qos` is array-only over a closed enum, so every other shape must fail
-/// CLOSED — inert rule, named warning — rather than drop the term and widen
-/// the rule to everything. The API server rejects these shapes now, but a
-/// policy admitted under an older schema still reaches this compiler.
+/// `qos` is array-only over a closed enum; every other shape fails closed
+/// with a warning. The API server rejects these, but a policy admitted under
+/// an older schema still reaches the compiler.
 #[test]
 fn qos_accepts_only_arrays_over_the_closed_set() {
     let compile = |v: serde_json::Value| {
@@ -599,7 +569,7 @@ fn qos_accepts_only_arrays_over_the_closed_set() {
 
     // Each rejected shape: warns, and blocks the match rather than widening.
     for bad in [
-        json!("batch"),          // scalar — the pre-enum form
+        json!("batch"),          // bare scalar
         json!({"not": "batch"}), // operator hash
         json!(["bacth"]),        // typo inside the array
         json!([]),               // empty
@@ -616,9 +586,8 @@ fn qos_accepts_only_arrays_over_the_closed_set() {
     }
 }
 
-/// An empty tenant is a VALUE, not an absence. Tenant is mandatory on the
-/// wire and carries no presence bit, so `""` is how a caller says "could not
-/// attribute this" — and a policy must be able to name that case explicitly.
+/// An empty tenant is a value, not an absence, so a policy can name the
+/// unattributed case.
 #[test]
 fn an_empty_tenant_matches_a_predicate_naming_the_empty_string() {
     let mut w = Vec::new();
@@ -633,9 +602,8 @@ fn an_empty_tenant_matches_a_predicate_naming_the_empty_string() {
     );
 }
 
-/// The property that outlives the `Option`: an unattributed request must not
-/// be admitted by a rule written for a real tenant. Losing this would let
-/// every caller that forgot the field inherit someone else's routing.
+/// An unattributed request is not admitted by a rule written for a real
+/// tenant.
 #[test]
 fn an_empty_tenant_does_not_match_a_named_tenant() {
     let mut w = Vec::new();
@@ -656,27 +624,17 @@ fn an_empty_tenant_does_not_match_a_named_tenant() {
     );
 }
 
-/// Every candidate attribute's DISPLAY name must be the name serde accepts.
-///
-/// The failure this prevents is silent in the worst way. `CandidateAttr::name()`
-/// is what traces, warnings and the policy explorer print, and
-/// `charts/kinference-crds/templates/kinference.buoyant.io_inferencepolicies.yaml` declares the same strings
-/// — so an operator copies a name out of a trace into a manifest, the
-/// structural schema admits it, serde ignores the unknown field, the predicate
-/// evaporates, and the rule matches everything it was written to exclude.
-/// Nothing errors and nothing logs. `predictedTTFT` was exactly this.
-///
-/// Driven off `CandidateAttr`'s own list, so a new attribute is covered the
-/// day it is added rather than the day someone remembers to extend a fixture.
+/// Every candidate attribute's display name (`CandidateAttr::name()`, as
+/// printed in traces and declared in the CRD) is the name serde accepts.
+/// Otherwise serde would silently ignore the field and the predicate would
+/// vanish.
 #[test]
 fn every_candidate_attr_name_round_trips_through_serde() {
     use crate::crd::CandidatePredicate;
     use serde_json::json;
 
-    // Driven entirely off `CandidateAttr`'s own list and its own names: a
-    // dotted display name IS the spec path (`backend.readyEndpoints` nests
-    // under `backend`), which is what makes copying one out of a trace a
-    // reasonable thing for an operator to do.
+    // A dotted display name is the spec path (`backend.readyEndpoints` nests
+    // under `backend`).
     let all = [
         CandidateAttr::ContextWindow,
         CandidateAttr::PredictedTtft,
@@ -692,8 +650,7 @@ fn every_candidate_attr_name_round_trips_through_serde() {
     ];
 
     for attr in all {
-        // A value of the right kind, so `Matcher::compile` cannot be what
-        // fails and mask a naming problem.
+        // A value of the right kind, so only naming can fail.
         let value = match attr.kind() {
             AttrKind::Duration => json!({ "greaterThan": "500ms" }),
             AttrKind::Bool => json!(true),
