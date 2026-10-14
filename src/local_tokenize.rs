@@ -1,60 +1,35 @@
 //! In-process tokenization via the HuggingFace `tokenizers` Rust crate.
 //!
-//! **Scout-mode only**: the side-by-side comparison harness lives in
-//! `src/grpc.rs::tokenize_with_fallback`. It calls into this module to
-//! produce local tokens for every score request, compares them against
-//! the HTTP `/tokenize` result, and counts matches/divergences. The
-//! HTTP result is what's returned to the caller — routing is unchanged.
-//!
-//! The module is dormant unless `tokenize.local.compare = true` is set
-//! in config — `LocalTokenizerRegistry::new()` is only constructed in
-//! that case, and the gRPC handler skips the local path otherwise.
+//! Used by pools whose profile sets tokenize mode `local` or `compare`; the
+//! mode handling and the compare harness live in [`crate::tokenize_client`].
 //!
 //! ## Loading model tokenizers
 //!
-//! Lookup order:
+//! 1. Mount path: `{mount_dir}/{model_name}/tokenizer.json`, plus
+//!    `tokenizer_config.json` for the chat template. Works in air-gapped
+//!    clusters.
+//! 2. HuggingFace Hub fallback: `Tokenizer::from_pretrained`, plus
+//!    `tokenizer_config.json` fetched via reqwest since the crate doesn't
+//!    expose it. Honors `HUGGING_FACE_HUB_TOKEN` for gated models.
 //!
-//! 1. **Mount path**: `{config.mount_dir}/{model_name}/tokenizer.json`
-//!    plus `tokenizer_config.json` for the chat template. Closest UX to
-//!    "operator manages tokenizer files explicitly"; works in
-//!    air-gapped clusters.
-//! 2. **HuggingFace Hub fallback**: `Tokenizer::from_pretrained` (the
-//!    `tokenizers` crate's built-in Hub fetch, enabled by the `http`
-//!    feature). For the chat template, we additionally fetch
-//!    `tokenizer_config.json` ourselves via reqwest — the crate
-//!    doesn't expose that file. Hub requests honor
-//!    `HUGGING_FACE_HUB_TOKEN` (gated Gemma family etc.).
-//!
-//! Tokenizers are cached in a `DashMap` keyed by model name and live
-//! for the process lifetime — sub-MB to ~10MB each, so a typical
-//! fleet's cache lands well under 100 MB.
+//! Tokenizers are cached by model name for the process lifetime (sub-MB to
+//! ~10MB each).
 //!
 //! ## Chat-template rendering
 //!
-//! The `tokenizers` crate doesn't apply chat templates; that's an
-//! upstream `transformers`-library concern. We use `minijinja` to
-//! render the model's chat template with the same context Python
-//! `transformers` uses: `messages`, `add_generation_prompt = true`,
-//! plus any operator-supplied `chat_template_kwargs` (e.g. Qwen3's
-//! `enable_thinking`). The rendered string is then encoded with
-//! `add_special_tokens = false` since the template already emits the
-//! special tokens itself.
+//! The chat template is rendered with `minijinja` using the same context as
+//! Python `transformers`: `messages`, `add_generation_prompt = true`, and any
+//! `chat_template_kwargs` (e.g. Qwen3's `enable_thinking`). The result is
+//! encoded with `add_special_tokens = false`, since the template emits them.
 //!
-//! Two HF conventions for where the template body lives, in lookup
-//! order (mirrored across mount + Hub paths):
+//! The template is read inline from `tokenizer_config.json`'s
+//! `chat_template` field (Llama 3.x, Mistral, Qwen 2.5), else from a sibling
+//! `chat_template.jinja` (Gemma 3/4, recent multimodal builds).
 //!
-//! 1. Inline: `tokenizer_config.json` has a top-level `chat_template`
-//!    string field. Llama 3.x, Mistral, Qwen 2.5, …
-//! 2. Sibling: a separate `chat_template.jinja` file next to
-//!    `tokenizer_config.json`. Gemma 3/4, recent multimodal builds, …
-//!
-//! Minijinja gets `loop_controls` + `json` (for `tojson`) plus
-//! `minijinja-contrib`'s `pycompat` unknown-method callback (for
-//! Python-style `.get()` / `.items()` / `.keys()` calls that Gemma
-//! 3/4 templates make on message dicts). We additionally register
-//! `raise_exception` and `strftime_now` as globals — the former is
-//! widely used by templates for shape validation, the latter by
-//! Llama 3.1+ instruct templates that emit the current date.
+//! Minijinja gets `loop_controls`, `json` (for `tojson`), and
+//! `minijinja-contrib`'s `pycompat` callback for the Python dict methods
+//! Gemma templates call. `raise_exception` and `strftime_now` (Llama 3.1+)
+//! are registered as globals.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -76,16 +51,9 @@ struct LoadedTokenizer {
     /// (chat-mode requests for such a model will error from
     /// `LocalTokenizerRegistry::tokenize`).
     chat_template: Option<String>,
-    /// Special-token strings bound into the Jinja render context. Pulled
-    /// from `tokenizer_config.json`: every top-level field whose key
-    /// ends in `_token` AND whose value is a string (e.g. `bos_token`
-    /// → `"<bos>"`, `eos_token` → `"<eos>"`, plus model-specific extras
-    /// like Gemma 4's `audio_token`, `boi_token`, etc.). Templates
-    /// commonly emit literals like `{{- bos_token -}}`; without these
-    /// bindings the expression renders as empty and the encoded prefix
-    /// silently drops the special token. transformers'
-    /// `apply_chat_template` does the equivalent automatically via
-    /// `tokenizer.special_tokens_map`.
+    /// Special-token strings bound into the Jinja render context (see
+    /// [`extract_special_tokens`]). Without them, `{{- bos_token -}}`
+    /// renders empty and the special token is silently dropped.
     special_tokens: HashMap<String, String>,
 }
 
@@ -103,23 +71,14 @@ pub struct LocalTokenizerRegistry {
     loaded: DashMap<String, Arc<LoadedTokenizer>>,
     config: LocalTokenizeConfig,
     client: reqwest::Client,
-    /// One-shot latch per model for the "mount miss, falling back to
-    /// Hub" log. Without this, concurrent first-loads of the same
-    /// model (e.g. N workers all hitting their first
-    /// `/v1/models`-driven `warmup` call simultaneously) each emit
-    /// the same log line. We can't easily dedupe the loads
-    /// themselves without a refactor — DashMap's entry-style
-    /// or_insert_with is sync-only — so we silence the noise here
-    /// instead. The wasted Hub fetches across racing loads are
-    /// negligible (small files, then ALL but the first get discarded
-    /// at `or_insert` time).
+    /// Log-once latch per model for "mount miss, falling back to Hub".
+    /// Concurrent first-loads of a model aren't deduplicated (only one
+    /// result is kept), so without this each would log.
     hub_fallback_logged: DashMap<String, ()>,
 }
 
 impl LocalTokenizerRegistry {
-    /// Build an empty registry. The first `tokenize()` for each model
-    /// triggers a load; subsequent calls for the same model hit the
-    /// cache.
+    /// Build an empty registry. Models are loaded on first use.
     pub fn new(config: LocalTokenizeConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -133,49 +92,28 @@ impl LocalTokenizerRegistry {
         })
     }
 
-    /// Force-load `model_name`'s tokenizer into the cache without
-    /// running any encode. Called from the metrics poller on first
-    /// observation of a new model name via `/v1/models` so production
-    /// traffic finds the cache warm — the first user request never
-    /// pays the load latency.
-    ///
-    /// Errors are NOT propagated up to a panic-worthy decision: the
-    /// caller logs and moves on. Cold cache for a model just means
-    /// the first real request takes the latency hit (or falls back
-    /// to HTTP, in `mode = "local"`).
+    /// Load `model_name`'s tokenizer into the cache. Called from the metrics
+    /// poller when `/v1/models` first reports a model, so requests find it
+    /// warm. The caller logs errors and moves on.
     pub async fn warmup(&self, model_name: &str) -> Result<()> {
         let _ = self.get_or_load(model_name).await?;
         Ok(())
     }
 
-    /// Decode a token-ID slice back to text using `model_name`'s
-    /// loaded tokenizer. Diagnostics-only — used by compare-mode
-    /// divergence logging to surface the exact characters each
-    /// renderer produced around the first mismatching token, so an
-    /// operator can read the difference (e.g. a missing `\n\n` or
-    /// trailing special token) directly out of the log.
+    /// Decode tokens back to text, for compare-mode divergence logs.
     ///
-    /// Returns `None` if the model isn't loaded yet — this is a
-    /// log-side helper and must never trigger a Hub fetch from a
-    /// warn-level diagnostic path. `skip_special_tokens=false` so
-    /// control tokens like `<end_of_turn>` and `<start_of_turn>`
-    /// show up explicitly (otherwise we'd lose half the signal).
+    /// `None` if the model isn't loaded; never triggers a Hub fetch. Keeps
+    /// special tokens so control tokens show up in the log.
     pub fn decode(&self, model_name: &str, tokens: &[u32]) -> Option<String> {
         let entry = self.loaded.get(model_name)?;
         entry.tokenizer.decode(tokens, false).ok()
     }
 
-    /// Tokenize `input` against `model_name`'s tokenizer. Returns the
-    /// token IDs (same shape as `tokenize_via_vllm` returns) so the
-    /// caller can compare element-wise.
+    /// Tokenize `input` against `model_name`'s tokenizer.
     ///
-    /// Errors when:
-    /// - The tokenizer can't be loaded (mount file missing, Hub
-    ///   unreachable, model gated without a token, etc.).
-    /// - Chat mode is requested but the model has no `chat_template`.
-    /// - The Jinja template fails to render with the given kwargs.
-    /// - The tokenizer's `encode` rejects the input (malformed UTF-8,
-    ///   ridiculous length, etc.).
+    /// Errors when the tokenizer can't be loaded, chat input is given for a
+    /// model with no `chat_template`, the template fails to render, or
+    /// `encode` rejects the input.
     pub async fn tokenize(
         &self,
         model_name: &str,
@@ -215,9 +153,7 @@ impl LocalTokenizerRegistry {
                 )?;
                 let encoding = loaded
                     .tokenizer
-                    // Template emits the special tokens itself; don't
-                    // double-add (this matches what Python transformers
-                    // does in apply_chat_template + tokenize).
+                    // The template emits the special tokens itself.
                     .encode(rendered.as_str(), /* add_special_tokens */ false)
                     .map_err(|e| anyhow!("tokenizer encode failed: {e}"))?;
                 Ok(encoding.get_ids().to_vec())
@@ -225,10 +161,8 @@ impl LocalTokenizerRegistry {
         }
     }
 
-    /// Cache hit → return Arc. Cache miss → synchronous load (which may
-    /// hit the network), then insert. `DashMap::entry` handles
-    /// concurrent first-loads safely (only one waits-and-installs,
-    /// others see the cached value).
+    /// Return the cached tokenizer, or load it (possibly from the network)
+    /// and insert it. Concurrent first-loads may each load; one is kept.
     async fn get_or_load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>> {
         if let Some(entry) = self.loaded.get(model_name) {
             return Ok(Arc::clone(entry.value()));
@@ -278,9 +212,8 @@ impl LocalTokenizerRegistry {
             }
         }
 
-        // Fallback: HuggingFace Hub. Offload to spawn_blocking since
-        // `from_pretrained` uses blocking I/O internally. The log is
-        // latched to one line per model — see `hub_fallback_logged`.
+        // Fallback: HuggingFace Hub, on `spawn_blocking` since
+        // `from_pretrained` blocks.
         if self
             .hub_fallback_logged
             .insert(model_name.to_string(), ())
@@ -325,12 +258,9 @@ impl LocalTokenizerRegistry {
 /// `add_generation_prompt = true`, plus any caller-supplied
 /// `chat_template_kwargs` (e.g. `enable_thinking=false` for Qwen3).
 ///
-/// Values in `chat_kwargs` are JSON-parsed (so `"false"` → bool
-/// `false`, `"1024"` → int `1024`) and fall back to literal strings
-/// for unparseable barewords — same convention as the server-side
-/// HTTP `/tokenize` body builder in `src/tokenize.rs`. This means a
-/// caller setting `chat_template_kwargs["enable_thinking"] = "false"`
-/// gets the same rendered prompt as vLLM does.
+/// Values in `chat_kwargs` are JSON-parsed (`"false"` becomes `false`),
+/// falling back to literal strings, as the HTTP body builder in
+/// `src/tokenize.rs` does, so both render the same prompt.
 fn render_chat_template(
     template: &str,
     messages: &[serde_json::Value],
@@ -341,26 +271,12 @@ fn render_chat_template(
     special_tokens: &HashMap<String, String>,
 ) -> Result<String> {
     let mut ctx = serde_json::Map::new();
-    // Bind every `*_token` literal first so subsequent inserts (which
-    // include caller-controlled `chat_kwargs`) can override if the
-    // caller explicitly wants different values. Templates commonly
-    // reference `bos_token` / `eos_token` / Gemma's `image_token` etc.;
-    // without these bindings expressions like `{{- bos_token -}}`
-    // render to empty and the encoded prefix silently drops a special
-    // token.
+    // Special tokens first, so `chat_kwargs` can override them.
     for (k, v) in special_tokens {
         ctx.insert(k.clone(), serde_json::Value::String(v.clone()));
     }
-    // Mirror vLLM's `_preprocess_chat`: normalize every message's
-    // `content` field from a bare string into the OpenAI multimodal
-    // content-parts form `[{"type":"text","text":"..."}]`. Chat
-    // templates that branch on `content is string` vs
-    // `content is sequence` (e.g. Gemma 4's system block, which
-    // appends `+ ' '` in the sequence branch but not the string one)
-    // will otherwise diverge from vLLM by exactly the per-branch
-    // delta. After normalization both renderers always hit the
-    // sequence branch; the string branch becomes dead code from our
-    // side, matching the engine.
+    // Normalize `content` to content-parts form, as vLLM does; see
+    // `normalize_message_content`.
     let normalized_messages: Vec<serde_json::Value> =
         messages.iter().map(normalize_message_content).collect();
     ctx.insert(
@@ -371,9 +287,7 @@ fn render_chat_template(
         "add_generation_prompt".to_string(),
         serde_json::Value::Bool(add_generation_prompt),
     );
-    // Render tools as `null` (not an empty array) when absent, so
-    // `{% if tools %}` evaluates falsy — matches Python transformers'
-    // behavior of passing `None` when no tools were supplied.
+    // `null` when absent, as transformers passes `None`.
     let tools_value = if tools.is_empty() {
         serde_json::Value::Null
     } else {
@@ -390,17 +304,10 @@ fn render_chat_template(
         ctx.insert(k.clone(), parsed);
     }
     let mut env = minijinja::Environment::new();
-    // Gemma 3/4 (and likely other newer model templates) call Python
-    // dict methods directly on message objects: `message.get('field')`,
-    // `.items()`, `.keys()`, etc. Minijinja doesn't expose these on
-    // map values out of the box. The `pycompat` feature ships a
-    // callback that maps unknown method names to Python-equivalent
-    // operations — wire it on every render so any template that
-    // assumes Python semantics just works.
+    // Python dict methods (`.get()`, `.items()`, ...) that templates such
+    // as Gemma's call on messages.
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-    // Chat templates can reference `raise_exception` (used by some
-    // models to validate message shape). Provide it as a no-op global
-    // so templates don't fail with UndefinedError.
+    // Used by some templates to validate message shape.
     env.add_function(
         "raise_exception",
         |msg: String| -> Result<(), minijinja::Error> {
@@ -410,10 +317,8 @@ fn render_chat_template(
             ))
         },
     );
-    // Llama 3.1/3.2/3.3 instruct templates emit a date line via
-    // `strftime_now('%d %b %Y')`. transformers registers this global
-    // out of the box; minijinja doesn't, so we provide it. POSIX
-    // strftime format strings via chrono::format().
+    // Llama 3.1+ templates emit a date via `strftime_now('%d %b %Y')`,
+    // which transformers provides.
     env.add_function(
         "strftime_now",
         |format: String| -> Result<String, minijinja::Error> {
@@ -432,14 +337,10 @@ fn render_chat_template(
 /// matching what vLLM's `_preprocess_chat` does before invoking the
 /// chat template.
 ///
-/// Templates that branch on `content is string` vs `content is sequence`
-/// (e.g. Gemma 4's system block, which emits a trailing `' '` only in
-/// the sequence branch) will otherwise diverge from vLLM by exactly
-/// the per-branch delta — and that one missing/extra token breaks the
-/// XXH3 block hashes the picker uses for prefix-cache routing.
-///
-/// Pure transform: if `content` is already a list, returns the message
-/// unchanged. If `content` is missing entirely, returns unchanged.
+/// Templates that branch on whether `content` is a string (e.g. Gemma 4's
+/// system block) would otherwise differ from vLLM by a token, breaking the
+/// block hashes. A message whose `content` is already a list, or missing, is
+/// returned unchanged.
 fn normalize_message_content(message: &serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(map) = message else {
         return message.clone();
@@ -462,26 +363,10 @@ fn normalize_message_content(message: &serde_json::Value) -> serde_json::Value {
 /// Read the chat template + special-token bindings for a mounted
 /// model directory.
 ///
-/// HuggingFace has two conventions for where the template lives:
-///
-/// 1. **Inline (older)**: `tokenizer_config.json` has a top-level
-///    `"chat_template"` string field. Llama 3.x, Mistral, Qwen 2.5, etc.
-/// 2. **Sibling file (newer)**: `tokenizer_config.json` lacks the
-///    field, but a sibling `chat_template.jinja` file holds the
-///    template body verbatim. Gemma 3/4, and a growing set of
-///    multimodal builds.
-///
-/// Either way, `tokenizer_config.json` also publishes the special-token
-/// strings (`bos_token`, `eos_token`, `pad_token`, plus model-specific
-/// extras) — we always extract those, because templates frequently
-/// emit literals like `{{- bos_token -}}` and an unbound reference
-/// silently renders as empty.
-///
-/// We check inline first; if absent, fall back to sibling. Returns
-/// a `TokenizerConfigMeta` with `chat_template = None` if neither
-/// source has a template (still includes the special-token map);
-/// returns `Err` only if `tokenizer_config.json` itself is missing
-/// or unparseable.
+/// The template is the inline `chat_template` field, else a sibling
+/// `chat_template.jinja` (see the module docs); `None` if neither exists.
+/// Special tokens are always extracted. `Err` only if
+/// `tokenizer_config.json` is missing or unparseable.
 fn read_chat_template_from_config(model_dir: &Path) -> Result<TokenizerConfigMeta> {
     let cfg_path = model_dir.join("tokenizer_config.json");
     if !cfg_path.exists() {
@@ -498,10 +383,8 @@ fn read_chat_template_from_config(model_dir: &Path) -> Result<TokenizerConfigMet
             special_tokens,
         });
     }
-    // Sibling-file fallback. Missing sibling is a normal "this model
-    // has no chat template" outcome (some tokenizer-only repos) —
-    // return None, not Err. Read-failure on a sibling that *does*
-    // exist is genuinely surprising and worth bubbling.
+    // A missing sibling means no chat template; failing to read one that
+    // exists is an error.
     let sibling = model_dir.join("chat_template.jinja");
     if !sibling.exists() {
         return Ok(TokenizerConfigMeta {
@@ -519,15 +402,10 @@ fn read_chat_template_from_config(model_dir: &Path) -> Result<TokenizerConfigMet
 
 /// Pull every `*_token` string field from a parsed `tokenizer_config.json`
 /// into a flat `name -> literal` map for binding into the Jinja render
-/// context. Mirrors transformers' `tokenizer.special_tokens_map` —
-/// templates reference these by name (`bos_token`, `eos_token`,
-/// `image_token`, etc.), and the bound literal is what gets prepended
-/// at the encode step.
+/// context, like transformers' `tokenizer.special_tokens_map`.
 ///
-/// Non-string `*_token` fields (some configs ship a dict like
-/// `{"content": "<bos>", "lstrip": false, ...}` instead of a bare
-/// string) are best-effort: we pull the `content` field if present,
-/// otherwise skip. Anything else without `_token` in the key is ignored.
+/// A dict value like `{"content": "<bos>", ...}` contributes its `content`;
+/// other non-string values are skipped.
 fn extract_special_tokens(cfg: &serde_json::Value) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let Some(obj) = cfg.as_object() else {
@@ -551,20 +429,9 @@ fn extract_special_tokens(cfg: &serde_json::Value) -> HashMap<String, String> {
 }
 
 /// Fetch the chat template + special-token bindings for a model from
-/// the HuggingFace Hub. Mirrors [`read_chat_template_from_config`]'s
-/// two-source template lookup and always extracts special tokens
-/// from `tokenizer_config.json` regardless of which template source
-/// hits.
-///
-/// 1. GET `tokenizer_config.json`. Always parse the special-token map.
-///    Return its inline `chat_template` field if present.
-/// 2. Otherwise GET the sibling `chat_template.jinja` file (Gemma 3/4
-///    convention) and return its body alongside the special tokens
-///    from step 1.
-///
-/// Honors `HUGGING_FACE_HUB_TOKEN` on both requests for gated models.
-/// A missing-or-404 sibling is a normal "this repo has no chat
-/// template" outcome and yields `chat_template: None`.
+/// the HuggingFace Hub, with the same lookup as
+/// [`read_chat_template_from_config`]. A 404 for the sibling means no chat
+/// template.
 async fn fetch_chat_template_from_hub(
     client: &reqwest::Client,
     model_name: &str,
@@ -588,15 +455,14 @@ async fn fetch_chat_template_from_hub(
             special_tokens,
         });
     }
-    // Step 2: sibling chat_template.jinja (newer convention — Gemma 3/4,
-    // some Llama 4 builds, recent multimodal models).
+    // Step 2: sibling chat_template.jinja.
     let sibling_url =
         format!("https://huggingface.co/{model_name}/resolve/main/chat_template.jinja");
     let sib_resp = hub_get(client, &sibling_url)
         .await
         .with_context(|| format!("GET {sibling_url}"))?;
     if sib_resp.status() == reqwest::StatusCode::NOT_FOUND {
-        // Repo legitimately has no chat template — text-only / tokenizer-only.
+        // The repo has no chat template.
         return Ok(TokenizerConfigMeta {
             chat_template: None,
             special_tokens,
@@ -615,9 +481,7 @@ async fn fetch_chat_template_from_hub(
     })
 }
 
-/// Issue a Hub GET with optional `HUGGING_FACE_HUB_TOKEN` bearer auth.
-/// Shared by both the `tokenizer_config.json` and
-/// `chat_template.jinja` fetches.
+/// A Hub GET with optional `HUGGING_FACE_HUB_TOKEN` bearer auth.
 async fn hub_get(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
     let mut req = client.get(url);
     if let Ok(token) = std::env::var("HUGGING_FACE_HUB_TOKEN")

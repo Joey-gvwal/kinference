@@ -1,36 +1,17 @@
-//! HTTP-leg helpers that POST to vLLM's `/render` endpoints, shared
-//! by the pick path.
+//! HTTP helpers that POST to vLLM's `/render` endpoints.
 //!
-//! ## Why `/render` and not `/tokenize`
+//! `/v1/chat/completions/render` runs the same preprocessing as
+//! `/v1/chat/completions` (tools, multimodal placeholders, system-prompt
+//! defaulting, reasoning prefixes, `add_generation_prompt`) and stops before
+//! inference, so the token ids match what the engine hashes into its
+//! `BlockStored` events.
 //!
-//! vLLM's `/v1/chat/completions/render` runs the full
-//! `OpenAIServingChat._preprocess_chat` pipeline (tools, multimodal
-//! placeholder substitution, system-prompt defaulting, reasoning
-//! prefixes, `add_generation_prompt`) — exactly what
-//! `/v1/chat/completions` would do for inference, just stopping
-//! before the GPU forward. The returned token IDs are byte-perfect
-//! with what the engine actually tokenizes for inference, so the
-//! block hashes we compute over them match the `BlockStored` events
-//! the engine emits.
+//! - [`render_via_vllm_raw`] forwards the caller's OpenAI request body
+//!   verbatim, so fields kinference doesn't know about still reach vLLM.
+//! - [`render_via_vllm_structured`] builds a body from a [`TokenizeInput`],
+//!   for callers without a raw body.
 //!
-//! Vendored `/tokenize` (which only ran the bare Jinja `apply_chat_template`)
-//! is gone — superseded by `/render` entirely.
-//!
-//! ## Two HTTP shapes
-//!
-//! - [`render_via_vllm_raw`] forwards the caller's existing OpenAI
-//!   ChatCompletionRequest body bytes verbatim to
-//!   `/v1/chat/completions/render`. Full fidelity — even fields we
-//!   don't know about (`response_format`, vLLM extensions, future
-//!   OpenAI additions) reach vLLM unchanged. The pick path is the only caller
-//!   today (it has the raw body in `self.body_buf`).
-//! - [`render_via_vllm_structured`] synthesizes a body from a
-//!   [`TokenizeInput`] enum. gRPC `Score` uses this because it has
-//!   only proto fields, not a raw request body.
-//!
-//! Both helpers call into [`parse_render_response`] to extract the
-//! `token_ids` field from vLLM's `GenerateRequest` response object
-//! (chat) or array (completions).
+//! Both parse the response with [`parse_render_response`].
 
 use std::collections::HashMap;
 
@@ -38,32 +19,23 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 /// Map of `chat_template_kwargs` forwarded into the engine's
-/// `/render` body. Values are JSON-encoded — the structured body
-/// builder parses each one with `serde_json::from_str` (so `"false"`
-/// → bool, `"1024"` → int, `"en"` → falls back to the literal
-/// string `"en"`).
+/// `/render` body. Values are JSON-encoded: `"false"` becomes a bool,
+/// `"1024"` an int, and a non-JSON value like `en` stays a string.
 pub type ChatTemplateKwargs = HashMap<String, String>;
 
 /// Structured input to the HTTP `/render` leg. Carries everything
 /// vLLM's `_preprocess_chat` needs to produce the same token
 /// sequence the engine would.
 ///
-/// `Clone` because `render_with_fallback` may dispatch the same input
-/// to multiple workers across the retry loop. The body is small (a
-/// prompt or chat array) so per-attempt cloning is cheap relative to
-/// the HTTP round-trip.
+/// `Clone` because compare mode re-tokenizes it in a background task.
 #[derive(Clone)]
 pub enum TokenizeInput {
     /// Raw completion-style prompt → `/v1/completions/render` with
-    /// `{ model, prompt }`. `add_special_tokens=true` is implied by
-    /// the endpoint (matches vLLM's own `/v1/completions` default).
-    /// `chat_template_kwargs` are ignored in this variant.
+    /// `{ model, prompt }`, with vLLM's default `add_special_tokens=true`.
     Raw(String),
     /// Chat-style messages (full OpenAI array) →
     /// `/v1/chat/completions/render` with `{ model, messages, tools,
     /// tool_choice, add_generation_prompt, chat_template_kwargs }`.
-    /// The engine renders its model-specific chat template through
-    /// the full `_preprocess_chat` pipeline.
     Chat {
         messages: Vec<serde_json::Value>,
         kwargs: ChatTemplateKwargs,
@@ -72,9 +44,8 @@ pub enum TokenizeInput {
         /// OpenAI `tool_choice` ("auto" | "none" | "required" | {...}).
         /// `None` when unset.
         tool_choice: Option<serde_json::Value>,
-        /// OpenAI `add_generation_prompt` (default `true` for
-        /// `/v1/chat/completions`). Flip to `false` for assistant-
-        /// prefill continuations.
+        /// OpenAI `add_generation_prompt` (default `true`); `false` for
+        /// assistant-prefill continuations.
         add_generation_prompt: bool,
     },
 }
@@ -89,8 +60,7 @@ struct RenderResponseObject {
 }
 
 /// Build the chat-style `/render` request body from a structured
-/// `TokenizeInput::Chat`. Pure function — split out for unit-testing
-/// without an HTTP round-trip.
+/// `TokenizeInput::Chat`.
 fn build_chat_render_body(
     model: &str,
     messages: &[serde_json::Value],
@@ -113,10 +83,7 @@ fn build_chat_render_body(
     if !kwargs.is_empty() {
         let mut kw_obj = serde_json::Map::with_capacity(kwargs.len());
         for (k, v) in kwargs.iter() {
-            // Try to JSON-parse the value so `"false"` becomes the
-            // bool, `"1024"` becomes the int, etc. Fall back to
-            // treating it as a literal string when the parse fails
-            // (e.g. `lang=en` — bareword, not valid JSON).
+            // JSON-parse the value, falling back to a literal string.
             let parsed =
                 serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.clone()));
             kw_obj.insert(k.clone(), parsed);
@@ -126,10 +93,8 @@ fn build_chat_render_body(
     body
 }
 
-/// Parse vLLM's `/render` response into a token-id list. Pure
-/// function — split out so we can unit-test both response shapes
-/// (single object for chat; array for completions) without an HTTP
-/// round-trip.
+/// Parse vLLM's `/render` response into a token-id list: a single object for
+/// chat, an array for completions.
 fn parse_render_response(json: &[u8]) -> Result<Vec<u32>> {
     let value: serde_json::Value =
         serde_json::from_slice(json).context("decoding /render response as JSON")?;
@@ -155,8 +120,6 @@ fn parse_render_response(json: &[u8]) -> Result<Vec<u32>> {
 }
 
 /// POST `raw_body` verbatim to `{base}/v1/chat/completions/render`.
-/// Full-fidelity passthrough for callers that already have a real
-/// OpenAI ChatCompletionRequest body.
 pub async fn render_via_vllm_raw(
     client: &reqwest::Client,
     base: &str,
@@ -166,10 +129,8 @@ pub async fn render_via_vllm_raw(
     render_post_raw_at_url(client, &url, raw_body).await
 }
 
-/// POST `raw_body` to `url` verbatim — no path appending. Use when
-/// the caller has a fully-qualified `/render` URL (e.g. operator-
-/// configured `tokenize.url`) and we shouldn't try to derive the
-/// path. Returns parsed token IDs.
+/// POST `raw_body` verbatim to a fully-qualified `/render` URL (a worker
+/// set's `render_url`), without appending a path.
 pub async fn render_post_raw_at_url(
     client: &reqwest::Client,
     url: &str,
@@ -194,11 +155,8 @@ pub async fn render_post_raw_at_url(
     parse_render_response(&bytes)
 }
 
-/// Same idea as [`render_via_vllm_structured`] but for a fully-
-/// qualified `url` (no path derivation). The caller must point this
-/// at the correct endpoint for the chat-vs-completion variant they
-/// expect. For mixed traffic, prefer the path-deriving
-/// [`render_via_vllm_structured`] over the per-worker `base`.
+/// [`render_via_vllm_structured`] for a fully-qualified `url`, which must be
+/// the right endpoint for the input's chat or completion variant.
 pub async fn render_structured_at_url(
     client: &reqwest::Client,
     url: &str,
@@ -246,8 +204,7 @@ pub async fn render_structured_at_url(
 /// Build a structured body from `input` and POST it to vLLM's
 /// `/render` endpoint that matches the variant
 /// (`/v1/chat/completions/render` for `Chat`, `/v1/completions/render`
-/// for `Raw`). Used by callers who don't have a raw request body —
-/// today only the gRPC `Score` path.
+/// for `Raw`). For callers without a raw request body.
 pub async fn render_via_vllm_structured(
     client: &reqwest::Client,
     base: &str,
