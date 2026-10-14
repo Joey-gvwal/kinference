@@ -1,19 +1,14 @@
 use super::*;
 
-/// The mean damps a spike; the raw gauge does not.
-///
-/// This is the whole reason the window exists. On a real fleet the onset of
-/// saturation was a single sample at `waiting = 5` that cleared within ten
-/// seconds — a policy thresholding the instantaneous value drops the worker on
-/// that transient, and under `onEmpty: Reject` can refuse the request over it.
-/// One spike in thirty idle samples must land far below one sustained prompt.
+/// The mean damps a spike; the raw gauge does not. One spike in thirty idle
+/// samples lands far below one sustained prompt.
 #[test]
 fn a_queue_spike_is_damped_by_the_window_but_a_sustained_queue_is_not() {
     let reg = MetricsRegistry::new();
     let t0 = Instant::now();
     let tick = |n: u32| t0 + Duration::from_secs(n as u64);
 
-    // 29 idle seconds and one spike to 5 — the shape actually observed.
+    // 29 idle seconds and one spike to 5.
     let mut spike = 0.0;
     for i in 0..30 {
         let waiting = if i == 14 { 5 } else { 0 };
@@ -41,10 +36,8 @@ fn a_queue_spike_is_damped_by_the_window_but_a_sustained_queue_is_not() {
 
 /// A single sample is a valid mean, with no warm-up zero.
 ///
-/// The rate-computing siblings return `0.0` until they hold two samples,
-/// because a rate needs two points. A mean does not — and a warm-up zero would
-/// make a freshly discovered, already-saturated worker read as idle for its
-/// first tick, which is exactly when a `drop` rule most needs the truth.
+/// Unlike the rates, which need two points, so a new saturated worker doesn't
+/// read as idle.
 #[test]
 fn the_first_sample_is_already_a_usable_mean() {
     let reg = MetricsRegistry::new();
@@ -76,9 +69,7 @@ fn the_window_evicts_so_a_recovered_worker_stops_reading_saturated() {
 
 /// `forget` drops the history too.
 ///
-/// Without this a worker that churns keeps its predecessor's window, so a
-/// replacement pod inherits the readings of the pod it replaced — and a
-/// `kvCacheUsage` threshold would fire on a GPU that no longer exists.
+/// So a replacement worker doesn't inherit its predecessor's readings.
 #[test]
 fn forgetting_a_worker_clears_its_window() {
     let reg = MetricsRegistry::new();

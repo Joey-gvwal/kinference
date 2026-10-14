@@ -30,9 +30,7 @@ fn records_and_accumulates_per_model_and_qos() {
     assert!(out.contains("# TYPE kinference_prompt_tokens_total counter"));
 }
 
-/// The only operator-visible reading of provider latency. A provider pick
-/// holds no `PendingObservation`, so it never reaches `record_ttft` and
-/// appears in no other histogram.
+/// Provider latency, which never reaches `record_ttft`.
 #[test]
 fn provider_ttft_is_recorded_by_provider_and_model() {
     let m = PromMetrics::new();
@@ -57,16 +55,14 @@ fn provider_ttft_is_recorded_by_provider_and_model() {
         ),
         "{out}"
     );
-    // A different provider is a distinct series — the dimension the removed
-    // `status.observed.observedTTFTP95` carried, and the reason this exists.
+    // A different provider is a distinct series.
     assert!(
         out.contains(
             "kinference_provider_ttft_ms_count{model=\"llama-3\",provider=\"default/together\"} 1"
         ),
         "{out}"
     );
-    // Same bucket edges as `kinference_ttft_ms`: the two get read side by side
-    // when deciding whether to spill off-cluster.
+    // Same bucket edges as `kinference_ttft_ms`.
     assert!(
         out.contains(
             "kinference_provider_ttft_ms_bucket{model=\"qwen-2.5\",provider=\"default/databricks\",le=\"500\"} 1"
@@ -75,8 +71,7 @@ fn provider_ttft_is_recorded_by_provider_and_model() {
     );
 }
 
-/// An empty label would pool unrelated providers into one series, which is
-/// worse than dropping the sample.
+/// An empty provider or model is skipped.
 #[test]
 fn provider_ttft_skips_blank_labels() {
     let m = PromMetrics::new();
@@ -157,8 +152,8 @@ fn itl_buckets_accumulate_cumulatively() {
     let out = m.render();
 
     // Cumulative: le="5" sees only bucket 0; le="75" sees buckets 0..=7.
-    // (The crate sorts labels alphabetically, so `le` renders first here —
-    // unlike the native histograms, which append `le` last.)
+    // (Labels sort alphabetically, so `le` renders first here, unlike native
+    // histograms, which append `le` last.)
     assert!(
         out.contains(
             "kinference_itl_ms_bucket{le=\"5\",model=\"m-a\",qos=\"interactive\",tenant=\"default\"} 1"
@@ -272,11 +267,7 @@ fn tenant_labels_bucket_per_the_allowlist() {
 
 /// An empty tenant always buckets, whatever the policy says.
 ///
-/// On the wire an absent tenant is the empty string rather than a presence bit,
-/// and it is also what a feedback RPC sees when it found no stashed labels at
-/// all. Neither is attributable, so neither gets its own series — note this
-/// deliberately differs from the POLICY semantics, where `tenant: ""` is a
-/// distinct matchable value.
+/// Unlike policy, where `tenant: ""` is a distinct matchable value.
 #[test]
 fn an_empty_tenant_always_buckets_under_default() {
     use crate::config::TenantLabels;
@@ -325,9 +316,8 @@ fn routed_requests_count_by_tenant_destination_and_type() {
 
 /// A tenant literally named `default` shares the fallback bucket.
 ///
-/// Documented rather than escaped. Under `All` there is no fallback so it is
-/// harmless; under an allowlist it means an allowlisted `default` and every
-/// non-allowlisted tenant land on one series.
+/// Under an allowlist, an allowlisted `default` and every non-allowlisted
+/// tenant land on one series.
 #[test]
 fn a_tenant_named_default_collides_with_the_fallback_bucket() {
     use crate::config::TenantLabels;
@@ -345,10 +335,9 @@ fn a_tenant_named_default_collides_with_the_fallback_bucket() {
 
 /// Every label lands in the position its declaration names.
 ///
-/// `with_label_values` matches by ORDER, not by name, and on `itl_bucket` all
-/// four values are `&str` — so transposing `le` and `tenant` compiles cleanly
-/// and emits series whose bucket edge is a tenant name. Self-identifying values
-/// are what make that visible; asserting the label COUNT would not catch it.
+/// `with_label_values` matches by order, and on `itl_bucket` all four values
+/// are `&str`, so a transposition would compile. Self-identifying values make
+/// it visible.
 #[test]
 fn every_label_lands_in_its_declared_position() {
     use crate::config::TenantLabels;
@@ -385,9 +374,8 @@ fn every_label_lands_in_its_declared_position() {
     );
 }
 
-/// The e2e duration histogram shares `ttft_ms`'s bucket edges where they
-/// overlap, so `duration - ttft` reads as decode time, and extends past them
-/// because a full generation routinely outruns any TTFT.
+/// The duration histogram shares `ttft_ms`'s bucket edges and extends past
+/// them.
 #[test]
 fn request_duration_is_comparable_to_ttft_and_has_a_longer_tail() {
     let m = PromMetrics::new();
@@ -405,8 +393,8 @@ fn request_duration_is_comparable_to_ttft_and_has_a_longer_tail() {
         );
     }
 
-    // The tail exists only on the duration family — a 5-minute generation must
-    // not all pile into +Inf.
+    // The tail exists only on the duration family, so a 5-minute generation
+    // doesn't land in +Inf.
     assert!(
         out.contains(r#"kinference_request_duration_ms_bucket{model="m",qos="batch",tenant="default",le="300000"}"#),
         "duration needs buckets past ttft's 80s ceiling:\n{out}"
@@ -432,9 +420,8 @@ fn request_duration_skips_a_blank_model() {
 
 /// Assert no SERIES line exists for a family.
 ///
-/// Not `!contains(name)`: a family's name also appears in other families' HELP
-/// text, which renders into the exposition. Only `#`-prefixed lines are
-/// metadata, so a series check must skip them.
+/// Skips `#` lines, since a family's name can appear in other families' HELP
+/// text.
 fn assert_no_series(out: &str, name: &str) {
     let found: Vec<&str> = out
         .lines()
@@ -445,9 +432,7 @@ fn assert_no_series(out: &str, name: &str) {
 
 /// Assert on a WHOLE rendered line, not a substring.
 ///
-/// `contains` is a trap for numeric assertions: a rendered `... 200` contains
-/// `... 20`, so a substring check silently passes on a wrong value that happens
-/// to share a prefix. This caught a genuinely vacuous clamp assertion.
+/// A substring check would let `... 200` pass for `... 20`.
 fn assert_line(out: &str, expect: &str) {
     let name = expect.split('{').next().unwrap();
     let got = out
@@ -481,14 +466,13 @@ fn prefix_match_records_both_numerators_against_one_denominator() {
         &out,
         r#"kinference_prefix_radix_matched_blocks_total{model="m",qos="batch"} 11"#,
     );
-    // 13/20 layered vs 11/20 radix — the difference is the in-flight credit,
-    // which is the whole reason both numerators exist.
+    // 13/20 layered vs 11/20 radix: the difference is the in-flight credit.
 
     assert_line(
         &out,
         r#"kinference_prefix_match_ratio_count{model="m",qos="batch"} 2"#,
     );
-    // 0.8 and 0.5 → both at or below le=0.8, only one at or below le=0.5.
+    // 0.8 and 0.5: both at or below le=0.8, only one at or below le=0.5.
     assert_line(
         &out,
         r#"kinference_prefix_match_ratio_bucket{model="m",qos="batch",le="0.5"} 1"#,
@@ -499,18 +483,9 @@ fn prefix_match_records_both_numerators_against_one_denominator() {
     );
 }
 
-/// A degraded pick records nothing, in BOTH of its shapes.
-///
-/// This is the trap the whole design is arranged around. A tokenize failure
-/// produces `requested == 0, layered == 0`; recording it as a ratio yields 0.0,
-/// which is indistinguishable from a genuine cache miss — so a tokenize outage
-/// would read as a prefix-routing collapse rather than as an outage. A
-/// prefix-index failure can produce `layered > 0` against a zero-length prompt,
-/// which is arithmetically incoherent and would divide by zero.
-///
-/// The call site in `pick_and_record` gates on `degraded_reason.is_none()`;
-/// this pins the recorder's own backstop, which is what makes a future caller
-/// unable to reintroduce the bug.
+/// A degraded pick records nothing, in both of its shapes: a tokenize failure
+/// (`requested == 0, layered == 0`) and a prefix-index failure (`layered > 0`
+/// against a zero-length prompt). This pins the recorder's own backstop.
 #[test]
 fn a_degraded_pick_records_no_prefix_metrics() {
     for (label, layered) in [("tokenize", 0), ("prefix_index", 4)] {
@@ -525,10 +500,7 @@ fn a_degraded_pick_records_no_prefix_metrics() {
 
 /// Matched blocks exceeding the prompt is clamped, and counted.
 ///
-/// Overlap scores are summed across data-parallel ranks, so a DP>1 worker
-/// publishing one prefix from two ranks reports roughly double. Left alone the
-/// ratio would exceed 1.0; clamped silently, a real misconfiguration would be
-/// invisible.
+/// A DP>1 worker publishing one prefix from two ranks reports roughly double.
 #[test]
 fn an_overmatch_is_clamped_to_one_and_counted() {
     let m = PromMetrics::new();
@@ -538,9 +510,7 @@ fn an_overmatch_is_clamped_to_one_and_counted() {
         &out,
         r#"kinference_prefix_overmatch_total{model="m",qos="batch"} 1"#,
     );
-    // Whole-line, not `contains`: an unclamped sum of 1.8 renders as
-    // `..._sum{...} 1.8`, which CONTAINS `..._sum{...} 1` as a prefix and would
-    // pass a substring check while the clamp was broken.
+    // Whole-line, since an unclamped `1.8` contains `1` as a prefix.
     let sum_line = out
         .lines()
         .find(|l| l.starts_with("kinference_prefix_match_ratio_sum{"))
@@ -549,8 +519,7 @@ fn an_overmatch_is_clamped_to_one_and_counted() {
         sum_line, r#"kinference_prefix_match_ratio_sum{model="m",qos="batch"} 1"#,
         "the observation must be clamped to 1.0, not 1.8"
     );
-    // The counters keep the raw values — only the ratio is clamped, so
-    // rate(matched)/rate(requested) still shows the anomaly.
+    // The counters keep the raw values; only the ratio is clamped.
     assert_line(
         &out,
         r#"kinference_prefix_matched_blocks_total{model="m",qos="batch"} 18"#,
@@ -565,7 +534,7 @@ fn prefix_match_skips_a_blank_model() {
     assert!(!m.render().contains("kinference_prefix_"));
 }
 
-/// Pick outcomes and latency are labelled by the WIRE outcome.
+/// Pick outcomes and latency are labelled by the wire outcome.
 #[test]
 fn picks_are_counted_and_timed_by_outcome() {
     let m = PromMetrics::new();
@@ -646,7 +615,7 @@ fn tokenize_compare_counts_divergences_separately() {
     );
 }
 
-/// Worker states are a gauge, so a recovery must bring the count back down —
+/// Worker states are a gauge, so a recovery must bring the count back down,
 /// not leave a stale `unresponsive` behind.
 #[test]
 fn worker_states_are_a_gauge_and_recover() {
@@ -664,14 +633,9 @@ fn worker_states_are_a_gauge_and_recover() {
 
 /// An empty ITL report records nothing, and is not an error.
 ///
-/// The proto prescribes empty `itl_bucket_counts` for a response with fewer
-/// than two chunks — every non-streaming request qualifies. It used to fall
-/// through to the length-mismatch branch and log a WARN per request, which both
-/// spammed the log and made a real length bug indistinguishable from normal
-/// traffic.
-///
-/// This pins the BEHAVIOUR (nothing recorded, correct before and after); the
-/// log level is not asserted, since the suite installs no tracing subscriber.
+/// The proto sends empty `itl_bucket_counts` for responses with fewer than two
+/// chunks. Only behavior is checked; the log level isn't, since tests install
+/// no tracing subscriber.
 #[test]
 fn an_empty_itl_report_is_not_an_error() {
     let m = PromMetrics::new();
@@ -690,14 +654,8 @@ fn an_empty_itl_report_is_not_an_error() {
 
 /// Build identity is exported, and agrees with what the snapshot reports.
 ///
-/// Conventional Prometheus shape: the value is always 1 and carries no meaning
-/// — the information is in the labels. That is what makes `group_left` joins
-/// possible, and what lets an alert fire when more than one version is live
-/// mid-rollout.
-///
-/// Present on a FRESH registry, unlike every `*Vec` family, because it is set
-/// at construction rather than on first observation. That is deliberate: a
-/// router that has served nothing should still say what it is.
+/// The value is always 1; the information is in the labels. Present on a
+/// fresh registry, since it is set at construction.
 #[test]
 fn build_info_reports_the_version_at_construction() {
     let out = PromMetrics::new().render();
@@ -708,8 +666,7 @@ fn build_info_reports_the_version_at_construction() {
             crate::version::VERSION
         ),
     );
-    // The same string the dashboard and `--version` show, so a scrape and a
-    // human cannot disagree about which build is running.
+    // The same string `--version` shows.
     assert!(
         !crate::version::VERSION.is_empty(),
         "an empty version label would be worse than none"
@@ -735,12 +692,8 @@ fn cached_prompt_tokens_accumulate_per_tenant() {
     );
 }
 
-/// A MISSING cached_tokens is not a zero.
-///
-/// This is the distinction the whole `optional` field exists for. A caller on an
-/// older engine reports nothing; treating that as "zero tokens were cached"
-/// would understate the cache hit and therefore OVERCHARGE, silently and in the
-/// operator's favour — the worst direction for a billing input to be wrong in.
+/// A missing cached_tokens is not a zero, which would understate the cache
+/// hit.
 #[test]
 fn an_absent_cached_tokens_is_counted_separately_from_zero() {
     let m = PromMetrics::new();
@@ -760,7 +713,7 @@ fn an_absent_cached_tokens_is_counted_separately_from_zero() {
     m.record_cached_prompt_tokens("m", "batch", "", None);
     let out = m.render();
     assert_line(&out, "kinference_cached_tokens_absent_total 2");
-    // ...and it must NOT have moved the token counter.
+    // ...and it must not have moved the token counter.
     assert_line(
         &out,
         r#"kinference_cached_prompt_tokens_total{model="m",qos="batch",tenant="default"} 0"#,
@@ -777,16 +730,13 @@ fn cached_prompt_tokens_skips_a_blank_model() {
 
 // ── Pre-initialization of closed label sets ───────────────────────────────
 
-/// Whole-line match. A bare `contains` would let `... 0` pass against a series
-/// whose value merely STARTS with 0 (`0.5`, `40`), which is exactly the class
-/// of vacuous assertion these tests exist to rule out.
+/// Whole-line match, so `... 0` doesn't match `0.5`.
 fn has_line(out: &str, line: &str) -> bool {
     out.lines().any(|l| l == line)
 }
 
 /// Every closed-set child exists at zero on a registry that has seen no
-/// traffic. This is the whole point of `preinit`: absent and zero are
-/// different facts, and only one of them means "this has never happened".
+/// traffic.
 #[test]
 fn preinit_creates_every_closed_set_series_at_zero() {
     let out = PromMetrics::new().render();
@@ -823,9 +773,7 @@ fn preinit_creates_every_closed_set_series_at_zero() {
         let line = format!("kinference_workerset_rejected_total{{reason=\"{v}\"}} 0");
         assert!(has_line(&out, &line), "missing `{line}`:\n{out}");
     }
-    // The histogram beside `picks` is deliberately NOT seeded: an all-zero
-    // histogram makes `histogram_quantile` return nothing, so it would draw no
-    // line while costing ~45 series. Pinned so nobody "fixes" the asymmetry.
+    // The histogram beside `picks` is not seeded; see `preinit`.
     assert!(
         !out.lines()
             .any(|l| l.starts_with("kinference_pick_duration_ms_count{")),
@@ -834,10 +782,8 @@ fn preinit_creates_every_closed_set_series_at_zero() {
     );
 }
 
-/// The other half of the contract, and the one that would actually hurt to get
-/// wrong: the OPEN label sets must stay empty. Seeding a `{model,qos,tenant}`
-/// family would invent unbounded cardinality, and seeding `policy_rule_matches`
-/// would invent rule names that no policy declares.
+/// Open label sets stay empty: `{model,qos,tenant}` families and
+/// `policy_rule_matches` are not seeded.
 #[test]
 fn preinit_does_not_seed_open_label_sets() {
     let out = PromMetrics::new().render();
@@ -861,9 +807,7 @@ fn preinit_does_not_seed_open_label_sets() {
     }
 }
 
-/// Ties [`PICK_OUTCOMES`] to its source of truth. The exhaustive `match` is
-/// the mechanism: adding a variant fails to compile here, rather than silently
-/// leaving one outcome unseeded.
+/// Ties [`PICK_OUTCOMES`] to its source of truth via an exhaustive `match`.
 #[test]
 fn pick_outcome_labels_match_the_enum() {
     use crate::prom::PickOutcome as P;
@@ -903,15 +847,9 @@ fn body_reject_reason_labels_match_the_enum() {
     assert_eq!(from_enum, BODY_REJECT_REASONS);
 }
 
-/// `cached_tokens_absent` and `cached_tokens_reported` must PARTITION every
-/// report — exactly one fires per call. That is what makes
-/// `absent / (absent + reported)` an exact share.
-///
-/// The dashboard previously divided `absent` by a report count taken from a
-/// LABELLED family, which is a sum-of-rates over many sparse per-tenant
-/// children. That does not equal the rate of their sum, and the panel drifted
-/// to 200%. Two unlabelled counters incremented at one call site cannot do
-/// that.
+/// `cached_tokens_absent` and `cached_tokens_reported` partition every
+/// report: exactly one fires per call, so `absent / (absent + reported)` is an
+/// exact share.
 #[test]
 fn cached_tokens_reported_and_absent_partition_every_report() {
     let m = PromMetrics::new();
@@ -931,8 +869,7 @@ fn cached_tokens_reported_and_absent_partition_every_report() {
         has_line(&out, "kinference_cached_tokens_absent_total 2"),
         "{out}"
     );
-    // The token SUM cannot substitute for the report count: a reported zero
-    // adds nothing to it, which is exactly why the companion counter exists.
+    // A reported zero adds nothing to the token sum, hence the separate count.
     assert!(
         has_line(
             &out,
@@ -943,9 +880,6 @@ fn cached_tokens_reported_and_absent_partition_every_report() {
 }
 
 /// The per-model split must zero a model that disappears, not freeze it.
-///
-/// A deleted worker set stops appearing in the input; a gauge left alone holds
-/// its final count forever, which reads as a fleet that never shrank.
 #[test]
 fn workers_by_model_zeroes_a_model_that_disappears() {
     let m = PromMetrics::new();
@@ -992,9 +926,8 @@ fn workers_by_model_zeroes_a_model_that_disappears() {
     );
 }
 
-/// `kinference_workers` stays the authoritative fleet total. The per-model family
-/// double-counts a worker that serves several models (LoRA), so the two are
-/// deliberately separate rather than one labelled family.
+/// `kinference_workers` stays the fleet total; the per-model family counts a
+/// multi-model worker under each model.
 #[test]
 fn workers_total_is_independent_of_the_per_model_split() {
     let m = PromMetrics::new();
@@ -1067,9 +1000,7 @@ fn unknown_qos_is_its_own_label_value() {
 
 /// The PICK path must keep mapping an unrecognized wire value to `Interactive`.
 ///
-/// Declassifying there would change ROUTING, not just reporting: policy matches
-/// on QoS, and `qos: [interactive]` rules would stop firing for callers sending
-/// a value kinference does not know.
+/// Policy matches on QoS, so declassifying there would change routing.
 #[test]
 fn from_proto_never_yields_unknown() {
     use crate::monitor::Qos;
@@ -1082,8 +1013,7 @@ fn from_proto_never_yields_unknown() {
     }
 }
 
-/// Evictions are kinference's own decisions, seeded at zero so the graph reads
-/// "none so far" rather than showing nothing.
+/// Eviction reasons are seeded at zero.
 #[test]
 fn worker_evictions_are_counted_by_reason() {
     let m = PromMetrics::new();
@@ -1117,8 +1047,8 @@ fn worker_evictions_are_counted_by_reason() {
     );
 }
 
-/// The label list must match the enum, and must NOT carry the mismatched
-/// values — those are unbounded and would be cardinality, not a reason.
+/// The label list matches the enum, and doesn't carry the mismatched values,
+/// which are unbounded.
 #[test]
 fn eviction_reason_labels_match_the_enum() {
     use crate::eviction::EvictionReason as E;
@@ -1153,13 +1083,6 @@ fn eviction_reason_labels_match_the_enum() {
 
 /// The two calibration gauges publish per (worker, model), and a departed
 /// worker leaves no reading behind.
-///
-/// The `reset()` is the part worth pinning. Without it a worker that is
-/// evicted or rolled keeps its last value forever: a stale `0.95` reads as a
-/// permanently saturated GPU and a stale `0.0` as permanent headroom. Both are
-/// worse than absence, which Prometheus renders as a gap — and both would be
-/// read by an operator calibrating a `kvCacheUsage` threshold, so the wrong
-/// number here produces a wrong policy.
 #[test]
 fn worker_saturation_publishes_per_worker_and_does_not_go_stale() {
     let p = PromMetrics::new();
@@ -1202,10 +1125,7 @@ fn worker_saturation_publishes_per_worker_and_does_not_go_stale() {
 /// The prediction histogram is labelled per worker and shares `kinference_ttft_ms`'s
 /// bucket edges.
 ///
-/// Shared edges are load-bearing, not tidiness: the predicted and the observed
-/// distributions exist to be read against each other — "we predicted p95 of
-/// 2s, the engine delivered 5s" is the calibration question — and different
-/// bucket boundaries would make that comparison a guess.
+/// Shared edges, so predicted and observed distributions are comparable.
 #[test]
 fn predicted_ttft_is_per_worker_and_shares_the_observed_buckets() {
     let p = PromMetrics::new();
@@ -1230,10 +1150,8 @@ fn predicted_ttft_is_per_worker_and_shares_the_observed_buckets() {
         "{out}"
     );
 
-    // The bucket edges must be exactly the observed histogram's, or the two
-    // cannot be compared. Both families must be populated BEFORE the render
-    // the comparison reads — a histogram with no observations emits no
-    // buckets, so comparing against an empty set would pass vacuously.
+    // Both families are populated first, since a histogram with no
+    // observations emits no buckets and the comparison would pass vacuously.
     p.record_ttft("gemma-4", "interactive", "acme", 120);
     let out = p.render();
     let edges = |metric: &str| -> Vec<String> {
