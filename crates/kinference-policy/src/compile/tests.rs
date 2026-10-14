@@ -1,9 +1,6 @@
 use super::*;
 
-/// The consider shorthand must actually filter. The select-tier version of
-/// exactly this shipped once: `type:` was parsed, never folded into the
-/// compiled `BackendMatch`, and a tier written `{type: Provider, order: […]}`
-/// silently admitted local candidates.
+/// The consider `type:` shorthand filters by class.
 #[test]
 fn a_consider_group_type_shorthand_reaches_the_compiled_filter() {
     let spec: crate::crd::InferencePolicySpec = serde_json::from_value(serde_json::json!({
@@ -25,8 +22,7 @@ fn a_consider_group_type_shorthand_reaches_the_compiled_filter() {
     );
 }
 
-/// Longhand still works, and the two spellings compile identically — which is
-/// the whole point of adding the shorthand rather than a second concept.
+/// The longhand compiles identically.
 #[test]
 fn the_two_consider_spellings_compile_the_same() {
     let mk = |route: serde_json::Value| {
@@ -136,13 +132,7 @@ fn catch_all_rule_before_others_warns_about_unreachable_rules() {
     );
 }
 
-/// An EMPTY `matches` ENTRY is a catch-all too, and shadows just as hard.
-///
-/// Entries are ORed and a zero-term entry matches everything — `all()` over an
-/// empty iterator is true — so `matches: [{}]` behaves exactly like omitting
-/// `matches`. Checking only `raw.matches.is_empty()` saw a non-empty list and
-/// said nothing, which is the worse failure: the author wrote something, so the
-/// rule LOOKS conditional.
+/// An empty `matches` entry is a catch-all too, since entries OR.
 #[test]
 fn an_empty_matches_entry_shadows_just_like_a_missing_matches() {
     for entries in [json!([{}]), json!([{}, {"qos": ["batch"]}])] {
@@ -161,7 +151,7 @@ fn an_empty_matches_entry_shadows_just_like_a_missing_matches() {
             "entries {entries}: {:?}",
             p.warnings
         );
-        // And it really does match everything, so the warning is not a guess.
+        // And it really does match everything.
         assert!(
             p.rules[0].matches(&RequestAttrs::default()),
             "entries {entries}"
@@ -169,13 +159,7 @@ fn an_empty_matches_entry_shadows_just_like_a_missing_matches() {
     }
 }
 
-/// `onEmpty: FallThrough` is the escape, and must NOT warn.
-///
-/// A catch-all that falls through does not shadow: `policy_driver` continues to
-/// the next matching rule when the candidate set comes up empty. That is the
-/// ordinary "local first, then provider" shape, and warning on it would cry
-/// wolf on a correct policy — which is worse than silence, because a warning
-/// that fires on good policies stops being read.
+/// A catch-all with `onEmpty: FallThrough` doesn't shadow, so doesn't warn.
 #[test]
 fn a_catch_all_that_falls_through_does_not_shadow() {
     let p = policy(json!({
@@ -219,9 +203,8 @@ fn a_catch_all_in_last_position_is_not_flagged() {
     );
 }
 
-/// A rule naming a tag no classifier can emit yet is inert, and the warning
-/// names the tag plus what IS emittable — otherwise an operator has no way
-/// to discover the vocabulary, `tag` being untyped.
+/// A rule naming a tag no classifier can emit is inert, and the warning lists
+/// what is emittable.
 #[test]
 fn a_rule_on_an_unemittable_tag_is_flagged_as_inert() {
     let p = policy(json!({
@@ -244,9 +227,7 @@ fn a_rule_on_an_unemittable_tag_is_flagged_as_inert() {
     );
 }
 
-/// The counterpart, and the reason the check is per-tag: a rule written
-/// against the `-unknown` tags matches every request today, so warning that
-/// it "never matches" would be plainly false.
+/// A rule written against the emittable `-unknown` tags doesn't warn.
 #[test]
 fn a_rule_on_an_emittable_tag_is_not_flagged() {
     let p = policy(json!({
@@ -261,8 +242,7 @@ fn a_rule_on_an_emittable_tag_is_not_flagged() {
     );
 }
 
-/// An exclusion that cannot fire leaves candidates in the set it was written
-/// to remove, so it gets its own warning saying that in those terms.
+/// An exclusion that cannot fire gets a warning in those terms.
 #[test]
 fn an_exclusion_on_an_unemittable_tag_warns_that_it_never_fires() {
     let p = policy(json!({
@@ -345,11 +325,8 @@ fn weighted_partition_is_detected_and_unweighted_is_not() {
     );
 }
 
-/// `identityHeaders` is gone from the CRD: header extraction is the caller's
-/// job and is not configurable per-policy. An unknown field must not fail
-/// the policy — the API server prunes it before kinference ever sees it, and a
-/// hard parse error here would drop the whole policy and silently fall the
-/// pool back to serve-as-asked.
+/// An unknown field like the removed `identityHeaders` doesn't fail the
+/// policy.
 #[test]
 fn an_unknown_spec_field_does_not_sink_the_policy() {
     let p = policy(json!({
@@ -402,12 +379,8 @@ fn backend_match_semantics() {
     assert!(!by_label.matches(BackendType::Local, "whatever", &BTreeMap::new()));
 }
 
-/// A bad term is reported against its exact location, and FAILS CLOSED.
-///
-/// The entry used to compile without the bad term — and with no terms left it
-/// became `{}`, a catch-all, so a rule its author meant to be narrow claimed
-/// every request. Now the entry can never match, the rule is inert, and the
-/// warning says so.
+/// A bad term is reported against its exact location, and fails closed: the
+/// entry can never match.
 #[test]
 fn bad_predicate_inside_a_rule_fails_closed_and_is_located() {
     let p = policy(json!({
@@ -429,9 +402,8 @@ fn bad_predicate_inside_a_rule_fails_closed_and_is_located() {
     );
 }
 
-/// The case that made widening dangerous rather than merely untidy: a quoted
-/// number in a `drop`. Dropping the bad term left `{backend: {type: Local}}`,
-/// which removes EVERY local candidate. Failing closed, it removes none.
+/// A quoted number in a `drop` fails closed, so the drop removes nothing
+/// rather than every local candidate.
 #[test]
 fn a_bad_drop_term_removes_nothing_instead_of_everything() {
     let p = policy(json!({
@@ -461,12 +433,7 @@ fn a_bad_drop_term_removes_nothing_instead_of_everything() {
     assert!(w.contains("never drops anything"), "{w}");
 }
 
-/// The canonical local-first-then-provider shape must compile clean.
-///
-/// It previously warned "tier 0 has no `backends` subset, so ... the 1 tier(s)
-/// after it are unreachable" — which was accurate about the compiled form and
-/// wrong about the manifest: `type: Local` WAS a subset, it just was not being
-/// read. The warning was the visible symptom of the tier filter being dropped.
+/// The canonical local-first-then-provider shape compiles clean.
 #[test]
 fn local_first_then_provider_compiles_without_warnings() {
     let spec: InferencePolicySpec = serde_json::from_value(serde_json::json!({
@@ -538,16 +505,13 @@ fn a_guard_on_an_unemittable_tag_warns_about_failing_open() {
     let p = CompiledPolicy::compile("p", &spec);
     let w = joined(&p);
     assert!(w.contains("pii-detected"), "{w}");
-    // The direction of the failure is the part that matters: the candidates
-    // it would have dropped are still selectable.
+    // The candidates it would have dropped are still selectable.
     assert!(w.contains("still selectable"), "{w}");
 }
 
 // --- the louder compiler ----------------------------------------------------
 //
-// One test per check, each with the near miss that must stay quiet. A warning
-// that fires on a correct policy teaches people to stop reading warnings, which
-// costs more than the bug it was written to catch.
+// One test per check, each with a near miss that must stay quiet.
 
 use crate::warning::WarningCode;
 
@@ -589,8 +553,7 @@ fn an_empty_matches_entry_and_an_empty_if_say_fields_may_have_been_pruned() {
         empties[0]
     );
 
-    // A rule with no `matches` key at all is the documented catch-all, not a
-    // suspicious empty entry.
+    // A rule with no `matches` key is a catch-all, not an empty entry.
     let catch_all = policy(json!({"rules": [{"name": "r",
         "route": {"select": [{"minimize": "PredictedTTFT"}]}}]}));
     assert!(catch_all.warnings.is_empty(), "{:?}", catch_all.warnings);
@@ -686,7 +649,7 @@ fn constant_comparisons_are_caught_in_both_directions() {
     );
 
     // Always true: every local candidate has at least zero, so this drops all
-    // of them — almost certainly not what was meant.
+    // of them.
     let always = one_rule(json!({
         "exclude": [{"name": "e", "drop": {
             "backend": {"type": "Local"}, "queuedPrompts": {"greaterThanOrEqual": 0}}}],
@@ -802,9 +765,8 @@ fn an_order_tier_over_local_endpoints_needs_a_random_tie_break() {
     );
 }
 
-/// The polarity fix. `{not: X}` over a tag nothing emits is TRUE for every
-/// request — the old warning said it "never matches", the exact opposite of
-/// what the exclusion does.
+/// `{not: X}` over a tag nothing emits is true for every request, and the
+/// warning says so.
 #[test]
 fn a_negated_unemittable_tag_is_reported_as_always_true() {
     let p = one_rule(json!({
@@ -832,8 +794,7 @@ fn an_array_with_some_unemittable_tags_still_matches_on_the_rest() {
     );
     assert!(w.contains("still matches on `pii-confirmed`"), "{w}");
     assert!(!w.contains("never matches"), "{w}");
-    // `ssn` has no classifier prefix; the emittable list must not come out
-    // empty for it, which it used to.
+    // `ssn` has no classifier prefix; the emittable list is still non-empty.
     assert!(w.contains("Emittable today: complexity-"), "{w}");
 }
 

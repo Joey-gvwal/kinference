@@ -51,7 +51,7 @@ fn policy(spec: serde_json::Value) -> Arc<InferencePolicy> {
 }
 
 /// Resolve through the real `resolve::resolve`, binding every worker set as if
-/// discovery had found it — the same thing `kinfctl` does offline.
+/// discovery had found it, as `kinfctl` does offline.
 fn check(
     spec: serde_json::Value,
     sets: Vec<Arc<InferenceWorkerSet>>,
@@ -233,8 +233,7 @@ fn a_misspelled_model_is_caught_when_every_set_declares_its_models() {
 }
 
 /// A set with no `spec.models` rows serves whatever its engine reports, so a
-/// model name cannot be ruled out — and the check says it was skipped rather
-/// than passing quietly.
+/// model name cannot be ruled out, and the check says it was skipped.
 #[test]
 fn model_names_go_unchecked_when_a_set_declares_nothing() {
     let (mut sets, provs, dests) = fleet();
@@ -251,8 +250,7 @@ fn model_names_go_unchecked_when_a_set_declares_nothing() {
     assert!(unchecked.unwrap().contains("gemma-4-12b"));
 }
 
-/// `auto` never reaches a rule — it is resolved first — so naming it is always
-/// wrong, whatever the sets declare.
+/// `auto` is resolved before rules run, so naming it is always wrong.
 #[test]
 fn matching_on_auto_is_always_flagged() {
     let (mut sets, provs, dests) = fleet();
@@ -272,8 +270,7 @@ fn matching_on_auto_is_always_flagged() {
     );
 }
 
-/// An unattached policy has nothing to be checked against, and must say
-/// nothing rather than flag every name it uses.
+/// An unattached policy has nothing to be checked against, so no findings.
 #[test]
 fn no_pools_means_no_name_findings() {
     let spec: InferencePolicySpec = serde_json::from_value(json!({"rules": [{"name": "r",
