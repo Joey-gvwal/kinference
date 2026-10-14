@@ -1,19 +1,11 @@
-//! The request lifecycle behind `Pick()` — one request from body to chosen
+//! The request lifecycle behind `Pick()`: one request from body to chosen
 //! endpoint, and the observation it leaves behind.
 //!
-//! `pick_and_record` is the meeting point of four subsystems: it reads the
-//! classifiers, builds the policy engine's `RequestAttrs`, reads the metrics
-//! registry, and queries the KV index that ingest populates. It is long
-//! because that sequence is one transaction over a `serde_json::Value` that
-//! gets rewritten and then drained, plus a critical section under the pool's
-//! `pick_lock`; the phases are not independently extractable without handing
-//! a partly-drained tree between them. Its internal decomposition is worth
-//! doing and is deliberately NOT part of the file split.
-//!
-//! The observation half lives here too, because it is the same transaction
-//! seen from the other end: `finalize_observation` and `abort_observation`
-//! release exactly what `pick_and_record` reserved, and the sweeps are the
-//! backstop for a caller that never reports at all.
+//! `pick_and_record` is long because it is one transaction over a JSON body
+//! that is rewritten and then drained, plus a critical section under the
+//! pool's `pick_lock`. `finalize_observation` and `abort_observation` release
+//! what it reserved, and the sweeps are the backstop for callers that never
+//! report.
 
 use std::time::Instant;
 
@@ -21,8 +13,7 @@ use super::*;
 use crate::observations::PendingObservation;
 
 impl KinferenceService {
-    /// Full pick path behind gRPC `Pick()`.
-    /// `decide()`:
+    /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
     ///    inputs. Resolve the `"auto"` pseudo-model to a concrete model,
     ///    then apply the Pick-time body rewrites (`crate::pick_body`):
@@ -34,24 +25,11 @@ impl KinferenceService {
     ///    InflightRegistry, run the picker, bump inflight, insert
     ///    inflight-prefix, stash PendingObservation.
     /// 4. Return the chosen endpoint + request id + the resolved model + the
-    ///    rewritten `body`, which is EMPTY when the body was left alone. Empty
-    ///    is an internal fast path, not a wire contract: `grpc::pick` then
-    ///    re-keys the pushed `Arc` into the body store instead of copying it,
-    ///    and `PullBody` serves a complete body either way.
+    ///    rewritten `body`, which is empty when the body was left alone (then
+    ///    `grpc::pick` reuses the pushed body).
     ///
-    /// The caller mints `request_id` (today: per-counter on
-    /// EndpointPickerService / KinferenceService) and passes it in
-    /// so the same id flows through pending-observation lookup and
-    /// log correlation.
-    /// All of (`inflight`, `pick_lock`, `predictor_cfg`, `picker_cfg`,
-    /// `inflight_enabled`) come off `self` — both front-ends call
-    /// this with just the request data. The `request_id` is minted
-    /// by the caller (typically via `self.mint_request_id()` for
-    /// gRPC, folded into the
-    /// shared one — see `EndpointPickerService`).
-    // The request (body, ids) and the routing inputs (qos, pool, identity) are
-    // distinct groups, but neither is large enough to earn a wrapper struct.
-    // Same convention as `ingest::spawn_worker_listener`.
+    /// The caller mints `request_id` (see `mint_response_id`), so the same id
+    /// flows through pending-observation lookup and log correlation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn pick_and_record(
         &self,
@@ -66,11 +44,9 @@ impl KinferenceService {
             .map(|s| s.to_string())
             .unwrap_or_else(|| request_id.to_string());
 
-        // 1. Parse the body into a JSON tree (parsed once). We rewrite this
-        //    tree in place to produce the body the caller forwards upstream
-        //    (see `crate::pick_body`), so a typed struct won't do — it would
-        //    drop unknown fields (temperature, max_tokens, vendor extensions,
-        //    …) we must preserve on the way through.
+        // 1. Parse the body into a JSON tree, rewritten in place (see
+        //    `crate::pick_body`). Not a typed struct, which would drop unknown
+        //    fields.
         let mut obj: serde_json::Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(e) => {
@@ -98,12 +74,9 @@ impl KinferenceService {
         }
         let mut model = body_model.to_string();
 
-        // 1a. "auto" pseudo-model: kinference chooses a concrete model for
-        //     this prompt (placeholder: random among known models), then
-        //     routes normally. On cold start with no models known yet,
-        //     fall through to the NoWorkers path below. When resolved,
-        //     `force_model` drives the body rewrite (step 1c) so the
-        //     upstream engine never sees the "auto" pseudo-model.
+        // 1a. "auto" pseudo-model: choose a concrete model, then route
+        //     normally. `force_model` drives the body rewrite in step 1c. With
+        //     no models known yet, fall through to NoWorkers.
         let mut force_model: Option<String> = None;
         if model == AUTO_MODEL {
             let messages = obj.get("messages").and_then(|v| v.as_array());
@@ -127,33 +100,17 @@ impl KinferenceService {
             }
         }
 
-        // 1b. Resolve the pools serving this model. Unknown model (no pool has
-        //     claimed it yet) is the multi-pool analog of "no workers serve
-        //     model" — same NoWorkers outcome, which the handler maps to
-        //     gRPC to an empty pick.
-        //
-        //     Usually one pool. Several means two worker sets serve the same
-        //     model, which is redundancy rather than a misconfiguration, so
-        //     all of them are scored below and ranked against each other.
+        // 1b. Resolve the pools serving this model; several are scored and
+        //     ranked against each other.
         let mut serving = self.resolve_pools(&model);
 
-        // 1b-i. Alias fallback. `model_router` only ever holds names an engine
-        //     REPORTED on /v1/models, so a client-facing name declared in an
-        //     InferenceWorkerSet's `spec.models` resolves to nothing here — and
-        //     without this, the request is refused before `policy_select`, the
-        //     only code that knows the alias table, is ever reached.
+        // 1b-i. Alias fallback. `model_router` only holds names engines
+        //     report, so translate a declared alias via the named pool's worker
+        //     sets (requires policy and a named pool).
         //
-        //     Requires the Pick to name an InferencePool: the alias table lives
-        //     on the resolved worker sets in the policy store, so with `[policy]`
-        //     off or no pool named there is nothing to consult.
-        //
-        //     LIMITATION: takes the first upstream that resolves. Two
-        //     upstream models declared interchangeable under one name therefore
-        //     always route to the same one rather than being ranked as
-        //     candidates — the canonical name is gone by the time
-        //     `policy_select` could expand it. Better than the 404 it replaces;
-        //     preserving the fan-out means carrying the canonical name through
-        //     to the policy stage.
+        //     Limitation: takes the first served upstream, so interchangeable
+        //     upstream models always route to the same one rather than being
+        //     ranked by the policy.
         if serving.is_empty()
             && let Some(upstream) = self.resolve_alias(pool_ref, &model)
         {
@@ -163,18 +120,14 @@ impl KinferenceService {
                 upstream_model = %upstream,
                 "pick: resolved declared alias to an upstream model"
             );
-            // Drives the body rewrite in step 1c, exactly as `auto` does —
-            // otherwise the engine receives the alias and 404s itself.
+            // Drives the body rewrite in step 1c, as for `auto`.
             force_model = Some(upstream.clone());
             model = upstream;
             serving = self.resolve_pools(&model);
         }
 
-        // A model NO local pool serves may still be served off-cluster, and the
-        // provider that declares it is only visible through the named pool. So
-        // this gate has to ask the policy store before refusing, or a
-        // provider-only model 404s before `policy_select` — the only code that
-        // can reach a provider — ever runs.
+        // A model no local pool serves may still be served by a provider in
+        // the named pool, so check before refusing.
         if serving.is_empty() {
             if !self.provider_serves(pool_ref, &model) {
                 tracing::info!(
@@ -190,30 +143,19 @@ impl KinferenceService {
                 "pick: no local worker set serves this model, but a provider declares it"
             );
         }
-        // NOTE: the per-pool config/handles are deliberately NOT bound here —
-        // both the cross-pool ranking below and a policy may settle on a
-        // different worker set than the one scored first, and borrowing off the
-        // wrong pool would pin the wrong predictor, lock, and inflight registry.
+        // Per-pool config and handles are bound only once the winning pool is
+        // known, below.
 
         // 1c. Apply the Pick-time body rewrites (model="auto" → concrete,
-        //     and stream_options.include_usage for streaming requests). Only
-        //     re-serialize when something actually changed: the mutated bytes
-        //     become BOTH the body sent to /render (byte-parity with the
-        //     engine) AND the `body` returned to the caller to forward
-        //     upstream. `wire_body` is empty on the fast path — the caller
-        //     then forwards the original body it already holds.
+        //     and stream_options.include_usage for streaming requests). When
+        //     something changed, the re-serialized bytes are both sent to
+        //     /render and returned; otherwise `wire_body` is empty.
         let mutated = crate::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
-        // Streaming vs non-streaming decides whether the eventual first-byte
-        // report is a real TTFT (streaming) or the full-response time
-        // (non-streaming). Captured here; consumed by `finalize_observation`
-        // to decide whether the observation is worth recording.
-        // Engine-compatible coercion, NOT `as_bool` — see
-        // [`crate::pick_body::stream_flag`]. The two readers of this flag must
-        // agree or a request gets its usage block but no TTFT sample.
+        // Whether the first-byte report will be a real TTFT, for
+        // `finalize_observation`. Uses the same coercion as the body rewrite;
+        // see [`crate::pick_body::stream_flag`].
         let streaming = crate::pick_body::stream_flag(&obj);
-        // Policy can match on `maxTokens`, and context-window fitting needs it:
-        // a prompt that fits but whose completion doesn't is still a request
-        // that dies partway.
+        // For `maxTokens` predicates and context-window fitting.
         let parsed_max_tokens = obj.get("max_tokens").and_then(serde_json::Value::as_i64);
         let outbound = if mutated {
             serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
@@ -225,14 +167,12 @@ impl KinferenceService {
         } else {
             Vec::new()
         };
-        // What `outbound`/`wire_body` currently NAMES. The model is decided
-        // twice — here, and again if a policy crosses to another worker set — so
-        // the second decision has to know whether the body already agrees.
+        // The model `wire_body` currently names, in case a policy later picks
+        // another.
         let body_model = model.clone();
 
-        // 2. Score. Pull the chat-template inputs out of the (now disposable)
-        //    tree, and pass the outbound body so the HTTP /render leg gets
-        //    byte-perfect parity with what the engine will see.
+        // 2. Score. Take the chat-template inputs out of the tree, and pass the
+        //    outbound body so /render sees what the engine will.
         let messages = match obj.get_mut("messages").map(serde_json::Value::take) {
             Some(serde_json::Value::Array(v)) => v,
             _ => Vec::new(),
@@ -254,31 +194,21 @@ impl KinferenceService {
             tool_choice,
             add_generation_prompt,
         };
-        // Captured BEFORE scoring consumes `messages`. Cheap (one short String)
-        // and unconditional, unlike `spare` below, because the classifiers run
-        // whether or not a policy is active — their tags feed `RequestAttrs`,
-        // which is assembled after the borrow of `messages` is long gone.
-        // Falls back to the completions-API `prompt` when there are no chat
-        // messages at all.
+        // Captured before scoring consumes `messages`, falling back to the
+        // completions-API `prompt`.
         let classifier_text = crate::policy::classify::last_user_text(&messages).or_else(|| {
             obj.get("prompt")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         });
-        // Scoring consumes these, and two things downstream may need them
-        // again: a second pool serving this model, and a policy scoring OTHER
-        // (worker set, model) pairs to build its candidate set. Clone only when
-        // one of those is actually in play, so the ordinary path — one pool, no
-        // policy — pays nothing.
+        // Scoring consumes these, but a second pool or a policy may need them
+        // again; only clone in that case.
         let policy_active = pool_ref.is_some() && self.policy.is_some();
         let spare = (policy_active || serving.len() > 1)
             .then(|| (messages.clone(), chat_extras.clone(), outbound.clone()));
         let mut degraded_reason: Option<String> = None;
         let mut groups: Vec<ScoredGroup> = Vec::new();
-        // Skipped whole when nothing local serves the model. There is nothing to
-        // tokenize FOR — scoring is per-(pool, model) and both halves are
-        // missing — and paying a /render round-trip to score an empty fleet
-        // would be latency spent on a question with no answer.
+        // Skipped when nothing local serves the model.
         if let Some(first) = serving.first() {
             let (outcome, score_side) = self
                 .score_workers(
@@ -315,15 +245,13 @@ impl KinferenceService {
                         side: score_side,
                     });
                 }
-                // Not fatal on its own any more: another pool may still serve the
-                // model, and so may a provider.
+                // Not fatal: another pool or a provider may serve the model.
                 ScoreOutcome::NoWorkers => {}
             }
         }
 
-        // 2a. The remaining pools serving this model, if any. Tokenization
-        //     belongs to the MODEL, so the first group's tokens are reused and
-        //     each extra pool pays only its own block hashing and index query.
+        // 2a. The remaining pools serving this model, reusing the first
+        //     group's tokens.
         if serving.len() > 1 {
             let reuse = groups
                 .first()
@@ -368,28 +296,15 @@ impl KinferenceService {
             }
         }
 
-        // 2b. Rank across the pools serving this model, on the same
-        //     `predicted_wait_ms` term the policy path ranks candidates on, so
-        //     "better" means one thing in kinference. This chooses the POOL; the
-        //     picker below still chooses the endpoint within it, under that
-        //     pool's lock.
-        //     `None` here is not yet fatal: a policy may still reach a provider,
-        //     or score a different model on another worker set. It becomes
-        //     `NoWorkers` below only once nothing at all has been chosen.
-        // Exactly ONE ranker records its predictions per request, and it is
-        // whichever one actually ranks. With a policy in play `candidates_for`
-        // sees the real candidate set — including the groups the policy's
-        // `consider` reached that were never scored here — so it records and
-        // this does not. Without one, this is the only ranking that happens.
+        // 2b. Rank across the pools serving this model, choosing the pool; the
+        //     picker chooses the endpoint under that pool's lock. `None` isn't
+        //     yet fatal, since a policy may still find something.
         //
-        // Recording in both would double-count the winning group's endpoints
-        // and weight the distribution toward the FASTEST group, biasing the
-        // p95 low — the same bias that argues against recording only winners.
-        //
-        // The one gap: a request naming a pool the watch cannot resolve takes
-        // neither branch and contributes no sample. That case is already
-        // counted as `kinference_policy_decisions_total{outcome="unknown_pool"}` or
-        // `"not_listed"`, so it is visible rather than silent.
+        // Predictions are recorded by exactly one ranker per request: the
+        // policy's `candidates_for` when a policy is in play, otherwise this.
+        // Recording in both would double-count. A request naming an unresolved
+        // pool records none, but is counted under
+        // `kinference_policy_decisions_total`.
         let policy_will_rank = pool_ref.is_some() && self.policy.is_some();
         let winner = best_group(
             groups,
@@ -397,8 +312,7 @@ impl KinferenceService {
             (!policy_will_rank).then_some(&*self.prom),
         );
         if winner.is_none() && serving.is_empty() {
-            // Deliberately not a warning: this is the ordinary shape of a
-            // provider-only model, not a degradation.
+            // Normal for a provider-only model.
             tracing::debug!(
                 req = %req_label,
                 model = %model,
@@ -406,35 +320,23 @@ impl KinferenceService {
             );
         }
 
-        // 2c. Policy. Candidates may span worker sets, and each worker set is a
-        //     different kinference pool with its own `pick_lock` — so ranking cannot
-        //     happen under a lock without risking a deadlock between two
-        //     requests taking pool locks in opposite orders. Rank on a
-        //     lock-free snapshot, then let the winner's group commit under its
-        //     own lock below. The commit still bumps inflight atomically; only
-        //     the RANKING input can be up to one concurrent pick stale.
+        // 2c. Policy. Candidates may span pools, each with its own `pick_lock`,
+        //     so ranking is lock-free (avoiding lock-order deadlocks) and the
+        //     winner commits under its own lock below. The ranking input may be
+        //     one concurrent pick stale.
         let mut forced_endpoint: Option<String> = None;
         let selected: Option<ScoredGroup>;
         if let (Some(pref), Some(store)) = (pool_ref, self.policy.as_ref()) {
-            // Assembled here, where every source is in scope: the request
-            // fields, the caller-resolved identity, and `inputTokens` off the
-            // tokenization prefix hashing already did (block granularity —
-            // ample for the thresholds policies express).
             let attrs = crate::policy::predicate::RequestAttrs {
-                // Upstream first, then its declared aliases. A predicate
-                // writing either spelling matches, which is what makes `matches`
-                // agree with `route.consider[].models.names[]`.
+                // Upstream first, then its declared aliases.
                 model: {
                     let mut names = vec![model.clone()];
                     names.extend(self.declared_aliases(pool_ref, &model));
                     names
                 },
-                // Block-granular, off the tokenization prefix hashing already
-                // did — which means it is unavailable when nothing local was
-                // scored. `None` there is honest rather than convenient: with no
-                // local engine serving the model there is no tokenizer to count
-                // with, so `inputTokens` predicates and the built-in
-                // context-window fit both sit the request out.
+                // Block-granular, from scoring. `None` when nothing local was
+                // scored, so `inputTokens` predicates and context-window fitting
+                // don't apply.
                 input_tokens: winner.as_ref().and_then(|w| {
                     w.scores
                         .first()
@@ -443,11 +345,7 @@ impl KinferenceService {
                 max_tokens: parsed_max_tokens,
                 qos: Some(qos.as_label().to_string()),
                 tenant: identity.tenant.clone(),
-                // Classifier tags, from the most recent user turn. Keyword
-                // stubs for now — see `policy::classify` for the rules. A
-                // request with no readable user turn gets every classifier's
-                // `-unknown` tag rather than a default verdict, so a policy
-                // written to fail closed matches on `-unknown` too.
+                // See `policy::classify`.
                 tag: crate::policy::classify::tags_for_request(
                     &req_label,
                     classifier_text.as_deref(),
@@ -457,15 +355,9 @@ impl KinferenceService {
                 .policy_select(pref, store, winner, &model, spare, attrs, &req_label)
                 .await
             {
-                // An off-cluster destination. This RETURNS, short-circuiting
-                // step 3 entirely: the critical section below is wholly
-                // pool-scoped — inflight counts, the radix tree, the pick lock —
-                // and a provider has no pool for any of it to apply to.
-                //
-                // Everything a provider pick still needs is done here instead:
-                // the body says the vendor's model name, `PullBody` can serve
-                // it, and an observation is held so a reported TTFT lands on the
-                // right provider.
+                // An off-cluster destination. Returns here, skipping the
+                // pool-scoped critical section: rewrite the body to the vendor's
+                // model name and hold an observation for the reported TTFT.
                 Ok(PolicySelection::Provider(pick)) => {
                     let base = if wire_body.is_empty() {
                         body
@@ -510,19 +402,15 @@ impl KinferenceService {
                     };
                 }
                 Ok(sel) => {
-                    // Re-bind to the winning group. When the policy stayed in
-                    // the primary group this is a no-op move; when it crossed
-                    // to another worker set, the critical section below now
-                    // operates on THAT pool's scores and prefix hashes — which
-                    // is the whole point, since prefix state is per-pool.
+                    // Re-bind to the winning group, whose pool's scores and
+                    // prefix hashes the critical section uses.
                     let (group, chosen) = match sel {
                         PolicySelection::Local { group, endpoint } => (Some(group), Some(endpoint)),
                         PolicySelection::Picker { group } => (group, None),
                         PolicySelection::Provider(_) => unreachable!("handled above"),
                     };
                     let Some(group) = group else {
-                        // Nothing local was scored and the policy chose no
-                        // provider either. Genuinely nothing serves this request.
+                        // Nothing local was scored and no provider chosen.
                         tracing::info!(
                             req = %req_label,
                             model = %model,
@@ -534,14 +422,9 @@ impl KinferenceService {
                     selected = Some(group);
                     forced_endpoint = chosen;
 
-                    // The policy may have chosen a DIFFERENT model — that is the
-                    // point of candidates spanning worker sets — and the body
-                    // still names the one resolved before scoring. Forwarding it
-                    // unchanged sends Qwen's model id to Gemma, which 404s.
-                    //
-                    // Rewritten here rather than at step 1c because the choice
-                    // is not known until now, and `obj` can no longer serve: its
-                    // `messages` were taken out to feed scoring.
+                    // The policy may have chosen a different model than the
+                    // body names, so rewrite it. Not via `obj`, whose `messages`
+                    // were taken for scoring.
                     if model != body_model {
                         let base = if wire_body.is_empty() {
                             body
@@ -581,16 +464,12 @@ impl KinferenceService {
                 Err(outcome) => return outcome,
             }
         } else {
-            // No pool named, or policy disabled. The cross-pool ranking above
-            // already decided; a provider is unreachable on this path by
-            // construction, since the only route to one is a pool's
-            // `destinations`.
+            // No pool named, or policy disabled: the ranking above decided, and
+            // providers are unreachable.
             selected = winner;
         }
 
-        // Unwrapped here rather than earlier because the policy may have crossed
-        // to a different worker set, and everything below is bound to whichever
-        // pool actually won.
+        // Everything below is bound to whichever pool won.
         let Some(group) = selected else {
             tracing::info!(
                 req = %req_label,
@@ -610,23 +489,13 @@ impl KinferenceService {
         let pick_lock = &*pool.pick_lock;
         let inflight_enabled = picker_cfg.inflight_tracking;
 
-        // 3. Critical section — pick + state mutation.
+        // 3. Critical section: pick and state mutation.
         let chosen_endpoint: String;
         let pending: PendingObservation;
         {
-            // Recover from poisoning rather than propagating it. A `Mutex`
-            // poisons permanently once a thread panics while holding it, so
-            // `.expect()` here turned ONE panic anywhere in this section into a
-            // permanent outage for this worker set: every later pick panicked on
-            // the same line, forever, while the process stayed up and other
-            // pools kept serving. No crash, no restart, no self-healing.
-            //
-            // Poisoning is meant to stop callers reading data a panic left
-            // half-written. This mutex guards `()` — it orders the score → pick →
-            // record sequence and protects nothing — so there is no such data,
-            // and the state the section does touch (`inflight`, prefix
-            // dispatches) is TTL-swept and self-corrects. Taking the lock anyway
-            // is the right trade.
+            // Recover from poisoning: one panic would otherwise break every
+            // later pick on this pool. The mutex guards `()`, only ordering the
+            // section, and the state it touches is TTL-swept.
             let _pick_guard = pick_lock.lock().unwrap_or_else(|poisoned| {
                 tracing::warn!(
                     req = %req_label,
@@ -716,8 +585,7 @@ impl KinferenceService {
                 s.matched_blocks = layered.round() as u32;
             }
 
-            // The policy already chose (step 2b, outside this lock — see the
-            // note there on why cross-pool ranking cannot hold one).
+            // The policy already chose, in step 2c.
             let forced_pick =
                 forced_endpoint.as_deref().and_then(|ep| {
                     let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
@@ -727,14 +595,9 @@ impl KinferenceService {
                         }
                     });
                     if found.is_none() {
-                        // Should be unreachable: the candidate's endpoint came from
-                        // this same group's `scores` via `candidates_for`, and the
-                        // re-bind in 2c moved that whole group across. Loud anyway,
-                        // because the fallback below is otherwise SILENT and the
-                        // decision counter has already recorded `chosen` — so a
-                        // policy quietly overruled by the picker would be
-                        // indistinguishable from one that was honored. Pair
-                        // `chosen` with this label to see it.
+                        // Should be unreachable, since the endpoint came from
+                        // this group's scores. Warn, since the decision counter
+                        // already recorded `chosen`.
                         tracing::warn!(
                             req = %req_label,
                             model = %model,
@@ -830,8 +693,8 @@ impl KinferenceService {
             // matched blocks against a zero-length prompt. Those picks are
             // already counted by `kinference_score_degraded_total{reason}`.
             //
-            // `chosen.matched_blocks` is the LAYERED value — it was overwritten
-            // above with radix match plus in-flight prefill credit — while
+            // `chosen.matched_blocks` is the layered value (it was overwritten
+            // above with radix match plus in-flight prefill credit), while
             // `chosen_kv_blocks` is the raw tree match for the same pick.
             if degraded_reason.is_none() {
                 self.prom.record_prefix_match(
@@ -868,8 +731,8 @@ impl KinferenceService {
                 qos,
                 tenant: identity.tenant.clone(),
             };
-            // Side map for ReportFinalToken (tokens + ITL) — the record above
-            // is consumed at ReportFirstToken, so the labels live here too.
+            // For ReportFinalToken; the record above is consumed earlier, at
+            // ReportFirstToken.
             self.request_labels.insert(
                 request_id,
                 RequestMeta {
@@ -907,8 +770,8 @@ impl KinferenceService {
         }
 
         self.pending_observations.insert(pending);
-        // The key's bare name, as a policy's `backend.name` and a provider's
-        // label spell it: a CRD worker set's `pool.name` is `namespace/name`.
+        // The bare name, as `backend.name` spells it; a CRD worker set's
+        // `pool.name` is `namespace/name`.
         self.prom.record_routed(
             &identity.tenant,
             &pool.key.name,
@@ -932,39 +795,27 @@ impl KinferenceService {
         }
     }
 
-    /// Observation close — write the per-request CSV row and clear
-    /// `InflightPrefixes` / `InflightRegistry` state for the dispatch.
+    /// Release the inflight counter and inflight-prefix entry a pick reserved
+    /// for `record`. The inflight counter has no sweep of its own, so every
+    /// terminal path for a pick (`finalize_observation`, `abort_observation`,
+    /// `sweep_expired_observations`) must come through here.
     ///
-    /// Returns `true` when a `PendingObservation` was found for
-    /// `request_id` and the row was written; `false` when the id was
-    /// unknown (already evicted by sweep, never inserted, or already
-    /// consumed). On `false` no state is changed.
-    ///
-    /// gRPC `ReportFirstToken()` calls
-    /// this with the observed TTFT it measured. The caller passes
-    /// `observed_ttft_ms = first-ResponseBody-chunk - stream-start`;
-    /// gRPC passes whatever the caller reports.
-    /// Release the inflight counter + inflight-prefix entry a pick
-    /// reserved for `record`. Shared by `finalize_observation` (success),
-    /// `abort_observation` (stream died before first byte), and
-    /// `sweep_expired_observations` (caller never reported / a long
-    /// non-streaming request outran the TTL). The inflight counter has no
-    /// sweep of its own, so this is the ONLY place it gets decremented —
-    /// every terminal path for a pick must funnel through here or the
-    /// worker's "occupied" count leaks.
-    /// Total by construction: the handles ride on the record, so there is no
-    /// id to resolve and nothing to miss. A pool torn down mid-request stays
-    /// alive exactly as long as some pending observation still holds it.
+    /// The pool handles ride on the record, so a pool torn down mid-request
+    /// stays alive until its pending observations are released.
     fn release_inflight_state(&self, record: &PendingObservation) {
-        // Config snapshot travels on the record (captured at pick time),
-        // so we read the inflight-tracking flag from there rather than
-        // re-resolving the pool's live config.
+        // Pick-time config, from the record.
         if record.picker_cfg.inflight_tracking {
             record.inflight.inflight.dec(&record.chosen_worker.endpoint);
         }
         record.inflight.prefixes.forget(record.request_id);
     }
 
+    /// Close an observation: release the pick's inflight state and, for a
+    /// streaming request, write the CSV row. Called from `ReportFirstToken()`
+    /// with the caller's observed TTFT.
+    ///
+    /// Returns `false`, changing nothing, when `request_id` is unknown (swept,
+    /// never inserted, or already consumed).
     pub(crate) fn finalize_observation(
         &self,
         request_id: u64,
@@ -974,7 +825,7 @@ impl KinferenceService {
         let Some(record) = self.pending_observations.take(request_id) else {
             return false;
         };
-        // Always release in-flight bookkeeping — streaming or not.
+        // Always release in-flight bookkeeping, streaming or not.
         self.release_inflight_state(&record);
 
         let req_label_owned = record
@@ -982,12 +833,8 @@ impl KinferenceService {
             .clone()
             .unwrap_or_else(|| record.request_id.to_string());
 
-        // Non-streaming responses deliver their first byte only at
-        // completion, so `observed_ttft_ms` is the full response time, not
-        // prefill TTFT. Recording it would poison the residual dataset the
-        // latency model is fit on, so we skip both the CSV row and the
-        // residual log for non-streaming picks. (State cleanup above still
-        // ran, so nothing leaks.)
+        // For non-streaming responses `observed_ttft_ms` is the full response
+        // time, not TTFT, so skip the CSV row and residual log.
         if !record.streaming {
             tracing::debug!(
                 req = %req_label_owned,
@@ -998,8 +845,7 @@ impl KinferenceService {
             return true;
         }
 
-        // Streaming: `observed_ttft_ms` is a real prefill TTFT → feed the
-        // per-model histogram exposed on `/metrics`.
+        // Streaming: a real TTFT.
         self.prom.record_ttft(
             &record.model,
             record.qos.as_label(),
@@ -1030,13 +876,8 @@ impl KinferenceService {
 
     /// Drop a `PendingObservation` without writing a CSV row.
     ///
-    /// Used when a request dies without
-    /// ever delivering a first ResponseBody chunk (upstream errored,
-    /// TCP reset, etc.) we still need to clear inflight + inflight-
-    /// prefix bookkeeping so the worker isn't held in the "occupied"
-    /// state forever — but writing a CSV row with `observed_ms=0`
-    /// would poison the observability surfaces with bogus residuals.
-    /// Returns `true` if a record was found and cleaned up.
+    /// For a request that died before its first token: release the inflight
+    /// state, but write no row. Returns `true` if a record was found.
     pub(crate) fn abort_observation(&self, request_id: u64) -> bool {
         let Some(record) = self.pending_observations.take(request_id) else {
             return false;
@@ -1057,17 +898,12 @@ impl KinferenceService {
     /// Release everything held for `response_id` because the request will never
     /// complete. Backs the `Abort` RPC.
     ///
-    /// Returns `(released, bytes_released)`. `released` is false only when
-    /// nothing was found — an unknown id, or a duplicate abort. Never an error:
-    /// the proto requires `Abort` to be idempotent and to not fail with
-    /// `NOT_FOUND` for an already-released target.
+    /// Returns `(released, bytes_released)`. `released` is false only for an
+    /// unknown id or a duplicate abort; never an error, since `Abort` is
+    /// idempotent.
     ///
-    /// Un-counting the inflight dispatch is the load-bearing part. Freeing the
-    /// body just returns memory; leaving the dispatch counted makes the endpoint
-    /// look permanently loaded and quietly skews every later pick. We do it for
-    /// BOTH abort reasons — the proto mandates it for `NOT_DISPATCHED`, but
-    /// after `PULL_FAILED` no `ReportFirstToken` is coming either, so not
-    /// releasing would leak until the TTL.
+    /// Releases the inflight dispatch for both abort reasons, since after
+    /// `PULL_FAILED` no `ReportFirstToken` is coming either.
     pub(crate) fn abort_request(&self, response_id: u64) -> (bool, u64) {
         let (body_released, bytes) = self.body_store.abort(response_id);
         let obs_released = self.abort_observation(response_id);
@@ -1075,28 +911,21 @@ impl KinferenceService {
         (body_released || obs_released, bytes)
     }
 
-    /// Reclaim buffered bodies past their TTL. Separate from the observation
-    /// sweep because the TTLs differ by an order of magnitude (bodies are big
-    /// and short-lived; observations are small and outlive a long generation).
-    /// Returns `(entries, bytes)` freed.
+    /// Reclaim buffered bodies past their TTL, which is much shorter than the
+    /// observation TTL. Returns `(entries, bytes)` freed.
     pub(crate) fn sweep_expired_bodies(&self) -> (usize, u64) {
         self.body_store.take_expired()
     }
 
-    /// Evict pending observations past the TTL, releasing each one's
-    /// inflight + inflight-prefix state (exactly as `abort_observation`
-    /// would). This is the backstop for picks whose caller never reports —
-    /// notably a legitimately long NON-streaming request that outran the
-    /// TTL. Dropping the entries without this per-record release would
-    /// silently leak the workers' inflight counts. Returns the number
-    /// evicted. Called periodically from the sweep task in `main`.
+    /// Evict pending observations past the TTL, releasing each one's inflight
+    /// state as `abort_observation` would. The backstop for callers that never
+    /// report. Returns the number evicted.
     pub(crate) fn sweep_expired_observations(&self) -> usize {
         let evicted = self.pending_observations.take_expired();
         for record in &evicted {
             self.release_inflight_state(record);
         }
-        // Backstop-drop request-label entries whose ReportFinalToken never
-        // arrived (nothing inflight is tied to these).
+        // Request labels whose ReportFinalToken never arrived.
         self.request_labels.take_expired();
         evicted.len()
     }
