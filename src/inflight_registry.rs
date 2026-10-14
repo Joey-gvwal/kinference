@@ -1,22 +1,11 @@
-//! Per-endpoint shadow counter of picks that haven't yet been
-//! observed as first-token (TTFT). Shared by both the gRPC and
-//! pick path via `KinferenceService`.
+//! Per-endpoint count of picks not yet observed as first-token.
 //!
-//! Why this exists: scraped per-worker metrics in `MetricsRegistry`
-//! lag by up to 1s + scrape latency. During request bursts the
-//! picker can make 3+ picks before a scrape catches up to even the
-//! first one. With multiple workers tied at the top of predicted-wait
-//! (very common), uniform-random pool selection produces statistical
-//! streaks that pile all picks on the same worker. This registry
-//! tracks our own contribution to per-worker queue depth so the
-//! picker can blend it with scraped metrics and break those streaks.
+//! Scraped metrics lag, so during a burst several picks can land before a
+//! scrape reflects the first. The picker uses this count to break ties and
+//! avoid piling a burst onto one worker.
 //!
-//! Keyed by `endpoint` (the `host:port` string) — that identifier is
-//! already on every `WorkerScore` so no plumbing of numeric worker
-//! IDs through the picker is needed. Pod-IP churn across worker
-//! restarts naturally orphans old entries: a count for a dead
-//! endpoint just costs an unused map slot, and new endpoints start
-//! clean.
+//! Keyed by `endpoint` (`host:port`), which every `WorkerScore` carries. A
+//! dead endpoint's entry just becomes an unused map slot.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -32,26 +21,19 @@ impl InflightRegistry {
         Self::default()
     }
 
-    /// Bump the in-flight count for an endpoint. Called immediately
-    /// after a successful pick in `decide()`.
+    /// Bump the in-flight count for an endpoint, after a pick.
     pub fn inc(&self, endpoint: &str) {
-        // `entry().or_insert_with(...)` ensures the AtomicU32 exists,
-        // then we bump it. DashMap's per-shard locking keeps this
-        // O(1) and contention-free across distinct endpoints.
         self.counts
             .entry(endpoint.to_string())
             .or_insert_with(|| AtomicU32::new(0))
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement the in-flight count for an endpoint, saturating at
-    /// zero (no underflow). Called at first ResponseBody (TTFT
-    /// observation) or at stream EOF as a fallback when the request
-    /// never produced a first token.
+    /// Decrement the in-flight count for an endpoint, saturating at zero.
+    /// Called when the pick's observation is released.
     pub fn dec(&self, endpoint: &str) {
         if let Some(entry) = self.counts.get(endpoint) {
-            // `compare_exchange` loop to saturate at 0. Avoids the
-            // race where `fetch_sub` would wrap from 0 → u32::MAX.
+            // Saturate at 0, where `fetch_sub` would wrap.
             let atom = entry.value();
             loop {
                 let current = atom.load(Ordering::Relaxed);
@@ -73,8 +55,7 @@ impl InflightRegistry {
         }
     }
 
-    /// Current in-flight count for an endpoint. Returns 0 if the
-    /// endpoint has never been seen (no entry in the map).
+    /// Current in-flight count for an endpoint; 0 if never seen.
     pub fn get(&self, endpoint: &str) -> u32 {
         self.counts
             .get(endpoint)

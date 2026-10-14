@@ -5,14 +5,8 @@ fn cfg(name: &str, block_size: u32) -> PoolSpec {
     crate::config::test_spec(name, block_size)
 }
 
-/// Dropping one pool must not disturb the process or its siblings.
-///
-/// `KvIndexer` keeps whatever `CancellationToken` it is constructed with and
-/// cancels that token in `Drop`. This used to be the PROCESS token, so
-/// dropping any pool would have cancelled the token every other subsystem
-/// selects on — the gRPC server, discovery, ingest, the sweeps — i.e. a
-/// single pool teardown would shut the whole process down. Nothing drops a
-/// pool yet, so it was latent; dynamic pools make it live.
+/// Dropping one pool doesn't disturb the process or its siblings, although
+/// `KvIndexer` cancels its token in `Drop`.
 #[tokio::test]
 async fn dropping_a_pool_cancels_only_that_pool() {
     let process = CancellationToken::new();
@@ -33,8 +27,7 @@ async fn dropping_a_pool_cancels_only_that_pool() {
         "the dropped pool's own token should be cancelled by KvIndexer::drop"
     );
 
-    // The sibling's indexer is still live and answering, not merely
-    // uncancelled — this is what a pick would do next.
+    // The sibling's indexer still answers, not merely uncancelled.
     b.indexer
         .find_matches(Vec::new())
         .await
@@ -44,11 +37,6 @@ async fn dropping_a_pool_cancels_only_that_pool() {
 /// Ids are never recycled, so a handle that outlives its pool resolves to
 /// nothing rather than to whoever took its place.
 ///
-/// This is the property the whole opaque-id change exists for. When PoolId
-/// was a `Vec` index, a freed slot could be reused — and a stale id would
-/// then silently decrement another pool's inflight counter, route a model
-/// to an unrelated worker set, or publish one pool's endpoint counts into
-/// another's CRD status. All of that with no error anywhere.
 #[tokio::test]
 async fn a_stale_id_resolves_to_nothing_rather_than_to_another_pool() {
     let process = CancellationToken::new();
@@ -73,17 +61,8 @@ async fn a_stale_id_resolves_to_nothing_rather_than_to_another_pool() {
     assert!(registry.snapshot().get(replacement.id).is_some());
 }
 
-/// A snapshot taken before a change keeps serving the old view, so a reader
-/// mid-request never observes the set shifting under it.
-/// Publishing must WAKE consumers whose answer depends on the pool set but
-/// whose own inputs did not change.
-///
-/// Policy resolution is the case that matters: it runs on CRD watch events,
-/// but whether a destination resolves also depends on which pools exist. A
-/// pool created just after the last CRD event would otherwise leave that
-/// destination reported unresolved indefinitely, while the router routed to
-/// it perfectly well — status contradicting reality, which is worse than
-/// either being wrong alone.
+/// Publishing wakes consumers, such as policy resolution, whose answer
+/// depends on the pool set even when their own inputs didn't change.
 #[tokio::test]
 async fn publishing_wakes_subscribers() {
     let registry = PoolRegistry::new();
@@ -94,12 +73,13 @@ async fn publishing_wakes_subscribers() {
     assert!(rx.has_changed().unwrap(), "a publish must be observable");
     rx.borrow_and_update();
 
-    // Including a publish that EMPTIES the set — a retirement has to reach
-    // status just as much as a creation does.
+    // Including a publish that empties the set.
     registry.publish(Arc::new(PoolMap::from_pools(Vec::new())));
     assert!(rx.has_changed().unwrap());
 }
 
+/// A snapshot taken before a change keeps serving the old view, so a reader
+/// mid-request never sees the set shift.
 #[tokio::test]
 async fn an_existing_snapshot_is_unaffected_by_a_later_publish() {
     let process = CancellationToken::new();
@@ -116,15 +96,9 @@ async fn an_existing_snapshot_is_unaffected_by_a_later_publish() {
 
 /// A pick's inflight bookkeeping survives its pool being destroyed.
 ///
-/// The release path used to resolve `PendingObservation.pool_id` through
-/// the fleet — up to `observation_ttl` (600s) after the pick. Carrying the
-/// two handles instead makes it total: the pool stays alive exactly as long
-/// as a pending observation still needs it, enforced by `Arc` rather than by
-/// a retention window someone has to tune.
-///
-/// `release_inflight_state` itself is private, so this exercises the
-/// property it depends on: the handles keep working, and keep the pool
-/// alive, after the fleet has dropped it.
+/// `release_inflight_state` is private, so this checks what it relies on: the
+/// handles on the observation record keep working after the fleet drops the
+/// pool.
 #[tokio::test]
 async fn inflight_handles_outlive_their_pool() {
     let process = CancellationToken::new();
@@ -148,12 +122,8 @@ async fn inflight_handles_outlive_their_pool() {
         0,
         "the decrement must reach the pool the pick was made against"
     );
-    // And note what it does NOT do: the handles hold the two registries,
-    // not the pool, so the pool itself was reclaimed the moment the fleet
-    // dropped it — OS thread, radix tree and all. Only two small maps
-    // outlive it, for as long as an observation still needs them. Holding
-    // an `Arc<Pool>` on the record instead would have pinned a whole
-    // indexer thread per stray observation for up to `observation_ttl`.
+    // The handles hold the two registries, not the pool, so the pool itself
+    // (indexer thread and radix tree) was reclaimed when the fleet dropped it.
     assert!(
         pool_token.is_cancelled(),
         "the pool is reclaimed promptly; only the inflight maps linger"
@@ -162,8 +132,8 @@ async fn inflight_handles_outlive_their_pool() {
     drop(handles);
 }
 
-/// Process shutdown must still reach every pool: `child_token` propagates
-/// parent → child, so this is one-way isolation, not disconnection.
+/// Process shutdown still reaches every pool: `child_token` propagates from
+/// parent to child.
 #[tokio::test]
 async fn cancelling_the_process_cancels_every_pool() {
     let process = CancellationToken::new();
