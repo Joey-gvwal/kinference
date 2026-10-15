@@ -198,7 +198,8 @@ impl Picker for MockKinferenceService {
         let outbound = {
             let mut obj: serde_json::Value =
                 serde_json::from_slice(&pushed).unwrap_or(serde_json::Value::Null);
-            if crate::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref()) {
+            if crate::router::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref())
+            {
                 Arc::new(serde_json::to_vec(&obj).unwrap_or_default())
             } else {
                 pushed.clone()

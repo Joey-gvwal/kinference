@@ -16,7 +16,7 @@ impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
     ///    inputs. Resolve the `"auto"` pseudo-model to a concrete model,
-    ///    then apply the Pick-time body rewrites (`crate::pick_body`):
+    ///    then apply the Pick-time body rewrites (`crate::router::pick_body`):
     ///    model="auto" → concrete, and `stream_options.include_usage` for
     ///    streaming requests.
     /// 2. Call `score_workers` (which tokenizes + queries the indexer),
@@ -45,7 +45,7 @@ impl KinferenceService {
             .unwrap_or_else(|| request_id.to_string());
 
         // 1. Parse the body into a JSON tree, rewritten in place (see
-        //    `crate::pick_body`). Not a typed struct, which would drop unknown
+        //    `crate::router::pick_body`). Not a typed struct, which would drop unknown
         //    fields.
         let mut obj: serde_json::Value = match serde_json::from_slice(body) {
             Ok(v) => v,
@@ -150,11 +150,12 @@ impl KinferenceService {
         //     and stream_options.include_usage for streaming requests). When
         //     something changed, the re-serialized bytes are both sent to
         //     /render and returned; otherwise `wire_body` is empty.
-        let mutated = crate::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
+        let mutated =
+            crate::router::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
         // Whether the first-byte report will be a real TTFT, for
         // `finalize_observation`. Uses the same coercion as the body rewrite;
-        // see [`crate::pick_body::stream_flag`].
-        let streaming = crate::pick_body::stream_flag(&obj);
+        // see [`crate::router::pick_body::stream_flag`].
+        let streaming = crate::router::pick_body::stream_flag(&obj);
         // For `maxTokens` predicates and context-window fitting.
         let parsed_max_tokens = obj.get("max_tokens").and_then(serde_json::Value::as_i64);
         let outbound = if mutated {
@@ -366,7 +367,7 @@ impl KinferenceService {
                         &wire_body
                     };
                     let Some(rewritten) =
-                        crate::pick_body::rewrite_model(base, &pick.upstream_model)
+                        crate::router::pick_body::rewrite_model(base, &pick.upstream_model)
                     else {
                         tracing::error!(
                             req = %req_label,
@@ -432,7 +433,7 @@ impl KinferenceService {
                         } else {
                             &wire_body
                         };
-                        match crate::pick_body::rewrite_model(base, &model) {
+                        match crate::router::pick_body::rewrite_model(base, &model) {
                             Some(rewritten) => {
                                 tracing::debug!(
                                     req = %req_label,

@@ -781,7 +781,7 @@ pub(crate) enum PickAndRecordOutcome {
         endpoint: String,
         response_id: u64,
         /// Rewritten request body, or empty when unchanged, in which case
-        /// `grpc::pick` reuses the pushed body. See [`crate::pick_body`].
+        /// `grpc::pick` reuses the pushed body. See [`crate::router::pick_body`].
         body: Vec<u8>,
         /// The model this request resolved to (post-`auto`). Surfaced as
         /// `PickResponse.requested_model`.

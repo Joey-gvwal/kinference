@@ -14,7 +14,6 @@ mod local_tokenize;
 mod metrics;
 mod mock;
 mod observations;
-mod pick_body;
 mod policy;
 mod proto;
 mod router;
