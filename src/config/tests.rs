@@ -1,7 +1,7 @@
 use super::*;
 use crate::metrics::TenantLabels;
 use crate::router::picker::{PickerConfig, PredictorConfig};
-use crate::tokenize::TokenizeMode;
+use crate::router::tokenize::TokenizeMode;
 
 #[test]
 fn config_without_worker_sets_fails_validate() {

@@ -40,7 +40,7 @@ use dashmap::DashMap;
 use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
 
-use crate::tokenize::TokenizeInput;
+use crate::router::tokenize::TokenizeInput;
 
 /// `[tokenize.local]`. See `src/local_tokenize.rs`.
 #[allow(dead_code)]
@@ -297,7 +297,7 @@ impl LocalTokenizerRegistry {
 ///
 /// Values in `chat_kwargs` are JSON-parsed (`"false"` becomes `false`),
 /// falling back to literal strings, as the HTTP body builder in
-/// `src/tokenize.rs` does, so both render the same prompt.
+/// `src/router/tokenize.rs` does, so both render the same prompt.
 fn render_chat_template(
     template: &str,
     messages: &[serde_json::Value],

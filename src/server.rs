@@ -758,12 +758,15 @@ fn handle_added(
     let indexer = &pool.indexer;
     let inflight_prefixes = &pool.inflight_prefixes;
     // Warm up only for pools using the in-process tokenizer (Local/Compare).
-    let warmup_tokenizer =
-        if warmup_enabled && !matches!(pool.tokenize_mode, crate::tokenize::TokenizeMode::Render) {
-            local_tokenizer
-        } else {
-            None
-        };
+    let warmup_tokenizer = if warmup_enabled
+        && !matches!(
+            pool.tokenize_mode,
+            crate::router::tokenize::TokenizeMode::Render
+        ) {
+        local_tokenizer
+    } else {
+        None
+    };
     tracing::info!(
         pool = pool.name,
         worker_id = w.worker_id_str,

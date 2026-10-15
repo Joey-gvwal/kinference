@@ -21,7 +21,7 @@ use crate::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
-use crate::tokenize::TokenizeInput;
+use crate::router::tokenize::TokenizeInput;
 
 /// Quality-of-service class for a request, mapped from the proto
 /// `PickRequest.QosClass`. Used as the `qos` label on `/metrics` series.
@@ -742,7 +742,7 @@ pub(crate) fn release_models(
 
 /// OpenAI ChatCompletionRequest fields beyond `messages` that local
 /// chat-template rendering needs to match the engine's tokens. Ends up in
-/// [`crate::tokenize::TokenizeInput::Chat`].
+/// [`crate::router::tokenize::TokenizeInput::Chat`].
 ///
 /// The default has no tools and `add_generation_prompt = true`, the OpenAI
 /// default.
