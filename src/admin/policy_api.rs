@@ -40,8 +40,8 @@ use tokio::sync::Semaphore;
 
 use crate::fleet::pool::PoolRegistry;
 use crate::fleet::scrape::MetricsRegistry;
-use crate::picker::{self, WorkerScore};
 use crate::policy::store::PolicyStore;
+use crate::router::picker::{self, WorkerScore};
 
 // ── limits ───────────────────────────────────────────────────────────────────
 

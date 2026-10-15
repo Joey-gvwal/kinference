@@ -1,6 +1,6 @@
 use super::*;
-use crate::picker::WorkerScore;
-use crate::picker::predicted_wait_ms;
+use crate::router::picker::WorkerScore;
+use crate::router::picker::predicted_wait_ms;
 
 fn synthetic_record() -> PendingObservation {
     let worker = WorkerScore {

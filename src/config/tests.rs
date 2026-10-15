@@ -1,6 +1,6 @@
 use super::*;
 use crate::metrics::TenantLabels;
-use crate::picker::{PickerConfig, PredictorConfig};
+use crate::router::picker::{PickerConfig, PredictorConfig};
 use crate::tokenize::TokenizeMode;
 
 #[test]

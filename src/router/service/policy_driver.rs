@@ -390,9 +390,13 @@ impl KinferenceService {
                     .iter()
                     .map(|d| d.summary())
                     .collect();
-                let predicted =
-                    crate::picker::predicted_wait_ms(s, &group.pool.predictor, &summaries, now)
-                        .total_ms();
+                let predicted = crate::router::picker::predicted_wait_ms(
+                    s,
+                    &group.pool.predictor,
+                    &summaries,
+                    now,
+                )
+                .total_ms();
                 // Recorded for every candidate, as a `predictedTTFT` threshold
                 // applies to every candidate; winners only would bias it low.
                 self.prom

@@ -554,7 +554,7 @@ impl KinferenceService {
                             if position > capacity {
                                 return 0.0;
                             }
-                            let est = crate::picker::prefill_ms_for(
+                            let est = crate::router::picker::prefill_ms_for(
                                 predictor_cfg,
                                 d.uncached_at_dispatch,
                                 d.total_at_dispatch,
@@ -573,11 +573,11 @@ impl KinferenceService {
                 .collect();
 
             for (i, s) in scores.iter_mut().enumerate() {
-                let scaled = crate::picker::scale_per_dispatch_by_progress(
+                let scaled = crate::router::picker::scale_per_dispatch_by_progress(
                     &per_worker_dispatch_overlap[i],
                     &per_worker_dispatch_progress[i],
                 );
-                let layered = crate::picker::compute_layered_overlap(
+                let layered = crate::router::picker::compute_layered_overlap(
                     &scaled,
                     kv_blocks_per_worker[i] as f32,
                     expected_overlap_alpha,
@@ -586,35 +586,34 @@ impl KinferenceService {
             }
 
             // The policy already chose, in step 2c.
-            let forced_pick =
-                forced_endpoint.as_deref().and_then(|ep| {
-                    let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
-                        crate::picker::PickResult {
-                            worker: w,
-                            replication_fired: false,
-                        }
-                    });
-                    if found.is_none() {
-                        // Should be unreachable, since the endpoint came from
-                        // this group's scores. Warn, since the decision counter
-                        // already recorded `chosen`.
-                        tracing::warn!(
-                            req = %req_label,
-                            model = %model,
-                            worker_set = %pool.name,
-                            endpoint = %ep,
-                            n_scored = scores.len(),
-                            "pick: policy chose an endpoint absent from the scored set; \
-                             falling back to the picker"
-                        );
-                        self.prom.record_policy_decision("forced_endpoint_missing");
+            let forced_pick = forced_endpoint.as_deref().and_then(|ep| {
+                let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
+                    crate::router::picker::PickResult {
+                        worker: w,
+                        replication_fired: false,
                     }
-                    found
                 });
+                if found.is_none() {
+                    // Should be unreachable, since the endpoint came from
+                    // this group's scores. Warn, since the decision counter
+                    // already recorded `chosen`.
+                    tracing::warn!(
+                        req = %req_label,
+                        model = %model,
+                        worker_set = %pool.name,
+                        endpoint = %ep,
+                        n_scored = scores.len(),
+                        "pick: policy chose an endpoint absent from the scored set; \
+                         falling back to the picker"
+                    );
+                    self.prom.record_policy_decision("forced_endpoint_missing");
+                }
+                found
+            });
 
             let pick_result = match forced_pick {
                 Some(r) => r,
-                None => match crate::picker::pick_endpoint(
+                None => match crate::router::picker::pick_endpoint(
                     &scores,
                     predictor_cfg,
                     picker_cfg,
@@ -645,7 +644,7 @@ impl KinferenceService {
                 tracing::debug!(
                     "pick: score table for req={}\n{}",
                     req_label,
-                    crate::picker::format_score_table(
+                    crate::router::picker::format_score_table(
                         &scores,
                         predictor_cfg,
                         picker_cfg,
@@ -675,7 +674,7 @@ impl KinferenceService {
             let chosen_kv_blocks = kv_blocks_per_worker[chosen_idx];
             let chosen_workload: &[crate::fleet::inflight::InflightSummary] =
                 &inflight_workload_per_worker[chosen_idx];
-            let chosen_q_breakdown = crate::picker::compute_queue_cost(
+            let chosen_q_breakdown = crate::router::picker::compute_queue_cost(
                 chosen,
                 predictor_cfg,
                 chosen_workload,
@@ -685,8 +684,12 @@ impl KinferenceService {
                 .iter()
                 .map(|f| *f as u32)
                 .collect();
-            let prediction =
-                crate::picker::predicted_wait_ms(chosen, predictor_cfg, chosen_workload, score_now);
+            let prediction = crate::router::picker::predicted_wait_ms(
+                chosen,
+                predictor_cfg,
+                chosen_workload,
+                score_now,
+            );
             // Prefix-cache outcome for the pick we actually made. Skipped when
             // the pick was degraded: a tokenize failure would look like a
             // genuine 0% cache hit, and a prefix-index failure can report

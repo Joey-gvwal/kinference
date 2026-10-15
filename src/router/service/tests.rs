@@ -621,7 +621,7 @@ fn primary(pool: &Arc<Pool>, model: &str, workers: &[(&str, u32)]) -> ScoredGrou
         model: model.into(),
         scores: workers
             .iter()
-            .map(|(addr, queued)| crate::picker::WorkerScore {
+            .map(|(addr, queued)| crate::router::picker::WorkerScore {
                 name: addr.to_string(),
                 endpoint: addr.to_string(),
                 matched_blocks: 0,

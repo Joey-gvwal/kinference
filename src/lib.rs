@@ -15,7 +15,6 @@ mod metrics;
 mod mock;
 mod observations;
 mod pick_body;
-mod picker;
 mod policy;
 mod proto;
 mod router;

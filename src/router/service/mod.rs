@@ -20,7 +20,7 @@ use crate::fleet::workers::WorkerEntry;
 use crate::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
-use crate::picker::WorkerScore;
+use crate::router::picker::WorkerScore;
 use crate::tokenize::TokenizeInput;
 
 /// Quality-of-service class for a request, mapped from the proto
@@ -637,7 +637,7 @@ pub(crate) fn first_served_upstream(
 /// Pick the pool a no-policy request should be served from.
 ///
 /// Each group is scored by its best endpoint under
-/// [`crate::picker::predicted_wait_ms`], the same term the policy path's
+/// [`crate::router::picker::predicted_wait_ms`], the same term the policy path's
 /// `candidates_for` uses.
 ///
 /// Only the pool is decided here; the endpoint is chosen afterwards under
@@ -668,9 +668,13 @@ fn best_group(
                     .iter()
                     .map(|d| d.summary())
                     .collect();
-                let ms =
-                    crate::picker::predicted_wait_ms(s, &group.pool.predictor, &summaries, now)
-                        .total_ms();
+                let ms = crate::router::picker::predicted_wait_ms(
+                    s,
+                    &group.pool.predictor,
+                    &summaries,
+                    now,
+                )
+                .total_ms();
                 // Every endpoint's prediction is recorded, as on the policy
                 // path.
                 if let Some(p) = prom {
