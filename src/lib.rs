@@ -8,7 +8,6 @@ mod admin;
 mod config;
 mod controller;
 mod fleet;
-mod leader;
 mod metrics;
 mod router;
 mod version;

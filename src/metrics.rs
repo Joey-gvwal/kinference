@@ -352,7 +352,7 @@ pub struct PromMetrics {
     /// `kinference_routed_requests_total{tenant,destination,type}`: which worker
     /// set or provider each tenant's traffic went to.
     routed_requests: IntCounterVec,
-    // --- Leader election. See `crate::leader`.
+    // --- Leader election. See `crate::controller::leader`.
     /// `kinference_leader`: 1 when this replica holds the Lease, else 0.
     ///
     /// Exactly one pod should report 1. None means election is broken or
