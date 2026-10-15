@@ -9,7 +9,6 @@ mod body_store;
 mod config;
 mod fleet;
 mod grpc;
-mod inflight;
 mod leader;
 mod local_tokenize;
 mod metrics;

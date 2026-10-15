@@ -33,8 +33,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::WorkerConfig;
 use crate::fleet::eviction::{EvictionReason, EvictionRequest, EvictionTx};
+use crate::fleet::inflight::InflightPrefixes;
 use crate::fleet::workers::WorkerRegistry;
-use crate::inflight::InflightPrefixes;
 use crate::metrics::{IngestEvent, PromMetrics};
 
 /// Per-recv DEALER timeout, keeping the replay loop responsive.

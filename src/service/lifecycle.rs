@@ -511,11 +511,11 @@ impl KinferenceService {
             let mut scores = scores;
             let kv_blocks_per_worker: Vec<u32> = scores.iter().map(|s| s.matched_blocks).collect();
             let expected_overlap_alpha = pool.predictor.expected_overlap_alpha;
-            let dispatches_per_worker: Vec<Vec<crate::inflight::DispatchSnapshot>> = scores
+            let dispatches_per_worker: Vec<Vec<crate::fleet::inflight::DispatchSnapshot>> = scores
                 .iter()
                 .map(|s| pool.inflight_prefixes.dispatches_for(&s.endpoint))
                 .collect();
-            let inflight_workload_per_worker: Vec<Vec<crate::inflight::InflightSummary>> =
+            let inflight_workload_per_worker: Vec<Vec<crate::fleet::inflight::InflightSummary>> =
                 dispatches_per_worker
                     .iter()
                     .map(|d| d.iter().map(|s| s.summary()).collect())
@@ -673,7 +673,7 @@ impl KinferenceService {
                 .expect("chosen worker must be in scores");
             let chosen_inflight = inflight_per_worker[chosen_idx];
             let chosen_kv_blocks = kv_blocks_per_worker[chosen_idx];
-            let chosen_workload: &[crate::inflight::InflightSummary] =
+            let chosen_workload: &[crate::fleet::inflight::InflightSummary] =
                 &inflight_workload_per_worker[chosen_idx];
             let chosen_q_breakdown = crate::picker::compute_queue_cost(
                 chosen,

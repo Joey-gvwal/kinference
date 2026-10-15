@@ -23,8 +23,8 @@ fn synthetic_record() -> PendingObservation {
         workerset: "set-a".to_string(),
         profile: "h100-tp2".to_string(),
         inflight: InflightHandles {
-            inflight: std::sync::Arc::new(crate::inflight::InflightRegistry::new()),
-            prefixes: std::sync::Arc::new(crate::inflight::InflightPrefixes::new()),
+            inflight: std::sync::Arc::new(crate::fleet::inflight::InflightRegistry::new()),
+            prefixes: std::sync::Arc::new(crate::fleet::inflight::InflightPrefixes::new()),
         },
         picked_at: Instant::now(),
         chosen_worker: worker,

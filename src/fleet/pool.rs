@@ -36,8 +36,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::static_config::WorkersFile;
 use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
 use crate::fleet::workers::WorkerRegistry;
-use crate::inflight::{InflightPrefixes, InflightRegistry};
 use crate::picker::{PickerConfig, PredictorConfig};
 use crate::tokenize::TokenizeMode;
 
