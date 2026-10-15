@@ -21,10 +21,10 @@ use crate::fleet::discovery::{
 use crate::fleet::eviction;
 use crate::fleet::pool;
 use crate::fleet::pool::Pool;
+use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
-use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::service::KinferenceService;
 use crate::{
     admin, body_store, ingest, leader, local_tokenize, metrics, observations, policy, rollup,

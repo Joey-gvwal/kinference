@@ -446,7 +446,7 @@ fn worker_score_maps_each_input_to_its_own_field() {
         instance_type: None,
     };
     // Distinct values throughout, so any swap changes the assertion that fails.
-    let sample = crate::scrape::MetricsSample {
+    let sample = crate::fleet::scrape::MetricsSample {
         completion_rate_per_sec: 1.5,
         waiting: 11,
         running: 22,
@@ -704,7 +704,7 @@ async fn an_unscraped_worker_has_no_saturation_signals() {
     // Worker 2 was scraped and is idle; worker 1 never was.
     svc.metrics.record_sample_for_test(
         2,
-        crate::scrape::MetricsSample {
+        crate::fleet::scrape::MetricsSample {
             scraped_at: Some(Instant::now()),
             ..Default::default()
         },

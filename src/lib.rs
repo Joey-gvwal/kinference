@@ -21,7 +21,6 @@ mod picker;
 mod policy;
 mod proto;
 mod rollup;
-mod scrape;
 mod service;
 mod tokenize;
 mod tokenize_client;

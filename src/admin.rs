@@ -19,8 +19,8 @@ use axum::{
 use tokio_util::sync::CancellationToken;
 
 use crate::fleet::pool::PoolRegistry;
+use crate::fleet::scrape::MetricsRegistry;
 use crate::metrics::PromMetrics;
-use crate::scrape::MetricsRegistry;
 
 mod policy_api;
 

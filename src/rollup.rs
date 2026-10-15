@@ -14,8 +14,8 @@ use dynamo_kv_router::protocols::KvCacheEventData;
 use tokio_util::sync::CancellationToken;
 
 use crate::fleet::pool::PoolRegistry;
+use crate::fleet::scrape::MetricsRegistry;
 use crate::metrics::PromMetrics;
-use crate::scrape::MetricsRegistry;
 
 /// `dump_events` walks the whole tree, so the size gauges refresh every tenth
 /// tick rather than every tick.

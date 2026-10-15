@@ -4,4 +4,5 @@
 pub mod discovery;
 pub mod eviction;
 pub mod pool;
+pub mod scrape;
 pub mod workers;

@@ -1,7 +1,7 @@
 //! Prometheus exposition for kinference's own metrics, served on `GET /metrics`
 //! by the admin listener.
 //!
-//! Unrelated to `src/scrape.rs`, which scrapes each worker's `/metrics`.
+//! Unrelated to `src/fleet/scrape.rs`, which scrapes each worker's `/metrics`.
 //!
 //! `PromMetrics` owns one `Registry` plus the typed metric families for the
 //! request path, shared via `Arc`. A subsystem with its own directory should
