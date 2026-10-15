@@ -2,7 +2,7 @@ use super::*;
 use dynamo_kv_router::indexer::KvIndexerInterface;
 
 fn cfg(name: &str, block_size: u32) -> PoolSpec {
-    crate::pool::test_spec(name, block_size)
+    crate::fleet::pool::test_spec(name, block_size)
 }
 
 /// Dropping one pool doesn't disturb the process or its siblings, although
@@ -208,7 +208,7 @@ fn eager() -> ReapPolicy {
 }
 
 fn spec(name: &str, block_size: u32) -> PoolSpec {
-    crate::pool::test_spec(name, block_size)
+    crate::fleet::pool::test_spec(name, block_size)
 }
 
 fn worker_cfg(num: u64) -> crate::discovery::WorkerConfig {

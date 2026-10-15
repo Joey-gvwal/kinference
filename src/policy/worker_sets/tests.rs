@@ -1,6 +1,6 @@
 use super::*;
+use crate::fleet::pool::ProfileTokenizeConfig;
 use crate::picker::{PickerConfig, PredictorConfig};
-use crate::pool::ProfileTokenizeConfig;
 use crate::tokenize::TokenizeMode;
 use kinference_policy::crd::{InferenceWorkerSetSpec, KvEvents, ServiceRef};
 
@@ -488,18 +488,21 @@ fn the_desired_set_is_order_independent() {
 fn watcher_with(
     sets: &[InferenceWorkerSet],
     profiles: Vec<ProfileConfig>,
-) -> (WorkerSetWatcher, std::sync::Arc<crate::pool::PoolRegistry>) {
+) -> (
+    WorkerSetWatcher,
+    std::sync::Arc<crate::fleet::pool::PoolRegistry>,
+) {
     let (store, mut writer) = reflector::store::<InferenceWorkerSet>();
     for s in sets {
         writer.apply_watcher_event(&watcher::Event::Apply(s.clone()));
     }
-    let registry = crate::pool::PoolRegistry::new();
-    let manager = crate::pool::PoolManager::new(
+    let registry = crate::fleet::pool::PoolRegistry::new();
+    let manager = crate::fleet::pool::PoolManager::new(
         registry.clone(),
         std::sync::Arc::new(NoopHooks),
         CancellationToken::new(),
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-        crate::pool::ReapPolicy {
+        crate::fleet::pool::ReapPolicy {
             linger: Duration::ZERO,
             backstop: Duration::from_secs(600),
         },
@@ -524,15 +527,15 @@ fn watcher_with(
 }
 
 struct NoopHooks;
-impl crate::pool::PoolHooks for NoopHooks {
+impl crate::fleet::pool::PoolHooks for NoopHooks {
     fn on_create(
         &self,
-        _pool: &std::sync::Arc<crate::pool::Pool>,
+        _pool: &std::sync::Arc<crate::fleet::pool::Pool>,
         _spec: &PoolSpec,
     ) -> anyhow::Result<()> {
         Ok(())
     }
-    fn on_retire(&self, _pool: &std::sync::Arc<crate::pool::Pool>) {}
+    fn on_retire(&self, _pool: &std::sync::Arc<crate::fleet::pool::Pool>) {}
 }
 
 #[tokio::test]

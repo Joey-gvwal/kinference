@@ -34,7 +34,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::store::PolicyStore;
-use crate::pool::Pool;
+use crate::fleet::pool::Pool;
 use crate::scrape::MetricsRegistry;
 
 /// The controller identity written into `status.parents[].controllerName`.
@@ -851,7 +851,7 @@ fn cache_key(kind: &'static str, ns: &str, name: &str, uid: Option<&str>) -> Cac
 pub struct StatusWriter {
     client: kube::Client,
     store: Arc<PolicyStore>,
-    pools: Arc<crate::pool::PoolRegistry>,
+    pools: Arc<crate::fleet::pool::PoolRegistry>,
     /// Worker sets that produced no pool, which appear in no `PolicyIndex`.
     rejections: Arc<super::worker_sets::RejectionStore>,
     metrics: Arc<MetricsRegistry>,
@@ -875,7 +875,7 @@ impl StatusWriter {
     pub fn new(
         client: kube::Client,
         store: Arc<PolicyStore>,
-        pools: Arc<crate::pool::PoolRegistry>,
+        pools: Arc<crate::fleet::pool::PoolRegistry>,
         rejections: Arc<super::worker_sets::RejectionStore>,
         metrics: Arc<MetricsRegistry>,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
@@ -1212,7 +1212,7 @@ impl StatusWriter {
 pub async fn spawn(
     namespace_hint: Option<&str>,
     store: Arc<PolicyStore>,
-    pools: Arc<crate::pool::PoolRegistry>,
+    pools: Arc<crate::fleet::pool::PoolRegistry>,
     rejections: Arc<super::worker_sets::RejectionStore>,
     metrics: Arc<MetricsRegistry>,
     provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,

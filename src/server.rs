@@ -18,15 +18,16 @@ use crate::discovery::{
     Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
     static_config::StaticDiscovery,
 };
+use crate::fleet::pool;
+use crate::fleet::pool::Pool;
 use crate::mock::MockKinferenceService;
-use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
 use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::service::KinferenceService;
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
     admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observations, policy,
-    pool, rollup, version,
+    rollup, version,
 };
 
 #[derive(Parser, Debug)]

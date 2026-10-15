@@ -38,9 +38,9 @@ use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
+use crate::fleet::pool::PoolRegistry;
 use crate::picker::{self, WorkerScore};
 use crate::policy::store::PolicyStore;
-use crate::pool::PoolRegistry;
 use crate::scrape::MetricsRegistry;
 
 // ── limits ───────────────────────────────────────────────────────────────────
@@ -960,7 +960,7 @@ fn predict(
     // none. Coefficients and block size differ per set. A synthesized worker
     // belongs to no set, so it borrows one, reported as `Borrowed`.
     let map = st.pools.snapshot();
-    let found: Result<(Option<String>, Arc<crate::pool::Pool>), &'static str> = match pool {
+    let found: Result<(Option<String>, Arc<crate::fleet::pool::Pool>), &'static str> = match pool {
         None => Err("no pool selected, so no predictor to run; ranked as 0.0 ms"),
         Some(resolved) => {
             let own = resolved

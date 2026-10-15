@@ -8,12 +8,12 @@ use serde::Deserialize;
 
 use crate::discovery::static_config::WorkersFile;
 use crate::discovery::{DiscoveryConfig, DiscoveryMode};
+use crate::fleet::pool::{PoolSpec, ProfileConfig};
 use crate::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use crate::leader::{self, LeaderElectionConfig};
 use crate::metrics::MetricsConfig;
 use crate::policy::PolicyConfig;
 use crate::policy::worker_sets::KubernetesConfig;
-use crate::pool::{PoolSpec, ProfileConfig};
 use crate::tokenize_client::TokenizeConfig;
 
 #[allow(dead_code)]

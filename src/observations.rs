@@ -40,7 +40,7 @@ pub struct InflightHandles {
 }
 
 impl InflightHandles {
-    pub fn of(pool: &crate::pool::Pool) -> Self {
+    pub fn of(pool: &crate::fleet::pool::Pool) -> Self {
         Self {
             inflight: pool.inflight.clone(),
             prefixes: pool.inflight_prefixes.clone(),

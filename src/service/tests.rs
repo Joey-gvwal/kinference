@@ -84,7 +84,7 @@ fn releasing_one_of_two_pools_leaves_the_other_serving() {
     assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(1)]);
 }
 
-use crate::pool::test_pool;
+use crate::fleet::pool::test_pool;
 
 fn score(endpoint: &str, queue_waiting: u32) -> WorkerScore {
     WorkerScore {
@@ -525,14 +525,14 @@ fn policy_fleet_with(
     Vec<Arc<Pool>>,
 ) {
     let metrics = Arc::new(MetricsRegistry::new());
-    let registry = crate::pool::PoolRegistry::new();
+    let registry = crate::fleet::pool::PoolRegistry::new();
     let (mut live, mut worker_sets, mut dests) = (Vec::new(), Vec::new(), Vec::new());
     let mut bound = std::collections::BTreeMap::new();
     let mut id = 0;
     for (name, model, addrs) in sets {
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
-        let mut spec = crate::pool::test_spec(name, 16);
+        let mut spec = crate::fleet::pool::test_spec(name, 16);
         spec.key = kinference_policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(
@@ -558,7 +558,9 @@ fn policy_fleet_with(
         dests.push(serde_json::json!({"kind": "InferenceWorkerSet", "name": name}));
         live.push(p);
     }
-    registry.publish(Arc::new(crate::pool::PoolMap::from_pools(live.clone())));
+    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(
+        live.clone(),
+    )));
     let mut provs = Vec::new();
     for (name, models) in providers {
         provs.push(cr::<kinference_policy::crd::InferenceProvider>(

@@ -14,11 +14,11 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::{AUTO_MODEL, PoolId};
 
+use crate::fleet::pool::Pool;
 use crate::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::picker::WorkerScore;
-use crate::pool::Pool;
 use crate::scrape::MetricsRegistry;
 use crate::tokenize::TokenizeInput;
 use crate::workers::WorkerEntry;
@@ -315,7 +315,7 @@ pub struct KinferenceService {
     /// The pools this fleet manages. Each owns its own predictor, picker,
     /// block size, indexer and registry. Pools come and go, and the service is
     /// shared behind an `Arc`, so the set is swapped rather than edited.
-    pub(crate) pools: Arc<crate::pool::PoolRegistry>,
+    pub(crate) pools: Arc<crate::fleet::pool::PoolRegistry>,
     /// Model to serving pools, populated as workers report `/v1/models` (and
     /// seeded from static `model_name` hints). Read on the pick hot path.
     /// Several pools may serve one model; `pick_and_record` ranks across them.
@@ -363,7 +363,7 @@ pub struct KinferenceService {
 impl KinferenceService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pools: Arc<crate::pool::PoolRegistry>,
+        pools: Arc<crate::fleet::pool::PoolRegistry>,
         model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
         metrics: Arc<MetricsRegistry>,
         tokenize_client: Arc<reqwest::Client>,

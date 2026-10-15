@@ -1,7 +1,7 @@
 use super::*;
 use crate::workers::WorkerEntry;
 
-use crate::pool::test_pool as pool;
+use crate::fleet::pool::test_pool as pool;
 
 fn ready_entry() -> WorkerEntry {
     WorkerEntry {
@@ -50,9 +50,9 @@ async fn ready_with_no_pools_at_all() {
 #[tokio::test]
 async fn ready_with_pools_whose_workers_are_still_cold() {
     let registry = PoolRegistry::new();
-    registry.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![pool(
-        "cold",
-    )])));
+    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+        pool("cold"),
+    ])));
     let (status, body) = status_and_body(registry, None).await;
     assert_eq!(status, StatusCode::OK, "got: {body:?}");
     assert!(body.contains("worker sets: 1"), "got: {body:?}");
@@ -64,7 +64,7 @@ async fn the_body_counts_pools_with_ready_endpoints() {
     let registry = PoolRegistry::new();
     let p = pool("warm");
     p.registry.register(1, ready_entry());
-    registry.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![p])));
+    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![p])));
     let (status, body) = status_and_body(registry, None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("ready endpoints: 1"), "got: {body:?}");
@@ -450,7 +450,9 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
     entry.model_name_hint = Some("google/gemma-4-12B-it".into());
     live.registry.register(1, entry);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![live])));
+    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+        live,
+    ])));
 
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
@@ -572,7 +574,9 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
     entry.current_models = vec!["Qwen/Qwen2.5-32B-Instruct-AWQ".into()];
     live.registry.register(1, entry);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![live])));
+    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+        live,
+    ])));
 
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
@@ -700,11 +704,13 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
 
     // Two live pools with different block sizes, so `total_blocks` and the
     // prefill term differ for one prompt.
-    let big = crate::pool::test_pool_with_block_size("big-blocks", 256);
-    let small = crate::pool::test_pool_with_block_size("small-blocks", 16);
+    let big = crate::fleet::pool::test_pool_with_block_size("big-blocks", 256);
+    let small = crate::fleet::pool::test_pool_with_block_size("small-blocks", 16);
     let (big_id, small_id) = (big.id, small.id);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![big, small])));
+    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+        big, small,
+    ])));
 
     let mut by_key = std::collections::BTreeMap::new();
     for (name, id) in [("big-blocks", big_id), ("small-blocks", small_id)] {
@@ -1287,7 +1293,9 @@ fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> a
     entry.model_name_hint = Some("google/gemma-4-12B-it".into());
     live.registry.register(1, entry);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![live])));
+    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+        live,
+    ])));
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
         kinference_policy::PoolKey::namespaced("default", "gemma-4-12b"),
