@@ -14,8 +14,9 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::{AUTO_MODEL, PoolId};
 
-use crate::observation_sink::ObservationSink;
-use crate::observations::{PendingObservations, RequestLabels, RequestMeta, format_csv_row};
+use crate::observations::{
+    ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
+};
 use crate::picker::WorkerScore;
 use crate::pool::Pool;
 use crate::scrape::MetricsRegistry;

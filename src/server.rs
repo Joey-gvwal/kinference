@@ -25,8 +25,8 @@ use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup
 use crate::service::KinferenceService;
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
-    admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observation_sink,
-    observations, policy, pool, rollup, version,
+    admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observations, policy,
+    pool, rollup, version,
 };
 
 #[derive(Parser, Debug)]
@@ -498,7 +498,7 @@ pub async fn run() -> Result<()> {
 
         // The observation CSV sink is shared across pools; rows carry their
         // pool and config snapshot.
-        let observation_sink = Arc::new(observation_sink::ObservationSink::open(
+        let observation_sink = Arc::new(observations::ObservationSink::open(
             cfg.observations_csv.clone(),
         ));
 
