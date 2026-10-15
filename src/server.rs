@@ -25,8 +25,8 @@ use crate::proto::picker_server::PickerServer;
 use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
-    admin, body_store, eviction, ingest, leader, local_tokenize, observation_sink, observations,
-    policy, pool, pool_manager, prom, rollup, version,
+    admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observation_sink,
+    observations, policy, pool, pool_manager, rollup, version,
 };
 
 #[derive(Parser, Debug)]
@@ -133,7 +133,7 @@ pub async fn run() -> Result<()> {
         let metrics = Arc::new(MetricsRegistry::new());
         // Prometheus registry, shared by the gRPC handlers and the admin
         // listener's `/metrics`.
-        let prom = Arc::new(prom::PromMetrics::with_config(&cfg.metrics));
+        let prom = Arc::new(metrics::PromMetrics::with_config(&cfg.metrics));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
         let ingest_cfg = cfg.ingest;
@@ -739,7 +739,7 @@ fn handle_added(
     ingest_cfg: ingest::IngestConfig,
     warmup_enabled: bool,
     metrics: &Arc<MetricsRegistry>,
-    prom: &Arc<prom::PromMetrics>,
+    prom: &Arc<metrics::PromMetrics>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     parent_cancel: &CancellationToken,
     // Passed to the per-worker tasks only when this pool's tokenize mode

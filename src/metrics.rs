@@ -46,7 +46,7 @@ pub enum TenantLabels {
     #[default]
     None,
     /// Unbounded cardinality: about 91 series per (model, qos, tenant).
-    /// `crate::prom` warns at startup when set.
+    /// `crate::metrics` warns at startup when set.
     All,
     Allow(Vec<String>),
 }

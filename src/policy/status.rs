@@ -864,7 +864,7 @@ pub struct StatusWriter {
     /// Whether this replica may write. Always `true` when leader election is
     /// disabled.
     leader: watch::Receiver<bool>,
-    prom: Arc<crate::prom::PromMetrics>,
+    prom: Arc<crate::metrics::PromMetrics>,
     /// Policy warnings already logged, as `ns/name: warning`, so each is logged
     /// once when it first appears.
     warned: Mutex<HashSet<String>>,
@@ -880,7 +880,7 @@ impl StatusWriter {
         metrics: Arc<MetricsRegistry>,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         leader: watch::Receiver<bool>,
-        prom: Arc<crate::prom::PromMetrics>,
+        prom: Arc<crate::metrics::PromMetrics>,
     ) -> Self {
         Self {
             client,
@@ -1217,7 +1217,7 @@ pub async fn spawn(
     metrics: Arc<MetricsRegistry>,
     provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
     leader: watch::Receiver<bool>,
-    prom: Arc<crate::prom::PromMetrics>,
+    prom: Arc<crate::metrics::PromMetrics>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let _ = namespace_hint;

@@ -345,7 +345,7 @@ impl KinferenceService {
     /// in a spawned task.
     async fn compare_local_tokenize_inner(
         local_reg: &crate::local_tokenize::LocalTokenizerRegistry,
-        prom: &crate::prom::PromMetrics,
+        prom: &crate::metrics::PromMetrics,
         model: &str,
         input: &TokenizeInput,
         http_tokens: &[u32],

@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::metrics::PickOutcome;
 use crate::monitor::{KinferenceService, PickAndRecordOutcome, Qos};
-use crate::prom::PickOutcome;
 
 use crate::proto;
 use crate::proto::picker_server::Picker;

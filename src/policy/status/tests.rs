@@ -614,7 +614,7 @@ fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
         Arc::new(MetricsRegistry::new()),
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         rx,
-        Arc::new(crate::prom::PromMetrics::new()),
+        Arc::new(crate::metrics::PromMetrics::new()),
     );
     (w, tx)
 }
@@ -718,7 +718,7 @@ async fn demotion_withdraws_the_policy_warning_counts() {
 /// A follower's leader gauge is present at 0, not absent. `spawn` seeds it.
 #[test]
 fn leader_gauge_distinguishes_follower_from_absent() {
-    let prom = crate::prom::PromMetrics::new();
+    let prom = crate::metrics::PromMetrics::new();
     prom.set_leader(false);
     assert!(
         prom.render().contains("kinference_leader "),

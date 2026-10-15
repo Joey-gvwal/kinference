@@ -10,10 +10,10 @@ use crate::discovery::static_config::WorkersFile;
 use crate::discovery::{DiscoveryConfig, DiscoveryMode};
 use crate::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use crate::leader::{self, LeaderElectionConfig};
+use crate::metrics::MetricsConfig;
 use crate::policy::PolicyConfig;
 use crate::policy::worker_sets::KubernetesConfig;
 use crate::pool::{PoolSpec, ProfileConfig};
-use crate::prom::MetricsConfig;
 use crate::tokenize_client::TokenizeConfig;
 
 #[allow(dead_code)]
@@ -93,7 +93,7 @@ pub struct Config {
     pub tokenize: TokenizeConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
-    /// Labelling of the metrics kinference *publishes* (`crate::prom`). Not to
+    /// Labelling of the metrics kinference *publishes* (`crate::metrics`). Not to
     /// be confused with `metrics_poll_ms` and friends, which concern scraping
     /// the engines.
     #[serde(default)]

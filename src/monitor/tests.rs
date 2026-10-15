@@ -606,7 +606,7 @@ fn policy_fleet_with(
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         ttl,
         Arc::new(ObservationSink::open(None)),
-        Arc::new(crate::prom::PromMetrics::new()),
+        Arc::new(crate::metrics::PromMetrics::new()),
     );
     (svc, store, live)
 }

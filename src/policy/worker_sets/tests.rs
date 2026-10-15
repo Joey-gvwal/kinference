@@ -516,7 +516,7 @@ fn watcher_with(
             profiles,
             manager,
             RejectionStore::new(),
-            std::sync::Arc::new(crate::prom::PromMetrics::new()),
+            std::sync::Arc::new(crate::metrics::PromMetrics::new()),
         )
         .with_store(store),
         registry,
