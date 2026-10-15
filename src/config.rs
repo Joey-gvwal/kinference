@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,7 +23,8 @@ use crate::tokenize_client::TokenizeConfig;
 // or to `WorkerConfig`.
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub listen: String,
+    /// gRPC bind address.
+    pub listen: SocketAddr,
     /// Named bundles of routing tuning that worker sets reference by name.
     ///
     /// Part of a profile is calibrated against hardware and workload, so name
@@ -82,7 +84,7 @@ pub struct Config {
     /// HTTP bind address for the admin listener: `/readyz`, `/metrics` and `/api`.
     /// Unset disables them. Ignored in mock mode.
     #[serde(default)]
-    pub admin_listen: Option<String>,
+    pub admin_listen: Option<SocketAddr>,
     /// Answer with synthetic, deterministic scores: no KV ingest, no scrapes,
     /// no tokenization. The gRPC surface is unchanged.
     #[serde(default)]

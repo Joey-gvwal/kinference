@@ -44,6 +44,8 @@ struct Args {
 /// Parse the command line and run the server until it is told to stop.
 pub async fn run() -> Result<()> {
     // ANSI colors only on a TTY, and not with NO_COLOR (https://no-color.org).
+    // Read here, before the config file, because it configures the log
+    // subscriber; every other env var is read by `Config::load`.
     let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
         && std::env::var_os("NO_COLOR").is_none();
     tracing_subscriber::fmt()
@@ -57,7 +59,7 @@ pub async fn run() -> Result<()> {
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
 
-    let listen_addr: std::net::SocketAddr = cfg.listen.parse()?;
+    let listen_addr = cfg.listen;
     tracing::info!(
         version = version::VERSION,
         listen = %listen_addr,
@@ -456,10 +458,7 @@ pub async fn run() -> Result<()> {
         let policy_store_cell = cfg.policy.enabled.then(policy::store::PolicyStore::new);
 
         // Admin listener and the metrics rollup, when configured.
-        if let Some(addr_str) = &cfg.admin_listen {
-            let dash_addr: std::net::SocketAddr = addr_str
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid admin_listen `{addr_str}`: {e}"))?;
+        if let Some(dash_addr) = cfg.admin_listen {
             rollup::spawn(
                 pool_registry.clone(),
                 metrics.clone(),
