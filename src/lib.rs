@@ -11,7 +11,6 @@ mod grpc;
 mod leader;
 mod metrics;
 mod mock;
-mod observations;
 mod policy;
 mod proto;
 mod router;

@@ -29,8 +29,9 @@ use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
 use crate::router::body_store;
 use crate::router::local_tokenize;
+use crate::router::observations;
 use crate::router::service::KinferenceService;
-use crate::{admin, leader, metrics, observations, policy, version};
+use crate::{admin, leader, metrics, policy, version};
 
 #[derive(Parser, Debug)]
 #[command(

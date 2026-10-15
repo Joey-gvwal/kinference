@@ -10,7 +10,7 @@
 use std::time::Instant;
 
 use super::*;
-use crate::observations::PendingObservation;
+use crate::router::observations::PendingObservation;
 
 impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
@@ -715,7 +715,7 @@ impl KinferenceService {
                 request_id,
                 workerset: pool.name.clone(),
                 profile: pool.profile.clone(),
-                inflight: crate::observations::InflightHandles::of(&pool),
+                inflight: crate::router::observations::InflightHandles::of(&pool),
                 picked_at: score_now,
                 chosen_worker: chosen_clone,
                 prediction,

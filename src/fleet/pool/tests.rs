@@ -106,7 +106,7 @@ async fn inflight_handles_outlive_their_pool() {
     let pool_token = pool.cancel.clone();
 
     // What a pick stashes on its observation record.
-    let handles = crate::observations::InflightHandles::of(&pool);
+    let handles = crate::router::observations::InflightHandles::of(&pool);
     pool.inflight.inc("10.0.0.1:8000");
     assert_eq!(pool.inflight.get("10.0.0.1:8000"), 1);
 

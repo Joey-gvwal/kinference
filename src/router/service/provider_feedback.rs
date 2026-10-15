@@ -32,7 +32,7 @@ impl KinferenceService {
     ) {
         self.request_labels.insert(
             response_id,
-            crate::observations::RequestMeta {
+            crate::router::observations::RequestMeta {
                 // The model the body names, as for a local pick.
                 model: pick.upstream_model.clone(),
                 qos,

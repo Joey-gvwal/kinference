@@ -3,6 +3,7 @@
 
 pub mod body_store;
 pub mod local_tokenize;
+pub mod observations;
 pub mod pick_body;
 pub mod picker;
 pub mod service;

@@ -17,7 +17,7 @@ use kinference_policy::{AUTO_MODEL, PoolId};
 use crate::fleet::pool::Pool;
 use crate::fleet::scrape::MetricsRegistry;
 use crate::fleet::workers::WorkerEntry;
-use crate::observations::{
+use crate::router::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
