@@ -50,6 +50,10 @@ pub struct LeaderElectionConfig {
     /// Delay before retrying after an apiserver error or a lost race.
     #[serde(default = "default_lease_retry_secs")]
     pub retry_secs: u64,
+    /// This replica's `holderIdentity`, from `POD_NAME` at startup; see
+    /// [`identity`]. Not a file key.
+    #[serde(skip)]
+    pub identity: String,
 }
 
 impl Default for LeaderElectionConfig {
@@ -61,6 +65,7 @@ impl Default for LeaderElectionConfig {
             lease_duration_secs: default_lease_duration_secs(),
             renew_grace_secs: default_renew_grace_secs(),
             retry_secs: default_lease_retry_secs(),
+            identity: String::new(),
         }
     }
 }
@@ -349,6 +354,30 @@ fn millis_until(now: Timestamp, target: Timestamp) -> Duration {
 
 fn is_conflict(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(ae) if ae.code == 409)
+}
+
+/// This replica's `holderIdentity` on the Lease.
+///
+/// `pod_name` (`POD_NAME` from the downward API, as shown by `kubectl get
+/// pods`); else the hostname; else a random name.
+pub fn identity(pod_name: Option<String>) -> String {
+    if let Some(name) = pod_name
+        && !name.trim().is_empty()
+    {
+        return name;
+    }
+    if let Ok(host) = hostname()
+        && !host.trim().is_empty()
+    {
+        return host;
+    }
+    let mut b = [0u8; 8];
+    let _ = getrandom::getrandom(&mut b);
+    format!("kinference-{}", u64::from_le_bytes(b))
+}
+
+fn hostname() -> std::io::Result<String> {
+    std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string())
 }
 
 #[cfg(test)]

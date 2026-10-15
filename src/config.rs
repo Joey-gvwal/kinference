@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use kinference_policy::PoolKey;
@@ -6,7 +7,8 @@ use serde::Deserialize;
 
 use crate::discovery::static_config::WorkersFile;
 use crate::discovery::{DiscoveryConfig, DiscoveryMode};
-use crate::leader::LeaderElectionConfig;
+use crate::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
+use crate::leader::{self, LeaderElectionConfig};
 use crate::policy::PolicyConfig;
 use crate::policy::worker_sets::KubernetesConfig;
 use crate::pool::{PoolSpec, ProfileConfig};
@@ -100,6 +102,15 @@ pub struct Config {
     pub kubernetes: KubernetesConfig,
     #[serde(default)]
     pub leader_election: LeaderElectionConfig,
+    /// The ingest switches from the environment, plus the resolved
+    /// `replay_timeout_ms`. Filled by [`Self::read_env`]; not a file key.
+    #[serde(skip)]
+    pub ingest: IngestConfig,
+    /// `KINFERENCE_OBSERVATIONS_CSV`: where the predicted-vs-observed CSV sink
+    /// appends; unset disables it. Filled by [`Self::read_env`]; not a file
+    /// key.
+    #[serde(skip)]
+    pub observations_csv: Option<PathBuf>,
 }
 
 /// `[[workerset]]`: one declared worker set. The Kubernetes equivalent is an
@@ -160,7 +171,26 @@ impl Config {
             }
         }
         cfg.validate()?;
+        cfg.read_env();
         Ok(cfg)
+    }
+
+    /// Read the environment into the fields the file cannot set. This runs
+    /// once, here, so no subsystem reads `std::env` after startup.
+    fn read_env(&mut self) {
+        self.ingest = IngestConfig {
+            disabled: std::env::var("KINFERENCE_DISABLE_INGEST").is_ok(),
+            replay: std::env::var("KINFERENCE_ENABLE_REPLAY").is_ok(),
+            replay_timeout: self
+                .replay_timeout_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_REPLAY_TIMEOUT),
+        };
+        self.tokenize.local.hub_token = std::env::var("HUGGING_FACE_HUB_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        self.observations_csv = std::env::var_os("KINFERENCE_OBSERVATIONS_CSV").map(PathBuf::from);
+        self.leader_election.identity = leader::identity(std::env::var("POD_NAME").ok());
     }
 
     /// Reject leader-election timings that can't work. In particular,

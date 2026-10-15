@@ -40,6 +40,40 @@ use crate::workers::WorkerRegistry;
 /// Per-recv DEALER timeout, keeping the replay loop responsive.
 const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;
 
+/// Default wall-clock budget for one `replay_gap` call, when
+/// `replay_timeout_ms` is unset.
+pub const DEFAULT_REPLAY_TIMEOUT: Duration = Duration::from_millis(60_000);
+
+/// Ingest settings. The two switches come from the environment and the
+/// timeout from the top-level `replay_timeout_ms` key; `Config::load` fills
+/// all three once at startup.
+#[derive(Debug, Clone, Copy)]
+pub struct IngestConfig {
+    /// `KINFERENCE_DISABLE_INGEST`: a diagnostic switch that skips ZMQ ingest
+    /// entirely. Workers are still marked ready, but the radix tree stays
+    /// empty.
+    pub disabled: bool,
+    /// `KINFERENCE_ENABLE_REPLAY`: fetch event history over the DEALER socket
+    /// and recover gaps. Off by default because the replay loop contends with
+    /// tokenization for tail latency, and because replayed history can be
+    /// stale when the engine's KV cache was cleared without a restart,
+    /// producing phantom cache hits.
+    pub replay: bool,
+    /// Wall-clock budget for a single `replay_gap` call; events left
+    /// unreplayed are picked up by later gap detection.
+    pub replay_timeout: Duration,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            replay: false,
+            replay_timeout: DEFAULT_REPLAY_TIMEOUT,
+        }
+    }
+}
+
 /// Spawn the ingest listener for a single worker. `endpoint_key` is the
 /// worker's `score_addr`, the key into [`InflightPrefixes`]. `eviction_tx`
 /// lets the listener request eviction on a block_size mismatch.
@@ -47,7 +81,7 @@ const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;
 pub fn spawn_worker_listener(
     cfg: WorkerConfig,
     block_size: u32,
-    replay_timeout_ms: u64,
+    ingest: IngestConfig,
     endpoint_key: String,
     indexer: Arc<KvIndexer>,
     prom: Arc<PromMetrics>,
@@ -56,10 +90,7 @@ pub fn spawn_worker_listener(
     eviction_tx: EvictionTx,
     cancel: CancellationToken,
 ) {
-    // Diagnostic switch: `KINFERENCE_DISABLE_INGEST=1` skips ZMQ ingest
-    // entirely. Workers are still marked ready, but the radix tree stays
-    // empty.
-    if std::env::var("KINFERENCE_DISABLE_INGEST").is_ok() {
+    if ingest.disabled {
         tracing::warn!(
             worker_id = cfg.worker_id_str,
             "KINFERENCE_DISABLE_INGEST set — skipping ZMQ ingest. \
@@ -100,7 +131,6 @@ pub fn spawn_worker_listener(
         return;
     }
 
-    let replay_wall_budget = Duration::from_millis(replay_timeout_ms);
     tokio::spawn(async move {
         loop {
             if cancel.is_cancelled() {
@@ -109,7 +139,7 @@ pub fn spawn_worker_listener(
             if let Err(err) = run_listener(
                 &cfg,
                 block_size,
-                replay_wall_budget,
+                &ingest,
                 &endpoint_key,
                 indexer.clone(),
                 prom.clone(),
@@ -253,7 +283,7 @@ impl ReplayProgress {
 async fn run_listener(
     cfg: &WorkerConfig,
     block_size: u32,
-    replay_wall_budget: Duration,
+    ingest: &IngestConfig,
     endpoint_key: &str,
     indexer: Arc<KvIndexer>,
     prom: Arc<PromMetrics>,
@@ -264,6 +294,7 @@ async fn run_listener(
 ) -> Result<()> {
     let worker_id_num = cfg.worker_id_num;
     let worker_id_str = cfg.worker_id_str.clone();
+    let replay_wall_budget = ingest.replay_timeout;
 
     let live_endpoint = cfg
         .zmq_endpoint
@@ -272,13 +303,9 @@ async fn run_listener(
     let replay_endpoint = cfg.replay_endpoint.clone();
 
     let mut sub = ZmqSocket::sub(&live_endpoint, &worker_id_str)?;
-    // Replay is off unless `KINFERENCE_ENABLE_REPLAY=1`. Live ingest still
-    // flows, but history is never fetched and gaps aren't recovered. Off by
-    // default because the replay loop contends with tokenization for tail
-    // latency, and because replayed history can be stale when the engine's
-    // KV cache was cleared without a restart, producing phantom cache hits.
-    let enable_replay = std::env::var("KINFERENCE_ENABLE_REPLAY").is_ok();
-    let mut replay = if !enable_replay {
+    // With replay off, live ingest still flows, but history is never fetched
+    // and gaps aren't recovered.
+    let mut replay = if !ingest.replay {
         tracing::info!(
             worker_id = worker_id_str,
             "replay disabled by default; set KINFERENCE_ENABLE_REPLAY=1 to turn on. \
