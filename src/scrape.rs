@@ -381,7 +381,7 @@ pub fn spawn_one_shot_warmup(
     registry: Arc<MetricsRegistry>,
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
     local_tokenizer: Option<Arc<crate::local_tokenize::LocalTokenizerRegistry>>,
-    eviction_tx: crate::eviction::EvictionTx,
+    eviction_tx: crate::fleet::eviction::EvictionTx,
     model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
     pool_id: PoolId,
     pool_name: String,
@@ -463,9 +463,9 @@ pub fn spawn_one_shot_warmup(
                             ?observed,
                             "warmup: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
                         );
-                        let _ = eviction_tx.send(crate::eviction::EvictionRequest {
+                        let _ = eviction_tx.send(crate::fleet::eviction::EvictionRequest {
                             worker_id_num: cfg.worker_id_num,
-                            reason: crate::eviction::EvictionReason::ModelMismatch {
+                            reason: crate::fleet::eviction::EvictionReason::ModelMismatch {
                                 expected,
                                 observed,
                             },
@@ -522,7 +522,7 @@ pub fn spawn_metrics_poller(
     local_tokenizer: Option<Arc<crate::local_tokenize::LocalTokenizerRegistry>>,
     registry: Arc<MetricsRegistry>,
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
-    eviction_tx: crate::eviction::EvictionTx,
+    eviction_tx: crate::fleet::eviction::EvictionTx,
     cancel: CancellationToken,
     model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
     pool_id: PoolId,
@@ -647,9 +647,9 @@ pub fn spawn_metrics_poller(
                                     ?observed,
                                     "poller: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
                                 );
-                                let _ = eviction_tx.send(crate::eviction::EvictionRequest {
+                                let _ = eviction_tx.send(crate::fleet::eviction::EvictionRequest {
                                     worker_id_num: cfg.worker_id_num,
-                                    reason: crate::eviction::EvictionReason::ModelMismatch {
+                                    reason: crate::fleet::eviction::EvictionReason::ModelMismatch {
                                         expected,
                                         observed,
                                     },

@@ -7,7 +7,6 @@
 mod admin;
 mod body_store;
 mod config;
-mod eviction;
 mod fleet;
 mod grpc;
 mod inflight;

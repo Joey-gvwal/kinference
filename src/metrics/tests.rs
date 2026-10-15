@@ -1051,7 +1051,7 @@ fn worker_evictions_are_counted_by_reason() {
 /// which are unbounded.
 #[test]
 fn eviction_reason_labels_match_the_enum() {
-    use crate::eviction::EvictionReason as E;
+    use crate::fleet::eviction::EvictionReason as E;
     let all = [
         E::BlockSizeMismatch {
             expected: 256,
