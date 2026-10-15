@@ -2,6 +2,7 @@
 //! tokenizer, observations, gRPC and the mock.
 
 pub mod body_store;
+pub mod grpc;
 pub mod local_tokenize;
 pub mod observations;
 pub mod pick_body;

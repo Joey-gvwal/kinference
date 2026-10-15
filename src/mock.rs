@@ -98,7 +98,7 @@ impl Picker for MockKinferenceService {
         // over-budget rejection and the received-vs-declared check.
         let declared = request
             .metadata()
-            .get(crate::grpc::MD_DECLARED_LENGTH)
+            .get(crate::router::grpc::MD_DECLARED_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
         if let Some(declared) = declared {
@@ -108,7 +108,7 @@ impl Picker for MockKinferenceService {
         }
         let mut inbound = request.into_inner();
         let mut reservation = self.body_store.reservation();
-        let buf = crate::grpc::accumulate_body(
+        let buf = crate::router::grpc::accumulate_body(
             &mut inbound,
             &mut reservation,
             Duration::from_secs(30),

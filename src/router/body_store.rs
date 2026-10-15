@@ -24,7 +24,7 @@
 //!   `FAILED_PRECONDITION` rather than `NOT_FOUND`.
 //!
 //! This module returns `tonic::Status` directly; unlike `Pick`, these
-//! operations report failures as gRPC status codes (see `crate::grpc`).
+//! operations report failures as gRPC status codes (see `crate::router::grpc`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -133,7 +133,7 @@ const INDEX_EVENT_KINDS: [&str; 3] = ["stored", "removed", "cleared"];
 /// Source: [`crate::router::body_store::RejectReason::as_label`].
 const BODY_REJECT_REASONS: [&str; 3] = ["declared_too_large", "request_too_large", "server_full"];
 
-/// `kinference_body_aborted_total{reason}`. Source: `crate::grpc::abort_reason_label`.
+/// `kinference_body_aborted_total{reason}`. Source: `crate::router::grpc::abort_reason_label`.
 const BODY_ABORT_REASONS: [&str; 5] = [
     "unspecified",
     "not_dispatched",

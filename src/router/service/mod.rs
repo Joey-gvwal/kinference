@@ -1,5 +1,5 @@
 //! `KinferenceService`: the scoring and pick state behind the gRPC handlers in
-//! `crate::grpc`.
+//! `crate::router::grpc`.
 //!
 //! This module owns the service struct, `score_workers` (tokenize, query the
 //! indexer, assemble `WorkerScore` rows), and the value types passed through

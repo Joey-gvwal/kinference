@@ -30,7 +30,7 @@ fn registry_with_model(model: &str) -> Arc<WorkerRegistry> {
 /// Seed a pushed body and return its `stream_id`.
 ///
 /// Goes through the store, since `tonic::Streaming` can only be built by the
-/// transport layer. The drain loop is tested in `crate::grpc`.
+/// transport layer. The drain loop is tested in `crate::router::grpc`.
 async fn push(svc: &MockKinferenceService, body: &str) -> u64 {
     let mut r = svc.body_store.reservation();
     r.charge(body.len() as u64).expect("within budget");

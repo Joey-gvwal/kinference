@@ -7,7 +7,6 @@
 mod admin;
 mod config;
 mod fleet;
-mod grpc;
 mod leader;
 mod metrics;
 mod mock;
