@@ -1,0 +1,49 @@
+# Contributing
+
+These guidelines apply to everyone, whether you write the code yourself or
+with a coding agent. Agents get the same rules, in more detail, from
+[AGENTS.md](AGENTS.md).
+
+## Code comments
+
+Keep comments short. Comment only what the code can't say on its own: the
+*why* behind something non-obvious, such as invariants, locking and lifecycle
+rules, protocol quirks, performance choices and workarounds for upstream bugs.
+
+Don't write comments that:
+
+- Narrate history ("originally", "used to", "after the refactor"). That
+  belongs in commit messages and PR descriptions.
+- Restate what the code plainly does.
+- Argue for a design across several paragraphs.
+
+Doc comments state a brief contract; one or two sentences is usually enough.
+When you change code, update or delete the comments that describe it in the
+same change.
+
+## Commits
+
+PRs are merged with a merge commit, not squashed, so your commits land on
+`main` as you wrote them.
+
+- Make each commit one logical change: the feature or fix, its tests, docs
+  and unrelated small fixes go in separate commits when they make sense on
+  their own.
+- Every commit must build and pass tests, so `git bisect` keeps working.
+- Each message explains what that commit changes and why. Use an imperative
+  subject line under ~72 characters and wrap the body at 72.
+- Address review feedback with `git commit --fixup <sha>`, then run
+  `git rebase -i --autosquash` before merging. The final branch shouldn't
+  contain "address review" or "fix typo" commits.
+
+## Pull requests
+
+The PR title and description become the merge commit message, so write them
+for someone reading `git log`, not just for reviewers:
+
+- Title: a short summary of the whole change.
+- Description: the overall why and what, and anything that spans commits.
+  Don't repeat each commit's message.
+- Leave out checklists and review chatter.
+
+To see one entry per merged PR, use `git log --first-parent main`.
