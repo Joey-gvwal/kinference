@@ -251,7 +251,7 @@ pub struct KubernetesConfig {
     pub discovery_defaults: DiscoveryDefaults,
 }
 
-/// Watch `InferenceWorkerSet`s and drive [`crate::pool_manager::PoolManager`].
+/// Watch `InferenceWorkerSet`s and drive [`crate::pool::PoolManager`].
 ///
 /// Owns the manager, so the live map needs no lock; the periodic reap sweep
 /// runs here for the same reason.
@@ -260,7 +260,7 @@ pub struct WorkerSetWatcher {
     selector: Option<String>,
     profiles: Vec<ProfileConfig>,
     defaults: DiscoveryDefaults,
-    manager: crate::pool_manager::PoolManager,
+    manager: crate::pool::PoolManager,
     /// Sets that resolved to nothing, kept so a rejection is logged once per
     /// transition rather than on every watch tick.
     rejected: Vec<Rejection>,
@@ -276,7 +276,7 @@ impl WorkerSetWatcher {
     pub fn new(
         kube_cfg: &KubernetesConfig,
         profiles: Vec<ProfileConfig>,
-        manager: crate::pool_manager::PoolManager,
+        manager: crate::pool::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,
         prom: std::sync::Arc<crate::metrics::PromMetrics>,
     ) -> Self {

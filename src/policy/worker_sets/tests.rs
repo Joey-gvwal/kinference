@@ -494,12 +494,12 @@ fn watcher_with(
         writer.apply_watcher_event(&watcher::Event::Apply(s.clone()));
     }
     let registry = crate::pool::PoolRegistry::new();
-    let manager = crate::pool_manager::PoolManager::new(
+    let manager = crate::pool::PoolManager::new(
         registry.clone(),
         std::sync::Arc::new(NoopHooks),
         CancellationToken::new(),
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-        crate::pool_manager::ReapPolicy {
+        crate::pool::ReapPolicy {
             linger: Duration::ZERO,
             backstop: Duration::from_secs(600),
         },
@@ -524,7 +524,7 @@ fn watcher_with(
 }
 
 struct NoopHooks;
-impl crate::pool_manager::PoolHooks for NoopHooks {
+impl crate::pool::PoolHooks for NoopHooks {
     fn on_create(
         &self,
         _pool: &std::sync::Arc<crate::pool::Pool>,

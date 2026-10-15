@@ -26,7 +26,7 @@ use crate::service::KinferenceService;
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
     admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observation_sink,
-    observations, policy, pool, pool_manager, rollup, version,
+    observations, policy, pool, rollup, version,
 };
 
 #[derive(Parser, Debug)]
@@ -304,12 +304,12 @@ pub async fn run() -> Result<()> {
         // Written by the worker-set watch, read by the status writer. Empty
         // with `[kubernetes]` off.
         let rejection_store = policy::worker_sets::RejectionStore::new();
-        let mut pool_manager = pool_manager::PoolManager::new(
+        let mut pool_manager = pool::PoolManager::new(
             pool_registry.clone(),
             hooks,
             cancel.clone(),
             model_router.clone(),
-            pool_manager::ReapPolicy {
+            pool::ReapPolicy {
                 linger: std::time::Duration::from_secs(30),
                 // A retired pool must outlive observations that may still
                 // reference it.
@@ -921,7 +921,7 @@ fn handle_added(
 /// The side effects `PoolManager` delegates: starting a pool's discovery, and
 /// dropping its workers' fleet-wide state when it retires.
 ///
-/// Here rather than in `pool_manager`, which can then be tested against a
+/// Here rather than in `pool`, which can then be tested against a
 /// stub.
 struct MainHooks {
     /// Process token. Pool and discovery tokens are its children.
@@ -941,7 +941,7 @@ struct MainHooks {
     discovery_tokens: DashMap<PoolId, CancellationToken>,
 }
 
-impl pool_manager::PoolHooks for MainHooks {
+impl pool::PoolHooks for MainHooks {
     fn on_create(&self, pool: &Arc<Pool>, spec: &pool::PoolSpec) -> anyhow::Result<()> {
         let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
             DiscoveryMode::Static => {

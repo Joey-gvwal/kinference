@@ -23,7 +23,6 @@ mod pick_body;
 mod picker;
 mod policy;
 mod pool;
-mod pool_manager;
 mod proto;
 mod rollup;
 mod scrape;
