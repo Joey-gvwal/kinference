@@ -3,6 +3,7 @@
 
 pub mod discovery;
 pub mod eviction;
+pub mod ingest;
 pub mod pool;
 pub mod scrape;
 pub mod workers;

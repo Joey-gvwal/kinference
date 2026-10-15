@@ -10,7 +10,6 @@ mod config;
 mod fleet;
 mod grpc;
 mod inflight;
-mod ingest;
 mod leader;
 mod local_tokenize;
 mod metrics;

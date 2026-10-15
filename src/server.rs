@@ -19,6 +19,7 @@ use crate::fleet::discovery::{
     static_config::StaticDiscovery,
 };
 use crate::fleet::eviction;
+use crate::fleet::ingest;
 use crate::fleet::pool;
 use crate::fleet::pool::Pool;
 use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
@@ -27,8 +28,7 @@ use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
 use crate::service::KinferenceService;
 use crate::{
-    admin, body_store, ingest, leader, local_tokenize, metrics, observations, policy, rollup,
-    version,
+    admin, body_store, leader, local_tokenize, metrics, observations, policy, rollup, version,
 };
 
 #[derive(Parser, Debug)]
