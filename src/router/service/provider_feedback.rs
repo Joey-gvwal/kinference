@@ -98,10 +98,10 @@ impl KinferenceService {
     pub(crate) fn record_provider_abort(
         &self,
         response_id: u64,
-        reason: crate::proto::abort_request::Reason,
+        reason: crate::router::proto::abort_request::Reason,
         detail: &str,
     ) {
-        use crate::proto::abort_request::Reason;
+        use crate::router::proto::abort_request::Reason;
         use kinference_policy::provider_health::FailureKind;
         let kind = match reason {
             Reason::BackendUnresolved => FailureKind::Unresolved,

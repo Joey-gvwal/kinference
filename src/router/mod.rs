@@ -8,6 +8,7 @@ pub mod mock;
 pub mod observations;
 pub mod pick_body;
 pub mod picker;
+pub mod proto;
 pub mod service;
 pub mod tokenize;
 pub mod tokenize_client;

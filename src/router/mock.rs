@@ -23,13 +23,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::fleet::workers::WorkerRegistry;
-use crate::proto::picker_server::Picker;
-use crate::proto::{
+use crate::router::body_store::BodyStore;
+use crate::router::proto::picker_server::Picker;
+use crate::router::proto::{
     AbortRequest, AbortResponse, BodyChunk, PickRequest, PickResponse, PullBodyRequest,
     PushBodyResponse, ReportFinalTokenRequest, ReportFinalTokenResponse, ReportFirstTokenRequest,
     ReportFirstTokenResponse, pick_response::Outcome as PickOutcome,
 };
-use crate::router::body_store::BodyStore;
 
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -211,8 +211,8 @@ impl Picker for MockKinferenceService {
         Ok(Response::new(PickResponse {
             outcome: PickOutcome::Ok as i32,
             // The mock has no providers.
-            destination: Some(crate::proto::pick_response::Destination::Local(
-                crate::proto::LocalTarget { endpoint },
+            destination: Some(crate::router::proto::pick_response::Destination::Local(
+                crate::router::proto::LocalTarget { endpoint },
             )),
             response_id,
             reason: String::new(),

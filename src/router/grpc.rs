@@ -21,9 +21,9 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::metrics::PickOutcome;
 use crate::router::service::{KinferenceService, PickAndRecordOutcome, Qos};
 
-use crate::proto;
-use crate::proto::picker_server::Picker;
-use crate::proto::{
+use crate::router::proto;
+use crate::router::proto::picker_server::Picker;
+use crate::router::proto::{
     AbortRequest, AbortResponse, BodyChunk, PickRequest, PickResponse, PullBodyRequest,
     PushBodyResponse, ReportFinalTokenRequest, ReportFinalTokenResponse, ReportFirstTokenRequest,
     ReportFirstTokenResponse, pick_response::Outcome as WireOutcome,

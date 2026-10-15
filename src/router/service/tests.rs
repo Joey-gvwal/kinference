@@ -808,17 +808,19 @@ async fn a_pick_is_counted_by_tenant_and_destination() {
 /// Not the alias the client asked for, nor what the report says.
 #[tokio::test]
 async fn token_metrics_name_the_model_each_body_was_sent_with() {
-    use crate::proto::picker_server::Picker;
+    use crate::router::proto::picker_server::Picker;
 
     let svc = local_and_cloud_picks().await;
     for (response_id, prompt_tokens) in [(1, 10), (2, 7)] {
-        svc.report_final_token(tonic::Request::new(crate::proto::ReportFinalTokenRequest {
-            response_id,
-            model: "what-the-vendor-said".into(),
-            prompt_tokens,
-            completion_tokens: 1,
-            ..Default::default()
-        }))
+        svc.report_final_token(tonic::Request::new(
+            crate::router::proto::ReportFinalTokenRequest {
+                response_id,
+                model: "what-the-vendor-said".into(),
+                prompt_tokens,
+                completion_tokens: 1,
+                ..Default::default()
+            },
+        ))
         .await
         .expect("report accepted");
     }

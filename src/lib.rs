@@ -10,7 +10,6 @@ mod fleet;
 mod leader;
 mod metrics;
 mod policy;
-mod proto;
 mod router;
 mod version;
 
