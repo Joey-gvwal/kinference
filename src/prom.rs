@@ -16,7 +16,79 @@ use prometheus::{
     IntGaugeVec, Opts, Registry, TextEncoder, exponential_buckets,
 };
 
-use crate::config::{DEFAULT_TENANT_LABEL, MetricsConfig, TenantLabels};
+use serde::Deserialize;
+
+/// `[metrics]`
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MetricsConfig {
+    /// Which tenants get their own `tenant` label value. Off by default because
+    /// tenants are caller-supplied and therefore unbounded.
+    #[serde(default)]
+    pub tenant_labels: TenantLabels,
+}
+
+/// The label value unattributed requests are bucketed under. A tenant literally
+/// named `default` shares this series under an allowlist.
+pub const DEFAULT_TENANT_LABEL: &str = "default";
+
+/// Which tenants get their own `tenant` label value:
+///
+/// ```toml
+/// tenant_labels = "none"              # default; everything buckets under "default"
+/// tenant_labels = "all"               # every tenant gets its own label
+/// tenant_labels = ["acme", "globex"]  # these keep their identity; the rest bucket
+/// ```
+///
+/// `[]` is equivalent to `"none"`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TenantLabels {
+    #[default]
+    None,
+    /// Unbounded cardinality: about 91 series per (model, qos, tenant).
+    /// `crate::prom` warns at startup when set.
+    All,
+    Allow(Vec<String>),
+}
+
+// Hand-written instead of `#[serde(untagged)]` so a typo like `"sure"` gets an
+// error naming what was expected, rather than untagged's generic message.
+impl<'de> serde::Deserialize<'de> for TenantLabels {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = TenantLabels;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#""none", "all", or a list of tenant ids"#)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "none" => Ok(TenantLabels::None),
+                    "all" => Ok(TenantLabels::All),
+                    other => Err(E::invalid_value(serde::de::Unexpected::Str(other), &self)),
+                }
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                while let Some(s) = seq.next_element::<String>()? {
+                    out.push(s);
+                }
+                Ok(if out.is_empty() {
+                    TenantLabels::None
+                } else {
+                    TenantLabels::Allow(out)
+                })
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
 
 /// Inter-token-latency bucket layout version. MUST match
 /// `ReportFinalTokenRequest.itl_bucket_layout` in `proto/kinference.proto`; bump
@@ -332,7 +404,7 @@ fn length_histogram(name: &str, help: &str) -> HistogramVec {
 
 /// The resolved form of `[metrics] tenant_labels`.
 ///
-/// Like [`crate::config::TenantLabels`], but with a `HashSet` allowlist, since
+/// Like [`TenantLabels`], but with a `HashSet` allowlist, since
 /// `tenant_label` is on the hot path.
 enum TenantPolicy {
     /// Everything buckets under [`DEFAULT_TENANT_LABEL`].

@@ -106,7 +106,7 @@ spec:
                   key: HUGGING_FACE_HUB_TOKEN
             {{- end }}
             {{- if .Values.observationsCsv }}
-            # Predicted-vs-observed CSV sink (ObservationSink::from_env): one
+            # Predicted-vs-observed CSV sink (read once at startup): one
             # row per streaming observation, for offline tuning of the
             # wait-time predictor (analysis/analyze-latency.py).
             - name: KINFERENCE_OBSERVATIONS_CSV

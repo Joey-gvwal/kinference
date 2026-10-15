@@ -2,7 +2,7 @@ use super::*;
 use dynamo_kv_router::indexer::KvIndexerInterface;
 
 fn cfg(name: &str, block_size: u32) -> PoolSpec {
-    crate::config::test_spec(name, block_size)
+    crate::pool::test_spec(name, block_size)
 }
 
 /// Dropping one pool doesn't disturb the process or its siblings, although

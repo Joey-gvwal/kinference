@@ -5,15 +5,14 @@
 //! `observations::format_csv_row`.
 //!
 //! Behavior:
-//! - Env var unset → sink is disabled, `append_line` is a no-op.
-//! - Env var set, file opens → append-mode `BufWriter` under a
+//! - No path → sink is disabled, `append_line` is a no-op.
+//! - Path given, file opens → append-mode `BufWriter` under a
 //!   `Mutex` for concurrent streams.
 //! - Fresh file (didn't exist OR was empty) → header row is written
 //!   exactly once before the first observation row.
-//! - Env var set, open fails → warn log, sink stays disabled.
+//! - Path given, open fails → warn log, sink stays disabled.
 //! - Every row is flushed.
 
-use std::env;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -21,18 +20,15 @@ use std::sync::Mutex;
 
 use crate::observations::CSV_HEADER;
 
-/// Env var naming the CSV output file.
-const ENV_VAR: &str = "KINFERENCE_OBSERVATIONS_CSV";
-
 pub struct ObservationSink {
     inner: Option<Mutex<BufWriter<std::fs::File>>>,
 }
 
 impl ObservationSink {
-    /// Open the sink named by `KINFERENCE_OBSERVATIONS_CSV`; see the module
-    /// docs for the cases.
-    pub fn from_env() -> Self {
-        let Some(path) = env::var_os(ENV_VAR).map(PathBuf::from) else {
+    /// Open the sink at `path` (`KINFERENCE_OBSERVATIONS_CSV`, read once at
+    /// startup by `Config::load`); see the module docs for the cases.
+    pub fn open(path: Option<PathBuf>) -> Self {
+        let Some(path) = path else {
             return Self { inner: None };
         };
         match OpenOptions::new().create(true).append(true).open(&path) {

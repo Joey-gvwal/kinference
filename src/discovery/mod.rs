@@ -12,10 +12,9 @@
 //!   emits `Added`/`Removed` as endpoints become or stop being Ready.
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-use crate::config::WorkerConfig;
 
 pub mod kubernetes;
 pub mod static_config;
@@ -54,4 +53,151 @@ pub trait Discovery: Send + Sync + 'static {
         tx: mpsc::Sender<WorkerChange>,
         cancel: CancellationToken,
     );
+}
+
+/// `[workerset.discovery]`: where a pool's workers come from.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct DiscoveryConfig {
+    #[serde(default)]
+    pub mode: DiscoveryMode,
+    /// TOML file with a `[[workers]]` array of `WorkerConfig`. Required in
+    /// static mode. Relative paths resolve against the config file's directory.
+    #[serde(default)]
+    pub workers_file: Option<std::path::PathBuf>,
+    /// Namespace of the Service; `None` means all namespaces. Kubernetes mode
+    /// only.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Service fronting the workers. Each Ready endpoint in its EndpointSlices
+    /// becomes a worker, dialed by pod IP, so any Service type works. Required
+    /// in Kubernetes mode.
+    #[serde(default)]
+    pub service_name: Option<String>,
+    /// `namespace/name` of the owning `InferenceWorkerSet`, for logs only,
+    /// since two sets can share a Service.
+    #[serde(skip)]
+    pub workerset: Option<String>,
+    /// Last-resort ports, used when the Pod has neither a matching named port
+    /// nor a `kinference.buoyant.io/*` annotation.
+    #[serde(default)]
+    pub defaults: DiscoveryDefaults,
+    /// Explicit ports from an `InferenceWorkerSet`. Always empty for TOML
+    /// worker sets.
+    #[serde(skip)]
+    pub ports: PortRefs,
+}
+
+/// Explicit per-role ports. `None` means resolve by conventional name, then
+/// fall back to [`DiscoveryDefaults`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PortRefs {
+    pub http: Option<PortRef>,
+    pub metrics: Option<PortRef>,
+    pub zmq: Option<PortRef>,
+    pub replay: Option<PortRef>,
+    /// The workers publish no KV events, so no SUB socket is opened. Unlike
+    /// `zmq: None`, which falls back to a default port: a ZMQ `connect` to a
+    /// port nobody publishes on succeeds and stays silent forever.
+    pub kv_events_declared_absent: bool,
+}
+
+/// A port named by a CR, either by Service port name or by number.
+///
+/// Names are matched against the EndpointSlice's ports. A number is a Service
+/// port, but kinference dials pods directly, so it is matched against the
+/// slice's target ports first and only used verbatim (with a warning) if
+/// nothing matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortRef {
+    Name(String),
+    Number(u16),
+}
+
+/// Last-resort per-pod ports. See [`DiscoveryConfig::defaults`].
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DiscoveryDefaults {
+    /// OpenAI-compatible HTTP port, also used for `/metrics`.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    /// ZMQ PUB port for KV-cache events.
+    #[serde(default = "default_zmq_port")]
+    pub zmq_port: u16,
+    /// ZMQ DEALER replay port. `None` disables replay unless a named port or
+    /// annotation supplies one.
+    #[serde(default)]
+    pub replay_port: Option<u16>,
+}
+
+impl Default for DiscoveryDefaults {
+    fn default() -> Self {
+        Self {
+            http_port: default_http_port(),
+            zmq_port: default_zmq_port(),
+            replay_port: None,
+        }
+    }
+}
+
+fn default_http_port() -> u16 {
+    8000
+}
+
+fn default_zmq_port() -> u16 {
+    5557
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscoveryMode {
+    /// Workers listed in `discovery.workers_file`.
+    #[default]
+    Static,
+    /// Workers from the EndpointSlices of `discovery.service_name`.
+    Kubernetes,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkerConfig {
+    pub worker_id_str: String,
+    pub worker_id_num: u64,
+    /// ZMQ PUB endpoint for KV-cache events. Required unless `mock_mode`.
+    #[serde(default)]
+    pub zmq_endpoint: Option<String>,
+    /// DEALER endpoint for replaying event history from seq=0 at startup.
+    #[serde(default)]
+    pub replay_endpoint: Option<String>,
+    /// The engine's Prometheus `/metrics` URL.
+    #[serde(default)]
+    pub metrics_url: Option<String>,
+    /// Base URL (no path) of the engine's OpenAI-compatible API, used for
+    /// scrapes and tokenization, and as the fallback for `endpoint`.
+    #[serde(default)]
+    pub http_url: Option<String>,
+    /// Routable `ip:port` returned to clients (`WorkerScore.endpoint` and
+    /// `x-gateway-destination-endpoint`). Takes precedence over `http_url`'s
+    /// `host:port`; needed when `http_url` uses a hostname, since the gateways
+    /// don't resolve names here.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    pub model_name: String,
+
+    // Placement metadata, emitted by aws-harness's gen-monitor-config.sh. Not
+    // used yet.
+    #[serde(default)]
+    pub pod_name: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub node_name: Option<String>,
+    #[serde(default)]
+    pub node_ip: Option<String>,
+    #[serde(default)]
+    pub pod_ip: Option<String>,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
+    #[serde(default)]
+    pub instance_type: Option<String>,
 }

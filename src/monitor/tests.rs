@@ -532,7 +532,7 @@ fn policy_fleet_with(
     for (name, model, addrs) in sets {
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
-        let mut spec = crate::config::test_spec(name, 16);
+        let mut spec = crate::pool::test_spec(name, 16);
         spec.key = kinference_policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(
@@ -605,7 +605,7 @@ fn policy_fleet_with(
         Some(store.clone()),
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         ttl,
-        Arc::new(ObservationSink::from_env()),
+        Arc::new(ObservationSink::open(None)),
         Arc::new(crate::prom::PromMetrics::new()),
     );
     (svc, store, live)

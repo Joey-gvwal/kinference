@@ -215,8 +215,8 @@ fn empty_model_is_skipped() {
 }
 
 /// Build a registry with an explicit tenant policy.
-fn with(labels: crate::config::TenantLabels) -> PromMetrics {
-    PromMetrics::with_config(&crate::config::MetricsConfig {
+fn with(labels: crate::prom::TenantLabels) -> PromMetrics {
+    PromMetrics::with_config(&crate::prom::MetricsConfig {
         tenant_labels: labels,
     })
 }
@@ -224,7 +224,7 @@ fn with(labels: crate::config::TenantLabels) -> PromMetrics {
 /// The allowlist decides which tenants keep their identity.
 #[test]
 fn tenant_labels_bucket_per_the_allowlist() {
-    use crate::config::TenantLabels;
+    use crate::prom::TenantLabels;
 
     // "none": every tenant collapses, including one that looks real.
     let m = with(TenantLabels::None);
@@ -270,7 +270,7 @@ fn tenant_labels_bucket_per_the_allowlist() {
 /// Unlike policy, where `tenant: ""` is a distinct matchable value.
 #[test]
 fn an_empty_tenant_always_buckets_under_default() {
-    use crate::config::TenantLabels;
+    use crate::prom::TenantLabels;
     for labels in [
         TenantLabels::None,
         TenantLabels::All,
@@ -292,7 +292,7 @@ fn an_empty_tenant_always_buckets_under_default() {
 /// same tenant bucketing as every other tenant family.
 #[test]
 fn routed_requests_count_by_tenant_destination_and_type() {
-    use crate::config::TenantLabels;
+    use crate::prom::TenantLabels;
     use kinference_policy::crd::BackendType::{Local, Provider};
 
     let m = with(TenantLabels::Allow(vec!["acme".into()]));
@@ -320,7 +320,7 @@ fn routed_requests_count_by_tenant_destination_and_type() {
 /// tenant land on one series.
 #[test]
 fn a_tenant_named_default_collides_with_the_fallback_bucket() {
-    use crate::config::TenantLabels;
+    use crate::prom::TenantLabels;
     let m = with(TenantLabels::Allow(vec!["default".into()]));
     m.record_usage("m", "batch", "default", 10, 5); // allowlisted
     m.record_usage("m", "batch", "someone-else", 7, 3); // bucketed
@@ -340,7 +340,7 @@ fn a_tenant_named_default_collides_with_the_fallback_bucket() {
 /// it visible.
 #[test]
 fn every_label_lands_in_its_declared_position() {
-    use crate::config::TenantLabels;
+    use crate::prom::TenantLabels;
     let m = with(TenantLabels::All);
     let mut counts = vec![0u32; 15];
     counts[0] = 1;
@@ -676,7 +676,7 @@ fn build_info_reports_the_version_at_construction() {
 /// Engine-measured cached prompt tokens accumulate per tenant.
 #[test]
 fn cached_prompt_tokens_accumulate_per_tenant() {
-    use crate::config::TenantLabels;
+    use crate::prom::TenantLabels;
     let m = with(TenantLabels::All);
     m.record_cached_prompt_tokens("qwen", "batch", "acme", Some(900));
     m.record_cached_prompt_tokens("qwen", "batch", "acme", Some(100));

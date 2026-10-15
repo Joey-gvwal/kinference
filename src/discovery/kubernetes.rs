@@ -35,8 +35,9 @@ use kube::runtime::watcher::{self, watcher as start_watcher};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerConfig};
-use crate::discovery::{Discovery, WorkerChange};
+use crate::discovery::{
+    Discovery, DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
+};
 
 /// The K8s standard label that the EndpointSlice controller stamps on
 /// every slice it generates for a Service. Documented at

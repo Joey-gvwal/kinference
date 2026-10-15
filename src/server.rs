@@ -13,9 +13,10 @@ use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
-use crate::config::{Config, DiscoveryMode};
+use crate::config::Config;
 use crate::discovery::{
-    Discovery, WorkerChange, kubernetes::KubeDiscovery, static_config::StaticDiscovery,
+    Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
+    static_config::StaticDiscovery,
 };
 use crate::metrics::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::mock::MockKinferenceService;
@@ -24,8 +25,8 @@ use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
-    admin, body_store, config, eviction, ingest, leader, local_tokenize, observation_sink,
-    observations, policy, pool, pool_manager, prom, rollup, version,
+    admin, body_store, eviction, ingest, leader, local_tokenize, observation_sink, observations,
+    policy, pool, pool_manager, prom, rollup, version,
 };
 
 #[derive(Parser, Debug)]
@@ -43,6 +44,8 @@ struct Args {
 /// Parse the command line and run the server until it is told to stop.
 pub async fn run() -> Result<()> {
     // ANSI colors only on a TTY, and not with NO_COLOR (https://no-color.org).
+    // Read here, before the config file, because it configures the log
+    // subscriber; every other env var is read by `Config::load`.
     let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
         && std::env::var_os("NO_COLOR").is_none();
     tracing_subscriber::fmt()
@@ -56,7 +59,7 @@ pub async fn run() -> Result<()> {
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
 
-    let listen_addr: std::net::SocketAddr = cfg.listen.parse()?;
+    let listen_addr = cfg.listen;
     tracing::info!(
         version = version::VERSION,
         listen = %listen_addr,
@@ -133,9 +136,7 @@ pub async fn run() -> Result<()> {
         let prom = Arc::new(prom::PromMetrics::with_config(&cfg.metrics));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
-        // Wall-clock budget for one replay_gap call. High because the initial
-        // drain can take 40-60s; see `Config::replay_timeout_ms`.
-        let replay_timeout_ms = cfg.replay_timeout_ms.unwrap_or(60_000);
+        let ingest_cfg = cfg.ingest;
 
         // One `PoolSpec` per `[[workerset]]`, resolved against its profile.
         // Each pool owns its own KvIndexer, WorkerRegistry, InflightPrefixes,
@@ -422,7 +423,7 @@ pub async fn run() -> Result<()> {
                                     w,
                                     poll_ms,
                                     models_refresh_secs,
-                                    replay_timeout_ms,
+                                    ingest_cfg,
                                     warmup_enabled,
                                     &coord_metrics,
                                     &coord_prom,
@@ -457,10 +458,7 @@ pub async fn run() -> Result<()> {
         let policy_store_cell = cfg.policy.enabled.then(policy::store::PolicyStore::new);
 
         // Admin listener and the metrics rollup, when configured.
-        if let Some(addr_str) = &cfg.admin_listen {
-            let dash_addr: std::net::SocketAddr = addr_str
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid admin_listen `{addr_str}`: {e}"))?;
+        if let Some(dash_addr) = cfg.admin_listen {
             rollup::spawn(
                 pool_registry.clone(),
                 metrics.clone(),
@@ -500,7 +498,9 @@ pub async fn run() -> Result<()> {
 
         // The observation CSV sink is shared across pools; rows carry their
         // pool and config snapshot.
-        let observation_sink = Arc::new(observation_sink::ObservationSink::from_env());
+        let observation_sink = Arc::new(observation_sink::ObservationSink::open(
+            cfg.observations_csv.clone(),
+        ));
 
         // Optional CRD-driven routing policy, sharing the snapshot cell the
         // pick path reads. When disabled, a pool-naming Pick falls back to
@@ -543,7 +543,7 @@ pub async fn run() -> Result<()> {
                     .clone()
                     .or_else(kube_namespace_hint)
                     .unwrap_or_else(|| "default".to_string());
-                let identity = leader_identity();
+                let identity = cfg.leader_election.identity.clone();
                 let params = leader::LeaseParams::from(&cfg.leader_election);
                 // `Config::infer`, like the status writer.
                 let kube_cfg = kube::Config::infer().await?;
@@ -733,10 +733,10 @@ pub async fn run() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn handle_added(
     pool: &Arc<pool::Pool>,
-    w: config::WorkerConfig,
+    w: WorkerConfig,
     poll_ms: u64,
     models_refresh_secs: u64,
-    replay_timeout_ms: u64,
+    ingest_cfg: ingest::IngestConfig,
     warmup_enabled: bool,
     metrics: &Arc<MetricsRegistry>,
     prom: &Arc<prom::PromMetrics>,
@@ -757,7 +757,7 @@ fn handle_added(
     let inflight_prefixes = &pool.inflight_prefixes;
     // Warm up only for pools using the in-process tokenizer (Local/Compare).
     let warmup_tokenizer =
-        if warmup_enabled && !matches!(pool.tokenize_mode, config::TokenizeMode::Render) {
+        if warmup_enabled && !matches!(pool.tokenize_mode, crate::tokenize::TokenizeMode::Render) {
             local_tokenizer
         } else {
             None
@@ -873,7 +873,7 @@ fn handle_added(
     ingest::spawn_worker_listener(
         w.clone(),
         block_size,
-        replay_timeout_ms,
+        ingest_cfg,
         endpoint_key,
         indexer.clone(),
         prom.clone(),
@@ -942,7 +942,7 @@ struct MainHooks {
 }
 
 impl pool_manager::PoolHooks for MainHooks {
-    fn on_create(&self, pool: &Arc<Pool>, spec: &config::PoolSpec) -> anyhow::Result<()> {
+    fn on_create(&self, pool: &Arc<Pool>, spec: &pool::PoolSpec) -> anyhow::Result<()> {
         let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
             DiscoveryMode::Static => {
                 let workers = spec.load_static_workers()?;
@@ -1106,30 +1106,6 @@ fn drop_worker_state(
             "worker now belongs to another worker set; leaving fleet-wide state alone"
         );
     }
-}
-
-/// This replica's `holderIdentity` on the Lease.
-///
-/// `POD_NAME` (downward API), as shown by `kubectl get pods`; else the
-/// hostname; else a random name.
-fn leader_identity() -> String {
-    if let Ok(name) = std::env::var("POD_NAME")
-        && !name.trim().is_empty()
-    {
-        return name;
-    }
-    if let Ok(host) = hostname()
-        && !host.trim().is_empty()
-    {
-        return host;
-    }
-    let mut b = [0u8; 8];
-    let _ = getrandom::getrandom(&mut b);
-    format!("kinference-{}", u64::from_le_bytes(b))
-}
-
-fn hostname() -> std::io::Result<String> {
-    std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string())
 }
 
 /// The pod's own namespace, from the service-account mount. Used when

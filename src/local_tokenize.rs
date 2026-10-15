@@ -37,10 +37,43 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
+use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
 
-use crate::config::LocalTokenizeConfig;
 use crate::tokenize::TokenizeInput;
+
+/// `[tokenize.local]`. See `src/local_tokenize.rs`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct LocalTokenizeConfig {
+    /// Directory checked for tokenizer files before fetching from the Hub:
+    /// `{mount_dir}/{model_name}/{tokenizer,tokenizer_config}.json`. A `/` in
+    /// the model name is a nested directory.
+    #[serde(default)]
+    pub mount_dir: Option<std::path::PathBuf>,
+    /// Load tokenizers for newly discovered models in the background instead
+    /// of on first request.
+    #[serde(default = "default_warmup")]
+    pub warmup: bool,
+    /// `HUGGING_FACE_HUB_TOKEN`, read once at startup by `Config::load`:
+    /// bearer auth for Hub fetches of gated models. Not a file key.
+    #[serde(skip)]
+    pub hub_token: Option<String>,
+}
+
+impl Default for LocalTokenizeConfig {
+    fn default() -> Self {
+        Self {
+            mount_dir: None,
+            warmup: default_warmup(),
+            hub_token: None,
+        }
+    }
+}
+
+fn default_warmup() -> bool {
+    true
+}
 
 /// Cached, loaded artifacts for one model. Cheap to `Arc`-share.
 struct LoadedTokenizer {
@@ -232,19 +265,23 @@ impl LocalTokenizerRegistry {
         .await
         .context("spawn_blocking join")??;
 
-        let meta = fetch_chat_template_from_hub(&self.client, model_name)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::debug!(
-                    model = model_name,
-                    error = %e,
-                    "local_tokenize: no chat_template available via Hub"
-                );
-                TokenizerConfigMeta {
-                    chat_template: None,
-                    special_tokens: HashMap::new(),
-                }
-            });
+        let meta = fetch_chat_template_from_hub(
+            &self.client,
+            self.config.hub_token.as_deref(),
+            model_name,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::debug!(
+                model = model_name,
+                error = %e,
+                "local_tokenize: no chat_template available via Hub"
+            );
+            TokenizerConfigMeta {
+                chat_template: None,
+                special_tokens: HashMap::new(),
+            }
+        });
         Ok(Arc::new(LoadedTokenizer {
             tokenizer,
             chat_template: meta.chat_template,
@@ -434,11 +471,12 @@ fn extract_special_tokens(cfg: &serde_json::Value) -> HashMap<String, String> {
 /// template.
 async fn fetch_chat_template_from_hub(
     client: &reqwest::Client,
+    token: Option<&str>,
     model_name: &str,
 ) -> Result<TokenizerConfigMeta> {
     // Step 1: tokenizer_config.json (inline template + special tokens).
     let cfg_url = format!("https://huggingface.co/{model_name}/resolve/main/tokenizer_config.json");
-    let cfg_resp = hub_get(client, &cfg_url)
+    let cfg_resp = hub_get(client, token, &cfg_url)
         .await
         .with_context(|| format!("GET {cfg_url}"))?;
     if !cfg_resp.status().is_success() {
@@ -458,7 +496,7 @@ async fn fetch_chat_template_from_hub(
     // Step 2: sibling chat_template.jinja.
     let sibling_url =
         format!("https://huggingface.co/{model_name}/resolve/main/chat_template.jinja");
-    let sib_resp = hub_get(client, &sibling_url)
+    let sib_resp = hub_get(client, token, &sibling_url)
         .await
         .with_context(|| format!("GET {sibling_url}"))?;
     if sib_resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -481,12 +519,14 @@ async fn fetch_chat_template_from_hub(
     })
 }
 
-/// A Hub GET with optional `HUGGING_FACE_HUB_TOKEN` bearer auth.
-async fn hub_get(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
+/// A Hub GET with optional bearer auth.
+async fn hub_get(
+    client: &reqwest::Client,
+    token: Option<&str>,
+    url: &str,
+) -> Result<reqwest::Response> {
     let mut req = client.get(url);
-    if let Ok(token) = std::env::var("HUGGING_FACE_HUB_TOKEN")
-        && !token.is_empty()
-    {
+    if let Some(token) = token {
         req = req.bearer_auth(token);
     }
     Ok(req.send().await?)

@@ -25,14 +25,82 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use anyhow::Result;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use kinference_policy::{PoolId, PoolKey};
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{PickerConfig, PoolSpec, PredictorConfig, TokenizeMode};
+use crate::discovery::static_config::WorkersFile;
+use crate::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
 use crate::inflight_prefixes::InflightPrefixes;
 use crate::inflight_registry::InflightRegistry;
+use crate::picker::{PickerConfig, PredictorConfig};
+use crate::tokenize::TokenizeMode;
 use crate::workers::WorkerRegistry;
+
+/// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.
+///
+/// `kv_block_size` and the render URL are per-deployment facts, so they live on
+/// the worker set instead.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileConfig {
+    /// Referenced by `[[workerset]].profile`. Must be unique.
+    pub name: String,
+    /// Refit with `analysis/analyze-latency.py`.
+    #[serde(default)]
+    pub predictor: PredictorConfig,
+    #[serde(default)]
+    pub picker: PickerConfig,
+    #[serde(default)]
+    pub tokenize: ProfileTokenizeConfig,
+}
+
+/// `[profile.tokenize]`
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProfileTokenizeConfig {
+    #[serde(default)]
+    pub mode: TokenizeMode,
+}
+
+/// A worker set with its profile resolved: everything needed to build a
+/// `pool::Pool`, whether declared in TOML or by an `InferenceWorkerSet`.
+///
+/// Reconciles compare specs with `PartialEq` to decide whether a pool needs
+/// updating, and to decide whether a retired pool can be resurrected.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolSpec {
+    pub key: PoolKey,
+    pub name: String,
+    pub profile: String,
+    pub kv_block_size: u32,
+    pub predictor: PredictorConfig,
+    pub picker: PickerConfig,
+    pub tokenize_mode: TokenizeMode,
+    pub render_url: Option<String>,
+    pub discovery: DiscoveryConfig,
+    /// Per-set `/v1/models` refresh interval
+    /// (`spec.modelDiscovery.interval`). `None` uses the fleet-wide
+    /// `models_refresh_secs`.
+    pub models_refresh_secs: Option<u64>,
+    /// A fixed model list (`spec.modelDiscovery.mode: Static`); `/v1/models`
+    /// is not polled. Lets engines that don't serve `/v1/models` be routable.
+    pub static_models: Option<Vec<String>>,
+}
+
+impl PoolSpec {
+    /// Load this set's static workers; empty unless in static mode with a
+    /// `workers_file`.
+    pub fn load_static_workers(&self) -> Result<Vec<WorkerConfig>> {
+        match (&self.discovery.mode, &self.discovery.workers_file) {
+            (DiscoveryMode::Static, Some(p)) => WorkersFile::load(p),
+            _ => Ok(Vec::new()),
+        }
+    }
+}
 
 /// An immutable view of the fleet's pools.
 ///
@@ -263,9 +331,27 @@ pub(crate) fn test_pool(name: &str) -> Arc<Pool> {
 pub(crate) fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool> {
     Arc::new(Pool::from_spec(
         PoolId::next(),
-        &crate::config::test_spec(name, block_size),
+        &test_spec(name, block_size),
         &CancellationToken::new(),
     ))
+}
+
+/// A minimal static spec shared by tests that need a `Pool`.
+#[cfg(test)]
+pub(crate) fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
+    PoolSpec {
+        key: PoolKey::local(name),
+        name: name.to_string(),
+        profile: "test-profile".to_string(),
+        kv_block_size,
+        predictor: PredictorConfig::default(),
+        picker: PickerConfig::default(),
+        tokenize_mode: TokenizeMode::default(),
+        render_url: None,
+        discovery: DiscoveryConfig::default(),
+        models_refresh_secs: None,
+        static_models: None,
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 use super::*;
-use crate::config::{PickerConfig, PredictorConfig, ProfileTokenizeConfig, TokenizeMode};
+use crate::picker::{PickerConfig, PredictorConfig};
+use crate::pool::ProfileTokenizeConfig;
+use crate::tokenize::TokenizeMode;
 use kinference_policy::crd::{InferenceWorkerSetSpec, KvEvents, ServiceRef};
 
 fn profile(name: &str) -> ProfileConfig {
@@ -502,7 +504,7 @@ fn watcher_with(
             backstop: Duration::from_secs(600),
         },
     );
-    let cfg = crate::config::KubernetesConfig {
+    let cfg = KubernetesConfig {
         enabled: true,
         namespace: Some("infra".into()),
         selector: None,

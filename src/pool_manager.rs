@@ -29,8 +29,7 @@ use std::time::{Duration, Instant};
 
 use kinference_policy::{PoolId, PoolKey};
 
-use crate::config::PoolSpec;
-use crate::pool::{Pool, PoolMap, PoolRegistry};
+use crate::pool::{Pool, PoolMap, PoolRegistry, PoolSpec};
 
 /// Side effects that belong to subsystems the manager doesn't depend on
 /// (discovery, the coordinator channel). Implemented in `server.rs`.
