@@ -427,7 +427,7 @@ fn an_observed_provider_carries_its_p95_as_both_signal_and_objective() {
 /// Five of its parameters are `u32`, so a transposition would type-check.
 #[test]
 fn worker_score_maps_each_input_to_its_own_field() {
-    let entry = crate::workers::WorkerEntry {
+    let entry = crate::fleet::workers::WorkerEntry {
         worker_id_str: "w-7".into(),
         model_name_hint: None,
         current_models: vec![],
@@ -475,8 +475,8 @@ fn worker_score_maps_each_input_to_its_own_field() {
 // HTTP URL, so tokenization fails and scoring degrades to load only, which
 // still yields a score per worker.
 
-fn offline_worker(model: &str, addr: &str) -> crate::workers::WorkerEntry {
-    crate::workers::WorkerEntry {
+fn offline_worker(model: &str, addr: &str) -> crate::fleet::workers::WorkerEntry {
+    crate::fleet::workers::WorkerEntry {
         worker_id_str: addr.into(),
         model_name_hint: Some(model.into()),
         current_models: vec![model.into()],

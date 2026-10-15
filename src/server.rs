@@ -20,11 +20,11 @@ use crate::discovery::{
 };
 use crate::fleet::pool;
 use crate::fleet::pool::Pool;
+use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
 use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::service::KinferenceService;
-use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
     admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observations, policy,
     rollup, version,
@@ -836,8 +836,8 @@ fn handle_added(
                 // Every worker gets the same declared list, so these mean the
                 // pin outlived a `spec.models` edit (`reset_declared_models`
                 // didn't run). Still routable.
-                crate::workers::ServedModelsVerdict::Widened { .. }
-                | crate::workers::ServedModelsVerdict::Narrowed { .. } => {
+                crate::fleet::workers::ServedModelsVerdict::Widened { .. }
+                | crate::fleet::workers::ServedModelsVerdict::Narrowed { .. } => {
                     tracing::warn!(
                         workerset = pool.name,
                         worker_id = w.worker_id_str,
@@ -846,11 +846,11 @@ fn handle_added(
                     );
                     crate::service::associate_models(model_router, pool.id, &pool.name, models);
                 }
-                crate::workers::ServedModelsVerdict::Accepted
-                | crate::workers::ServedModelsVerdict::Empty => {
+                crate::fleet::workers::ServedModelsVerdict::Accepted
+                | crate::fleet::workers::ServedModelsVerdict::Empty => {
                     crate::service::associate_models(model_router, pool.id, &pool.name, models);
                 }
-                crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
+                crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                     // As above, but not routable: skip the worker rather than
                     // half-register it.
                     tracing::error!(

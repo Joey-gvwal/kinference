@@ -1,5 +1,5 @@
 use super::*;
-use crate::workers::WorkerEntry;
+use crate::fleet::workers::WorkerEntry;
 
 use crate::fleet::pool::test_pool as pool;
 

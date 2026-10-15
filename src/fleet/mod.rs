@@ -2,3 +2,4 @@
 //! metrics, ZMQ ingest and in-flight state.
 
 pub mod pool;
+pub mod workers;

@@ -28,6 +28,5 @@ mod service;
 mod tokenize;
 mod tokenize_client;
 mod version;
-mod workers;
 
 pub mod server;

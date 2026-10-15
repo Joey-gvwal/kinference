@@ -23,13 +23,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::body_store::BodyStore;
+use crate::fleet::workers::WorkerRegistry;
 use crate::proto::picker_server::Picker;
 use crate::proto::{
     AbortRequest, AbortResponse, BodyChunk, PickRequest, PickResponse, PullBodyRequest,
     PushBodyResponse, ReportFinalTokenRequest, ReportFinalTokenResponse, ReportFirstTokenRequest,
     ReportFirstTokenResponse, pick_response::Outcome as PickOutcome,
 };
-use crate::workers::WorkerRegistry;
 
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;

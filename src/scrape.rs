@@ -8,7 +8,7 @@ use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::WorkerConfig;
-use crate::workers::Engine;
+use crate::fleet::workers::Engine;
 
 // vLLM and SGLang prefix metric names with `<engine>:`, which
 // prometheus-parse 0.2.5 rejects. The scraped body is rewritten to `vllm_` /
@@ -379,7 +379,7 @@ impl MetricsRegistry {
 pub fn spawn_one_shot_warmup(
     cfg: WorkerConfig,
     registry: Arc<MetricsRegistry>,
-    workers: Arc<crate::workers::WorkerRegistry>,
+    workers: Arc<crate::fleet::workers::WorkerRegistry>,
     local_tokenizer: Option<Arc<crate::local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: crate::eviction::EvictionTx,
     model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
@@ -419,7 +419,7 @@ pub fn spawn_one_shot_warmup(
                 match workers.set_served_models(cfg.worker_id_num, &names) {
                     // Widened/Narrowed are routable, e.g. a LoRA adapter
                     // rollout: index what this worker serves rather than evict.
-                    crate::workers::ServedModelsVerdict::Widened { added } => {
+                    crate::fleet::workers::ServedModelsVerdict::Widened { added } => {
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
                             ?added,
@@ -433,7 +433,7 @@ pub fn spawn_one_shot_warmup(
                             &names,
                         );
                     }
-                    crate::workers::ServedModelsVerdict::Narrowed { missing } => {
+                    crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
                             ?missing,
@@ -447,8 +447,8 @@ pub fn spawn_one_shot_warmup(
                             &names,
                         );
                     }
-                    crate::workers::ServedModelsVerdict::Accepted
-                    | crate::workers::ServedModelsVerdict::Empty => {
+                    crate::fleet::workers::ServedModelsVerdict::Accepted
+                    | crate::fleet::workers::ServedModelsVerdict::Empty => {
                         crate::service::associate_models(
                             &model_router,
                             pool_id,
@@ -456,7 +456,7 @@ pub fn spawn_one_shot_warmup(
                             &names,
                         );
                     }
-                    crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
+                    crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                         tracing::warn!(
                             worker_id = cfg.worker_id_str,
                             ?expected,
@@ -521,7 +521,7 @@ pub fn spawn_metrics_poller(
     models_refresh_secs: u64,
     local_tokenizer: Option<Arc<crate::local_tokenize::LocalTokenizerRegistry>>,
     registry: Arc<MetricsRegistry>,
-    workers: Arc<crate::workers::WorkerRegistry>,
+    workers: Arc<crate::fleet::workers::WorkerRegistry>,
     eviction_tx: crate::eviction::EvictionTx,
     cancel: CancellationToken,
     model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
@@ -600,7 +600,7 @@ pub fn spawn_metrics_poller(
                         let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
                         match workers.set_served_models(cfg.worker_id_num, &names) {
                             // As in the warmup path: only a conflict is fatal.
-                            crate::workers::ServedModelsVerdict::Widened { added } => {
+                            crate::fleet::workers::ServedModelsVerdict::Widened { added } => {
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
                                     ?added,
@@ -614,7 +614,7 @@ pub fn spawn_metrics_poller(
                                     &names,
                                 );
                             }
-                            crate::workers::ServedModelsVerdict::Narrowed { missing } => {
+                            crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
                                     ?missing,
@@ -628,8 +628,8 @@ pub fn spawn_metrics_poller(
                                     &names,
                                 );
                             }
-                            crate::workers::ServedModelsVerdict::Accepted
-                            | crate::workers::ServedModelsVerdict::Empty => {
+                            crate::fleet::workers::ServedModelsVerdict::Accepted
+                            | crate::fleet::workers::ServedModelsVerdict::Empty => {
                                 crate::service::associate_models(
                                     &model_router,
                                     pool_id,
@@ -637,7 +637,7 @@ pub fn spawn_metrics_poller(
                                     &names,
                                 );
                             }
-                            crate::workers::ServedModelsVerdict::Mismatch {
+                            crate::fleet::workers::ServedModelsVerdict::Mismatch {
                                 expected,
                                 observed,
                             } => {
