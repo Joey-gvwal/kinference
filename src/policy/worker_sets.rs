@@ -21,6 +21,7 @@ use kube::Api;
 use kube::api::ResourceExt;
 use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::runtime::{WatchStreamExt, reflector};
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::{DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs};
@@ -229,6 +230,27 @@ fn port_ref(v: &IntOrString) -> Option<PortRef> {
     }
 }
 
+/// `[kubernetes]`: worker sets derived from `InferenceWorkerSet` CRs. Profiles
+/// still come from TOML.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct KubernetesConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Namespace to watch; `None` watches all (needs cluster-scoped RBAC).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Label selector an `InferenceWorkerSet` must match, e.g.
+    /// `kinference.buoyant.io/router=edge`. `None` matches everything, which is
+    /// only right when a single router runs in the cluster; leader election
+    /// doesn't prevent every router from building every pool.
+    #[serde(default)]
+    pub selector: Option<String>,
+    /// Last-resort ports, used when neither the Pod nor the CR names one.
+    #[serde(default)]
+    pub discovery_defaults: DiscoveryDefaults,
+}
+
 /// Watch `InferenceWorkerSet`s and drive [`crate::pool_manager::PoolManager`].
 ///
 /// Owns the manager, so the live map needs no lock; the periodic reap sweep
@@ -252,7 +274,7 @@ impl WorkerSetWatcher {
     /// The kube client is passed to [`Self::run`] instead, so tests can drive
     /// reconciles without one.
     pub fn new(
-        kube_cfg: &crate::config::KubernetesConfig,
+        kube_cfg: &KubernetesConfig,
         profiles: Vec<ProfileConfig>,
         manager: crate::pool_manager::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,

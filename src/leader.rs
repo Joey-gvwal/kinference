@@ -17,7 +17,67 @@ use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
 use k8s_openapi::jiff::Timestamp;
 use kube::api::{Api, ObjectMeta, PostParams};
+use serde::Deserialize;
 use tokio::sync::watch;
+
+/// `[leader_election]`: elect a single CRD status writer across replicas.
+///
+/// Only status writing is gated; every replica still routes. Two writers that
+/// disagree would overwrite each other's status forever.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct LeaderElectionConfig {
+    /// Enable before scaling past one replica. Fails closed: a replica that
+    /// can't access the Lease writes nothing. Needs `get`/`create`/`update` on
+    /// `coordination.k8s.io` `leases`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lease name. Must differ between kinference Deployments sharing a
+    /// namespace.
+    #[serde(default = "default_lease_name")]
+    pub lease_name: String,
+    /// Namespace holding the Lease; `None` uses the pod's own namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// How long a claim stays valid without renewal; also the worst-case
+    /// failover delay when a leader dies without vacating.
+    #[serde(default = "default_lease_duration_secs")]
+    pub lease_duration_secs: u64,
+    /// Renew once within this window of expiry. Must be less than
+    /// `lease_duration_secs`.
+    #[serde(default = "default_renew_grace_secs")]
+    pub renew_grace_secs: u64,
+    /// Delay before retrying after an apiserver error or a lost race.
+    #[serde(default = "default_lease_retry_secs")]
+    pub retry_secs: u64,
+}
+
+impl Default for LeaderElectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lease_name: default_lease_name(),
+            namespace: None,
+            lease_duration_secs: default_lease_duration_secs(),
+            renew_grace_secs: default_renew_grace_secs(),
+            retry_secs: default_lease_retry_secs(),
+        }
+    }
+}
+
+fn default_lease_name() -> String {
+    "kinference".to_string()
+}
+// Matches client-go's leader-election defaults: a 15s claim renewed every ~5s.
+fn default_lease_duration_secs() -> u64 {
+    15
+}
+fn default_renew_grace_secs() -> u64 {
+    10
+}
+fn default_lease_retry_secs() -> u64 {
+    2
+}
 
 /// Timings and identity for one elector, from `[leader_election]`.
 ///
@@ -37,8 +97,8 @@ pub struct LeaseParams {
     pub retry: Duration,
 }
 
-impl From<&crate::config::LeaderElectionConfig> for LeaseParams {
-    fn from(c: &crate::config::LeaderElectionConfig) -> Self {
+impl From<&LeaderElectionConfig> for LeaseParams {
+    fn from(c: &LeaderElectionConfig) -> Self {
         Self {
             name: c.lease_name.clone(),
             lease_duration: Duration::from_secs(c.lease_duration_secs),

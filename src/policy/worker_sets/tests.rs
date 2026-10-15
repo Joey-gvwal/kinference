@@ -504,7 +504,7 @@ fn watcher_with(
             backstop: Duration::from_secs(600),
         },
     );
-    let cfg = crate::config::KubernetesConfig {
+    let cfg = KubernetesConfig {
         enabled: true,
         namespace: Some("infra".into()),
         selector: None,

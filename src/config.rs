@@ -5,7 +5,10 @@ use kinference_policy::PoolKey;
 use serde::Deserialize;
 
 use crate::discovery::static_config::WorkersFile;
-use crate::discovery::{DiscoveryConfig, DiscoveryDefaults, DiscoveryMode};
+use crate::discovery::{DiscoveryConfig, DiscoveryMode};
+use crate::leader::LeaderElectionConfig;
+use crate::policy::PolicyConfig;
+use crate::policy::worker_sets::KubernetesConfig;
 use crate::pool::{PoolSpec, ProfileConfig};
 use crate::prom::MetricsConfig;
 use crate::tokenize_client::TokenizeConfig;
@@ -99,116 +102,6 @@ pub struct Config {
     pub leader_election: LeaderElectionConfig,
 }
 
-/// `[policy]`: routing policy from `kinference.buoyant.io` CRDs. See
-/// `crate::policy`.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct PolicyConfig {
-    /// Watch the CRDs and honor `PickRequest.inference_pool`. When off, a
-    /// pool-naming request falls back to model-based routing. Requires the RBAC
-    /// in `charts/kinference/templates/rbac.yaml`.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Namespace to watch; `None` watches all.
-    #[serde(default)]
-    pub namespace: Option<String>,
-    /// Publish one `BackendBinding` per `InferencePool`.
-    #[serde(default = "default_true")]
-    pub backend_bindings: bool,
-    /// The `Extension` a published binding lists. Empty lists none, for routes
-    /// carrying their own `extensionRef` filter. kinference doesn't create or
-    /// read this object.
-    #[serde(default = "default_binding_extension")]
-    pub backend_binding_extension: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_binding_extension() -> String {
-    "chat-picker".to_string()
-}
-
-impl PolicyConfig {
-    /// The extension name to publish, or `None` when empty or whitespace.
-    pub fn binding_extension(&self) -> Option<&str> {
-        let name = self.backend_binding_extension.trim();
-        (!name.is_empty()).then_some(name)
-    }
-}
-
-// Not derived, so `backend_bindings` defaults to true like an absent `[policy]`.
-impl Default for PolicyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            namespace: None,
-            backend_bindings: default_true(),
-            backend_binding_extension: default_binding_extension(),
-        }
-    }
-}
-
-/// `[leader_election]`: elect a single CRD status writer across replicas.
-///
-/// Only status writing is gated; every replica still routes. Two writers that
-/// disagree would overwrite each other's status forever.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct LeaderElectionConfig {
-    /// Enable before scaling past one replica. Fails closed: a replica that
-    /// can't access the Lease writes nothing. Needs `get`/`create`/`update` on
-    /// `coordination.k8s.io` `leases`.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Lease name. Must differ between kinference Deployments sharing a
-    /// namespace.
-    #[serde(default = "default_lease_name")]
-    pub lease_name: String,
-    /// Namespace holding the Lease; `None` uses the pod's own namespace.
-    #[serde(default)]
-    pub namespace: Option<String>,
-    /// How long a claim stays valid without renewal; also the worst-case
-    /// failover delay when a leader dies without vacating.
-    #[serde(default = "default_lease_duration_secs")]
-    pub lease_duration_secs: u64,
-    /// Renew once within this window of expiry. Must be less than
-    /// `lease_duration_secs`.
-    #[serde(default = "default_renew_grace_secs")]
-    pub renew_grace_secs: u64,
-    /// Delay before retrying after an apiserver error or a lost race.
-    #[serde(default = "default_lease_retry_secs")]
-    pub retry_secs: u64,
-}
-
-impl Default for LeaderElectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            lease_name: default_lease_name(),
-            namespace: None,
-            lease_duration_secs: default_lease_duration_secs(),
-            renew_grace_secs: default_renew_grace_secs(),
-            retry_secs: default_lease_retry_secs(),
-        }
-    }
-}
-
-fn default_lease_name() -> String {
-    "kinference".to_string()
-}
-// Matches client-go's leader-election defaults: a 15s claim renewed every ~5s.
-fn default_lease_duration_secs() -> u64 {
-    15
-}
-fn default_renew_grace_secs() -> u64 {
-    10
-}
-fn default_lease_retry_secs() -> u64 {
-    2
-}
-
 /// `[[workerset]]`: one declared worker set. The Kubernetes equivalent is an
 /// `InferenceWorkerSet`; both reduce to a [`PoolSpec`].
 #[allow(dead_code)]
@@ -230,27 +123,6 @@ pub struct WorkerSetConfig {
     pub render_url: Option<String>,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
-}
-
-/// `[kubernetes]`: worker sets derived from `InferenceWorkerSet` CRs. Profiles
-/// still come from TOML.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct KubernetesConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    /// Namespace to watch; `None` watches all (needs cluster-scoped RBAC).
-    #[serde(default)]
-    pub namespace: Option<String>,
-    /// Label selector an `InferenceWorkerSet` must match, e.g.
-    /// `kinference.buoyant.io/router=edge`. `None` matches everything, which is
-    /// only right when a single router runs in the cluster; leader election
-    /// doesn't prevent every router from building every pool.
-    #[serde(default)]
-    pub selector: Option<String>,
-    /// Last-resort ports, used when neither the Pod nor the CR names one.
-    #[serde(default)]
-    pub discovery_defaults: DiscoveryDefaults,
 }
 
 impl Config {
