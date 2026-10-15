@@ -21,17 +21,17 @@ impl KinferenceService {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn policy_select(
         &self,
-        pref: &crate::policy::PoolRef,
+        pref: &kinference_policy::PoolRef,
         store: &Arc<crate::policy::store::PolicyStore>,
         primary: Option<ScoredGroup>,
         // Passed explicitly, since `primary` may not exist (a provider-only
         // model).
         requested_model: &str,
         spare: Option<(Vec<serde_json::Value>, ChatExtras, Vec<u8>)>,
-        attrs: crate::policy::predicate::RequestAttrs,
+        attrs: kinference_policy::predicate::RequestAttrs,
         req_label: &str,
     ) -> Result<PolicySelection, PickAndRecordOutcome> {
-        use crate::policy::engine;
+        use kinference_policy::engine;
 
         let snapshot = store.snapshot();
         let Some(resolved) = snapshot.lookup(&pref.namespace, &pref.name) else {
@@ -88,7 +88,7 @@ impl KinferenceService {
         // `<unmatched>`). The unmatched route gets its own candidate generation
         // (the requested model, local destinations only), so it can't serve a
         // model an earlier rule scored.
-        let mut plan: Vec<(Option<String>, crate::policy::compile::CompiledRoute)> = rules
+        let mut plan: Vec<(Option<String>, kinference_policy::compile::CompiledRoute)> = rules
             .iter()
             .map(|r| (Some(r.name.clone()), r.route.clone()))
             .collect();
@@ -339,9 +339,9 @@ impl KinferenceService {
         &self,
         group: &ScoredGroup,
         group_idx: usize,
-        dest: &crate::policy::resolve::ResolvedWorkerSet,
+        dest: &kinference_policy::resolve::ResolvedWorkerSet,
         canonical_model: &str,
-    ) -> Vec<crate::policy::engine::Candidate> {
+    ) -> Vec<kinference_policy::engine::Candidate> {
         let now = Instant::now();
         let ready_endpoints = group.pool.registry.len() as i64;
         let labels = Arc::new(dest.labels.clone());
@@ -402,18 +402,18 @@ impl KinferenceService {
                 } else {
                     0.0
                 };
-                crate::policy::engine::Candidate {
+                kinference_policy::engine::Candidate {
                     canonical_model: canonical_model.to_string(),
                     upstream_model: group.model.clone(),
                     backend: dest.name.clone(),
                     labels: labels.clone(),
-                    target: crate::policy::engine::CandidateTarget::Local {
+                    target: kinference_policy::engine::CandidateTarget::Local {
                         pool_id: group.pool.id,
                         endpoint: s.endpoint.clone(),
                         score_idx: group_idx,
                         predicted_ttft_ms: predicted,
                     },
-                    attrs: crate::policy::predicate::CandidateAttrs {
+                    attrs: kinference_policy::predicate::CandidateAttrs {
                         context_window: context_by_endpoint.get(&s.endpoint).map(|v| *v as i64),
                         predicted_ttft_ms: Some(predicted as f64),
                         prefix_cache_hit_ratio: Some(hit_ratio),
@@ -424,7 +424,9 @@ impl KinferenceService {
                         model_name: Some(canonical_model.to_string()),
                         backend_name: Some(dest.name.clone()),
                         backend_type: Some(
-                            crate::policy::crd::BackendType::Local.as_str().to_string(),
+                            kinference_policy::crd::BackendType::Local
+                                .as_str()
+                                .to_string(),
                         ),
                         backend_ready_endpoints: Some(ready_endpoints),
                         // Provider-only.

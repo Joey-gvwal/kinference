@@ -13,7 +13,7 @@
 //!   `{"error": {"code", "message", "field"?}}`. Unknown request fields are
 //!   rejected by name.
 //!
-//! The decision comes from [`crate::policy::explain`]; this module seeds
+//! The decision comes from [`kinference_policy::explain`]; this module seeds
 //! candidates from live state, applies the caller's overrides, and projects
 //! the result to JSON by hand, so API naming doesn't leak Rust field names and
 //! the engine types needn't derive `Serialize`.
@@ -28,18 +28,18 @@ use axum::{
     http::{HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
+use kinference_policy::PoolId;
+use kinference_policy::classify;
+use kinference_policy::crd::{OnEmpty, Unmatched};
+use kinference_policy::engine::{Candidate, CandidateTarget, ObjectKey};
+use kinference_policy::explain::{self, Explanation, RuleStep};
+use kinference_policy::predicate::{CandidateAttrs, QOS_VALUES, RequestAttrs};
+use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use crate::metrics::MetricsRegistry;
 use crate::picker::{self, WorkerScore};
-use crate::policy::PoolId;
-use crate::policy::classify;
-use crate::policy::crd::{OnEmpty, Unmatched};
-use crate::policy::engine::{Candidate, CandidateTarget, ObjectKey};
-use crate::policy::explain::{self, Explanation, RuleStep};
-use crate::policy::predicate::{CandidateAttrs, QOS_VALUES, RequestAttrs};
-use crate::policy::resolve::{PolicyIndex, ResolvedPool};
 use crate::policy::store::PolicyStore;
 use crate::pool::PoolRegistry;
 
@@ -430,7 +430,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
         .destinations
         .iter()
         .map(|d| match d {
-            crate::policy::resolve::ResolvedDestination::Local(w) => {
+            kinference_policy::resolve::ResolvedDestination::Local(w) => {
                 let mut models: Vec<&str> = w
                     .aliases
                     .iter()
@@ -451,7 +451,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                     "declaredModels": models,
                 })
             }
-            crate::policy::resolve::ResolvedDestination::Provider(p) => {
+            kinference_policy::resolve::ResolvedDestination::Provider(p) => {
                 let mut models: Vec<&str> = p
                     .models
                     .iter()
@@ -481,7 +481,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
 /// The policy a pool names, as `{name, resolved}`, or `null` when it names
 /// none.
 fn policy_ref_json(pool: &ResolvedPool) -> Value {
-    use crate::policy::resolve::DanglingPolicy;
+    use kinference_policy::resolve::DanglingPolicy;
     match &pool.dangling_policy {
         Some(DanglingPolicy::NotFound { name }) => {
             json!({"name": name, "resolved": false, "problem": "NotFound"})
@@ -908,7 +908,7 @@ fn model_attr_set(
     if requested.is_empty() {
         return Vec::new();
     }
-    let refs: Vec<&crate::policy::resolve::ResolvedWorkerSet> = pool
+    let refs: Vec<&kinference_policy::resolve::ResolvedWorkerSet> = pool
         .map(|p| p.local_destinations().collect())
         .unwrap_or_default();
 

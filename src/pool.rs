@@ -26,12 +26,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
+use kinference_policy::{PoolId, PoolKey};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{PickerConfig, PoolSpec, PredictorConfig, TokenizeMode};
 use crate::inflight_prefixes::InflightPrefixes;
 use crate::inflight_registry::InflightRegistry;
-use crate::policy::{PoolId, PoolKey};
 use crate::workers::WorkerRegistry;
 
 /// An immutable view of the fleet's pools.

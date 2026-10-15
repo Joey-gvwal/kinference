@@ -80,7 +80,9 @@ async fn not_ready_until_the_policy_watch_has_listed() {
     assert!(body.contains("silently bypass"), "got: {body:?}");
 
     // A listed-but-empty snapshot is enough.
-    store.publish(Arc::new(crate::policy::resolve::PolicyIndex::listed_empty()));
+    store.publish(Arc::new(
+        kinference_policy::resolve::PolicyIndex::listed_empty(),
+    ));
     let (status, body) = status_and_body(PoolRegistry::new(), Some(store)).await;
     assert_eq!(status, StatusCode::OK, "got: {body:?}");
 }
@@ -94,7 +96,7 @@ async fn ready_immediately_when_policy_is_disabled() {
 
 // ── Policy API ────────────────────────────────────────────────────────────
 
-use crate::policy::resolve::PolicyIndex;
+use kinference_policy::resolve::PolicyIndex;
 
 fn api_state(policy: Option<Arc<crate::policy::store::PolicyStore>>) -> policy_api::PolicyApiState {
     policy_api::PolicyApiState::new(
@@ -211,7 +213,7 @@ async fn simulate_rejects_an_unnamespaced_policy() {
 
 /// An index holding one unattached policy, which needs no pool or worker set.
 fn index_with_policy(name: &str, spec: serde_json::Value) -> Arc<PolicyIndex> {
-    use crate::policy::crd::{InferencePolicy, InferencePolicySpec};
+    use kinference_policy::crd::{InferencePolicy, InferencePolicySpec};
     use kube::core::ObjectMeta;
     let p = Arc::new(InferencePolicy {
         metadata: ObjectMeta {
@@ -222,7 +224,7 @@ fn index_with_policy(name: &str, spec: serde_json::Value) -> Arc<PolicyIndex> {
         spec: serde_json::from_value::<InferencePolicySpec>(spec).expect("valid spec"),
         status: None,
     });
-    Arc::new(crate::policy::resolve::resolve(
+    Arc::new(kinference_policy::resolve::resolve(
         &[],
         &[p],
         &[],
@@ -409,7 +411,7 @@ async fn an_uncomputable_prediction_is_disclosed_rather_than_shown_as_zero() {
 /// alias admits it.
 #[tokio::test]
 async fn a_local_worker_is_seeded_under_every_declared_alias() {
-    use crate::policy::crd::{
+    use kinference_policy::crd::{
         InferencePool, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec,
     };
     use kube::core::ObjectMeta;
@@ -452,7 +454,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
 
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
-        crate::policy::PoolKey {
+        kinference_policy::PoolKey {
             namespace: Some("default".into()),
             name: "gemma-4-12b".into(),
         },
@@ -460,7 +462,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
     );
 
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::resolve::resolve(
+    store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[],
         &[ws],
@@ -510,7 +512,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
 /// for it, as in production.
 #[tokio::test]
 async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
-    use crate::policy::crd::{
+    use kinference_policy::crd::{
         InferencePool, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec,
     };
     use kube::core::ObjectMeta;
@@ -543,9 +545,9 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
         .expect("valid pool spec"),
         status: None,
     });
-    let pol = Arc::new(crate::policy::crd::InferencePolicy {
+    let pol = Arc::new(kinference_policy::crd::InferencePolicy {
         metadata: meta("alias-policy"),
-        spec: serde_json::from_value::<crate::policy::crd::InferencePolicySpec>(
+        spec: serde_json::from_value::<kinference_policy::crd::InferencePolicySpec>(
             serde_json::json!({
                 "rules": [{
                     "name": "only-qwen-2-5",
@@ -574,14 +576,14 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
 
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
-        crate::policy::PoolKey {
+        kinference_policy::PoolKey {
             namespace: Some("default".into()),
             name: "qwen-2-5-32b".into(),
         },
         pool_id,
     );
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::resolve::resolve(
+    store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[pol],
         &[ws],
@@ -662,7 +664,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
 /// coefficients and block size differ per set.
 #[tokio::test]
 async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
-    use crate::policy::crd::{
+    use kinference_policy::crd::{
         InferencePool, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec,
     };
     use kube::core::ObjectMeta;
@@ -707,7 +709,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
     let mut by_key = std::collections::BTreeMap::new();
     for (name, id) in [("big-blocks", big_id), ("small-blocks", small_id)] {
         by_key.insert(
-            crate::policy::PoolKey {
+            kinference_policy::PoolKey {
                 namespace: Some("default".into()),
                 name: name.into(),
             },
@@ -715,9 +717,9 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
         );
     }
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::resolve::resolve(
+    store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
-        &[Arc::new(crate::policy::crd::InferencePolicy {
+        &[Arc::new(kinference_policy::crd::InferencePolicy {
             metadata: meta("passthrough"),
             spec: serde_json::from_value(serde_json::json!({
                 "rules": [], "unmatched": "ServeLocal"
@@ -1236,7 +1238,7 @@ fn gemma_fleet(policy: serde_json::Value) -> axum::Router {
 
 /// [`gemma_fleet`], with labels on the worker set.
 fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> axum::Router {
-    use crate::policy::crd::{
+    use kinference_policy::crd::{
         InferencePolicy, InferencePolicySpec, InferencePool, InferencePoolSpec, InferenceWorkerSet,
         InferenceWorkerSetSpec,
     };
@@ -1288,11 +1290,11 @@ fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> a
     pools.publish(Arc::new(crate::pool::PoolMap::from_pools(vec![live])));
     let mut by_key = std::collections::BTreeMap::new();
     by_key.insert(
-        crate::policy::PoolKey::namespaced("default", "gemma-4-12b"),
+        kinference_policy::PoolKey::namespaced("default", "gemma-4-12b"),
         pool_id,
     );
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::resolve::resolve(
+    store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[pol],
         &[ws],

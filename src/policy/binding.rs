@@ -18,7 +18,7 @@
 //!   a ref that also gives one.
 //!
 //! The Service port number is read off the Service itself
-//! ([`super::services::ServiceIndex`]), since `serviceRef.port` may be a name
+//! ([`kinference_policy::services::ServiceIndex`]), since `serviceRef.port` may be a name
 //! or absent. A ref that doesn't resolve to a number is left out of the binding
 //! with a warning: a portless Service ref resolves to no endpoints, and
 //! guessing could send traffic to the metrics port. Likewise nothing is
@@ -42,19 +42,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kinference_policy::crd::{
+    BackendBinding, BackendBindingSpec, BindingBackendRef, BindingClaim, BindingObjectReference,
+    InferencePool,
+};
+use kinference_policy::resolve::{
+    GATEWAY_BACKEND_GROUP, GATEWAY_BACKEND_KIND, POLICY_GROUP, ResolvedDestination, ResolvedPool,
+};
+use kinference_policy::services::{ServiceIndex, UnresolvedPort};
 use kube::api::{DeleteParams, ListParams, ObjectMeta, Patch, PatchParams};
 use kube::{Api, Resource, ResourceExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::crd::{
-    BackendBinding, BackendBindingSpec, BindingBackendRef, BindingClaim, BindingObjectReference,
-    InferencePool,
-};
-use super::resolve::{
-    GATEWAY_BACKEND_GROUP, GATEWAY_BACKEND_KIND, POLICY_GROUP, ResolvedDestination, ResolvedPool,
-};
-use super::services::{ServiceIndex, UnresolvedPort};
 use super::store::PolicyStore;
 
 /// Server-side-apply field manager. A field this writer stops setting is

@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::Parser;
 use dashmap::DashMap;
 use dynamo_kv_router::indexer::KvIndexerInterface;
+use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
@@ -19,7 +20,6 @@ use crate::discovery::{
 use crate::metrics::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::mock::MockKinferenceService;
 use crate::monitor::KinferenceService;
-use crate::policy::PoolId;
 use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
 use crate::workers::{WorkerEntry, WorkerRegistry};
@@ -519,7 +519,8 @@ pub async fn run() -> Result<()> {
                 .expect("created whenever [policy] is enabled");
             // Shared: the service writes it from the feedback handlers and the
             // status writer publishes it.
-            let provider_health = Arc::new(policy::provider_health::ProviderHealthStore::new());
+            let provider_health =
+                Arc::new(kinference_policy::provider_health::ProviderHealthStore::new());
             let watcher = policy::store::PolicyWatcher::new(
                 cfg.policy.namespace.clone(),
                 pool_registry.clone(),
@@ -608,7 +609,7 @@ pub async fn run() -> Result<()> {
             Some((store, health)) => (Some(store), health),
             None => (
                 None,
-                Arc::new(policy::provider_health::ProviderHealthStore::new()),
+                Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
             ),
         };
         let service = Arc::new(KinferenceService::new(

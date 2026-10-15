@@ -157,8 +157,8 @@ async fn abandoned_accumulate_leaks_no_bytes() {
 #[test]
 fn a_provider_destination_carries_the_path_and_empty_means_unchanged() {
     let pick = |path: Option<&str>| crate::monitor::ProviderPick {
-        provider: crate::policy::engine::ObjectKey::new("infra", "together"),
-        backend_ref: crate::policy::engine::ObjectKey::new("infra", "together-backend"),
+        provider: kinference_policy::engine::ObjectKey::new("infra", "together"),
+        backend_ref: kinference_policy::engine::ObjectKey::new("infra", "together-backend"),
         path: path.map(str::to_string),
         upstream_model: "acme/llama-70b".into(),
         canonical_model: "bar".into(),

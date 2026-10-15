@@ -1,7 +1,7 @@
 use super::*;
-use crate::policy::compile::CompiledPolicy;
-use crate::policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
-use crate::policy::resolve::{Unresolved, UnresolvedReason};
+use kinference_policy::compile::CompiledPolicy;
+use kinference_policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
+use kinference_policy::resolve::{Unresolved, UnresolvedReason};
 
 fn dest(name: &str, aliases: &[(&str, &str)]) -> ResolvedWorkerSet {
     ResolvedWorkerSet {
@@ -82,7 +82,7 @@ fn resolved(dests: Vec<ResolvedWorkerSet>, unresolved: Vec<Unresolved>) -> Resol
         dangling_policy: None,
         destinations: dests
             .into_iter()
-            .map(crate::policy::resolve::ResolvedDestination::Local)
+            .map(kinference_policy::resolve::ResolvedDestination::Local)
             .collect(),
         unresolved,
         parents: vec![ParentRef {
@@ -122,7 +122,7 @@ fn no_condition_message_has_a_double_space() {
     );
     collect(
         &rejected_worker_set_status(
-            &crate::policy::rejection::RejectReason::MissingKvBlockSize,
+            &kinference_policy::rejection::RejectReason::MissingKvBlockSize,
             &[],
             None,
         )
@@ -187,7 +187,7 @@ fn state_tokens_compose_across_the_kinds() {
 
     // A rejection stands alone, without `NotReady`.
     let broken = rejected_worker_set_status(
-        &crate::policy::rejection::RejectReason::MissingKvBlockSize,
+        &kinference_policy::rejection::RejectReason::MissingKvBlockSize,
         &[],
         None,
     );
@@ -369,7 +369,7 @@ fn an_unbound_worker_set_reports_the_reason_it_did_not_bind() {
 /// A rejected set keeps `referencedBy`.
 #[test]
 fn a_rejected_worker_set_still_reports_who_named_it() {
-    let reason = crate::policy::rejection::RejectReason::MissingKvBlockSize;
+    let reason = kinference_policy::rejection::RejectReason::MissingKvBlockSize;
     let s = rejected_worker_set_status(&reason, &["chat".to_string()], None);
     assert_eq!(s.referenced_by, vec!["chat".to_string()]);
     assert_eq!(cond(&s, "Accepted").status, "False");
@@ -390,7 +390,7 @@ fn unreferenced_status_is_stable_across_reconciles() {
 
 #[test]
 fn a_rejected_worker_set_reports_why_and_clears_its_counts() {
-    let reason = crate::policy::rejection::RejectReason::UnknownProfile {
+    let reason = kinference_policy::rejection::RejectReason::UnknownProfile {
         defined: vec!["h100".into(), "a100".into()],
     };
     let st = rejected_worker_set_status(&reason, &[], None);
@@ -417,7 +417,7 @@ fn a_rejected_worker_set_reports_why_and_clears_its_counts() {
 /// A persistent rejection keeps its `lastTransitionTime`.
 #[test]
 fn a_persistent_rejection_does_not_rewrite_its_transition_time() {
-    let reason = crate::policy::rejection::RejectReason::MissingKvBlockSize;
+    let reason = kinference_policy::rejection::RejectReason::MissingKvBlockSize;
     let first = rejected_worker_set_status(&reason, &[], None);
     let second = rejected_worker_set_status(&reason, &[], Some(&first));
     assert_eq!(
@@ -612,7 +612,7 @@ fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
         crate::pool::PoolRegistry::new(),
         crate::policy::worker_sets::RejectionStore::new(),
         Arc::new(MetricsRegistry::new()),
-        Arc::new(crate::policy::provider_health::ProviderHealthStore::new()),
+        Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         rx,
         Arc::new(crate::prom::PromMetrics::new()),
     );
@@ -763,7 +763,7 @@ fn emptied_status_lists_serialize_so_a_merge_patch_can_clear_them() {
         "`referencedBy` must appear as [] so dropping the last pool clears it"
     );
 
-    let pol = crate::policy::compile::CompiledPolicy::serve_as_asked("p");
+    let pol = kinference_policy::compile::CompiledPolicy::serve_as_asked("p");
     let pj = serde_json::to_value(desired_policy_status(&rp(pol), None)).unwrap();
     assert_eq!(
         pj.get("warnings"),
@@ -1116,7 +1116,7 @@ fn an_unchanged_policy_produces_an_identical_status() {
 #[test]
 fn a_refused_provider_reports_the_reason_and_the_fix() {
     let s = rejected_provider_status(
-        crate::policy::resolve::UnresolvedReason::UnsupportedApiFormat,
+        kinference_policy::resolve::UnresolvedReason::UnsupportedApiFormat,
         None,
     );
     let accepted = &s.conditions[0];
@@ -1152,7 +1152,7 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
 
 #[test]
 fn every_refusal_reason_gets_its_own_message() {
-    use crate::policy::resolve::UnresolvedReason as R;
+    use kinference_policy::resolve::UnresolvedReason as R;
     let msgs: Vec<String> = [
         R::UnsupportedApiFormat,
         R::Incomplete,
@@ -1173,7 +1173,7 @@ fn every_refusal_reason_gets_its_own_message() {
 
 // --- policy warnings in status ------------------------------------------------
 
-use crate::policy::warning::{PolicyWarning, WarningCode};
+use kinference_policy::warning::{PolicyWarning, WarningCode};
 
 fn warning(i: usize) -> PolicyWarning {
     PolicyWarning::new(

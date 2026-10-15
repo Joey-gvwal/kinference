@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{PickerConfig, PredictorConfig, ProfileTokenizeConfig, TokenizeMode};
-use crate::policy::crd::{InferenceWorkerSetSpec, KvEvents, ServiceRef};
+use kinference_policy::crd::{InferenceWorkerSetSpec, KvEvents, ServiceRef};
 
 fn profile(name: &str) -> ProfileConfig {
     ProfileConfig {
@@ -161,7 +161,7 @@ fn a_models_row_missing_its_name_parses_rather_than_failing_the_page() {
 #[test]
 fn a_models_row_missing_its_name_is_rejected() {
     let mut spec = full_spec();
-    spec.models = vec![crate::policy::crd::ModelAlias {
+    spec.models = vec![kinference_policy::crd::ModelAlias {
         name: None,
         aliases: vec!["qwen-2.5".into()],
     }];
@@ -179,7 +179,7 @@ fn a_models_row_missing_its_name_is_rejected() {
 #[test]
 fn a_models_row_with_no_aliases_is_fine() {
     let mut spec = full_spec();
-    spec.models = vec![crate::policy::crd::ModelAlias {
+    spec.models = vec![kinference_policy::crd::ModelAlias {
         name: Some("meta/llama-3.3-70b".into()),
         aliases: vec![],
     }];
@@ -242,8 +242,8 @@ fn a_kv_events_block_with_no_port_is_rejected() {
 /// `rejection_index` projects the reason, and `bind` returns `Incomplete`.
 #[test]
 fn a_portless_kv_events_block_binds_as_incomplete() {
-    use crate::policy::crd::{Destination, InferencePool, InferencePoolSpec};
-    use crate::policy::resolve::{PoolIndex, UnresolvedReason, rejection_index, resolve};
+    use kinference_policy::crd::{Destination, InferencePool, InferencePoolSpec};
+    use kinference_policy::resolve::{PoolIndex, UnresolvedReason, rejection_index, resolve};
 
     let mut spec = full_spec();
     spec.kv_events = Some(KvEvents {
@@ -378,16 +378,16 @@ fn model_discovery_sets_the_interval_and_the_static_list() {
     let mut spec = full_spec();
     // Two upstream models sharing one alias.
     spec.models = vec![
-        crate::policy::crd::ModelAlias {
+        kinference_policy::crd::ModelAlias {
             name: Some("meta-llama/Llama-3.3-70B-Instruct".into()),
             aliases: vec!["chat".into()],
         },
-        crate::policy::crd::ModelAlias {
+        kinference_policy::crd::ModelAlias {
             name: Some("neuralmagic/Llama-3.3-70B-Instruct-FP8".into()),
             aliases: vec!["chat".into()],
         },
     ];
-    spec.model_discovery = Some(crate::policy::crd::ModelDiscovery {
+    spec.model_discovery = Some(kinference_policy::crd::ModelDiscovery {
         mode: ModelDiscoveryMode::Static,
         interval: "2m".into(),
     });
@@ -415,7 +415,7 @@ fn model_discovery_sets_the_interval_and_the_static_list() {
 #[test]
 fn endpoint_mode_leaves_discovery_on() {
     let mut spec = full_spec();
-    spec.model_discovery = Some(crate::policy::crd::ModelDiscovery::default());
+    spec.model_discovery = Some(kinference_policy::crd::ModelDiscovery::default());
     let (out, _) = desired_pools(
         &[iws("infra", "ws", spec)],
         &[profile("h100")],
@@ -429,7 +429,7 @@ fn endpoint_mode_leaves_discovery_on() {
 #[test]
 fn an_unparseable_interval_falls_back_instead_of_rejecting() {
     let mut spec = full_spec();
-    spec.model_discovery = Some(crate::policy::crd::ModelDiscovery {
+    spec.model_discovery = Some(kinference_policy::crd::ModelDiscovery {
         mode: ModelDiscoveryMode::Endpoint,
         interval: "soon".into(),
     });

@@ -248,13 +248,16 @@ impl Picker for KinferenceService {
         };
         let qos = Qos::from_proto(req.qos_class);
         // An absent `inference_pool` means pick across everything served.
-        let pool_ref = req.inference_pool.as_ref().map(|p| crate::policy::PoolRef {
-            namespace: p.namespace.clone(),
-            name: p.name.clone(),
-            resource_version: p.resource_version.clone(),
-        });
+        let pool_ref = req
+            .inference_pool
+            .as_ref()
+            .map(|p| kinference_policy::PoolRef {
+                namespace: p.namespace.clone(),
+                name: p.name.clone(),
+                resource_version: p.resource_version.clone(),
+            });
         // Verbatim, including "", which a policy can match.
-        let identity = crate::policy::RequestIdentity { tenant: req.tenant };
+        let identity = kinference_policy::RequestIdentity { tenant: req.tenant };
         let outcome = self
             .pick_and_record(
                 &pushed,

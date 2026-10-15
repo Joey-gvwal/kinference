@@ -62,7 +62,7 @@ impl KinferenceService {
             return false;
         };
         let (provider, model) = (labels.provider, labels.model);
-        use crate::policy::provider_health::FailureKind;
+        use kinference_policy::provider_health::FailureKind;
         let failure = match upstream_status {
             // No response at all.
             0 => Some((FailureKind::Upstream, "no response".to_string())),
@@ -101,8 +101,8 @@ impl KinferenceService {
         reason: crate::proto::abort_request::Reason,
         detail: &str,
     ) {
-        use crate::policy::provider_health::FailureKind;
         use crate::proto::abort_request::Reason;
+        use kinference_policy::provider_health::FailureKind;
         let kind = match reason {
             Reason::BackendUnresolved => FailureKind::Unresolved,
             Reason::BackendUnauthorized => FailureKind::Unauthorized,
@@ -120,8 +120,8 @@ impl KinferenceService {
     /// Logged on the transition only.
     pub(crate) fn note_provider_failure(
         &self,
-        provider: &crate::policy::engine::ObjectKey,
-        kind: crate::policy::provider_health::FailureKind,
+        provider: &kinference_policy::engine::ObjectKey,
+        kind: kinference_policy::provider_health::FailureKind,
         detail: &str,
     ) {
         if self.provider_health.record_failure(provider, kind, detail) {

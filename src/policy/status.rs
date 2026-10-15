@@ -17,24 +17,24 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use kube::Api;
-use kube::api::{Patch, PatchParams};
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
-
-use super::crd::{
+use kinference_policy::PoolId;
+use kinference_policy::crd::{
     Condition, ContextWindow, EndpointCounts, InferencePolicy, InferencePolicyStatus,
     InferencePool, InferencePoolStatus, InferenceProvider, InferenceProviderStatus,
     InferenceWorkerSet, InferenceWorkerSetStatus, KvEventsStatus, ParentStatus, PoolModelStatus,
     UnresolvedDestination, WorkerSetModelStatus,
 };
-use super::provider_health::{FailureKind, ProviderHealth};
-use super::resolve::{
+use kinference_policy::provider_health::{FailureKind, ProviderHealth};
+use kinference_policy::resolve::{
     DanglingPolicy, ResolvedPolicy, ResolvedPool, ResolvedWorkerSet, UnresolvedReason,
 };
+use kube::Api;
+use kube::api::{Patch, PatchParams};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
 use super::store::PolicyStore;
 use crate::metrics::MetricsRegistry;
-use crate::policy::PoolId;
 use crate::pool::Pool;
 
 /// The controller identity written into `status.parents[].controllerName`.
@@ -270,8 +270,8 @@ pub fn desired_pool_status(
         }
         (Some(DanglingPolicy::WrongKind { name, group, kind }), _) => format!(
             "policyRef `{name}` names {group}/{kind}, not {}/{}; serving without policy",
-            super::resolve::POLICY_GROUP,
-            super::resolve::POLICY_KIND
+            kinference_policy::resolve::POLICY_GROUP,
+            kinference_policy::resolve::POLICY_KIND
         ),
         (None, 0) => "all destinations and the policyRef resolved".to_string(),
         (None, n) => format!("{n} destination(s) did not resolve"),
@@ -389,7 +389,7 @@ pub fn desired_pool_status(
 /// Everything derived from a pool is cleared rather than omitted, so stale
 /// counts from before the rejection don't linger.
 pub fn rejected_worker_set_status(
-    reason: &super::rejection::RejectReason,
+    reason: &kinference_policy::rejection::RejectReason,
     referenced_by: &[String],
     previous: Option<&InferenceWorkerSetStatus>,
 ) -> InferenceWorkerSetStatus {
@@ -546,10 +546,10 @@ pub fn desired_provider_status(
 /// `Accepted=False` rather than `ResolvedRefs=False`: the spec itself is what
 /// needs fixing.
 pub fn rejected_provider_status(
-    reason: super::resolve::UnresolvedReason,
+    reason: kinference_policy::resolve::UnresolvedReason,
     previous: Option<&InferenceProviderStatus>,
 ) -> InferenceProviderStatus {
-    use super::resolve::UnresolvedReason as R;
+    use kinference_policy::resolve::UnresolvedReason as R;
     let prev = previous.map(|s| s.conditions.as_slice());
     let msg = match reason {
         R::UnsupportedApiFormat => {
@@ -857,7 +857,7 @@ pub struct StatusWriter {
     metrics: Arc<MetricsRegistry>,
     /// Caller-reported provider health, the only source for a provider's
     /// status.
-    provider_health: Arc<super::provider_health::ProviderHealthStore>,
+    provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
     /// Last status we wrote, per [`cache_key`]. Both the loop-breaker and the
     /// source of stable `lastTransitionTime`s.
     last: Mutex<HashMap<CacheKey, serde_json::Value>>,
@@ -878,7 +878,7 @@ impl StatusWriter {
         pools: Arc<crate::pool::PoolRegistry>,
         rejections: Arc<super::worker_sets::RejectionStore>,
         metrics: Arc<MetricsRegistry>,
-        provider_health: Arc<super::provider_health::ProviderHealthStore>,
+        provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         leader: watch::Receiver<bool>,
         prom: Arc<crate::prom::PromMetrics>,
     ) -> Self {
@@ -1001,7 +1001,7 @@ impl StatusWriter {
 
             // --- providers -------------------------------------------------
             for prov in resolved.destinations.iter().filter_map(|d| d.as_provider()) {
-                let key = crate::policy::engine::ObjectKey::new(&prov.namespace, &prov.name);
+                let key = kinference_policy::engine::ObjectKey::new(&prov.namespace, &prov.name);
                 let prev = self.previous::<InferenceProviderStatus>(
                     "InferenceProvider",
                     &prov.namespace,
@@ -1123,7 +1123,7 @@ impl StatusWriter {
     /// counts to `kinference_policy_warnings`.
     ///
     /// Each warning is logged once, when it first appears.
-    fn report_policy_warnings(&self, snapshot: &super::resolve::PolicyIndex) {
+    fn report_policy_warnings(&self, snapshot: &kinference_policy::resolve::PolicyIndex) {
         let mut current: HashSet<String> = HashSet::new();
         let mut rows: Vec<(String, &'static str, i64)> = Vec::new();
         for resolved in snapshot.policies() {
@@ -1215,7 +1215,7 @@ pub async fn spawn(
     pools: Arc<crate::pool::PoolRegistry>,
     rejections: Arc<super::worker_sets::RejectionStore>,
     metrics: Arc<MetricsRegistry>,
-    provider_health: Arc<super::provider_health::ProviderHealthStore>,
+    provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
     leader: watch::Receiver<bool>,
     prom: Arc<crate::prom::PromMetrics>,
     cancel: CancellationToken,

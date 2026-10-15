@@ -209,12 +209,12 @@ pub struct RequestMeta {
     /// Here rather than in `PendingObservation`, which is built from
     /// per-endpoint scoring state a provider doesn't have, and because this
     /// map lives until `ReportFinalToken`.
-    pub provider: Option<crate::policy::engine::ObjectKey>,
+    pub provider: Option<kinference_policy::engine::ObjectKey>,
 }
 
 /// What `RequestLabels` knows about a pick that went off-cluster.
 pub struct ProviderPickLabels {
-    pub provider: crate::policy::engine::ObjectKey,
+    pub provider: kinference_policy::engine::ObjectKey,
     pub model: String,
     /// Whether the caller asked for streaming. Decides whether its reported
     /// first-token time is a real TTFT or the whole response.

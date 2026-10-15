@@ -27,9 +27,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use kinference_policy::{PoolId, PoolKey};
+
 use crate::config::PoolSpec;
-use crate::policy::PoolId;
-use crate::policy::PoolKey;
 use crate::pool::{Pool, PoolMap, PoolRegistry};
 
 /// Side effects that belong to subsystems the manager doesn't depend on

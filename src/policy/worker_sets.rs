@@ -14,15 +14,15 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::TryStreamExt;
+use kinference_policy::PoolKey;
+use kinference_policy::crd::{InferenceWorkerSet, IntOrString, ModelDiscoveryMode};
+use kinference_policy::rejection::{RejectReason, Rejection};
 use kube::Api;
 use kube::api::ResourceExt;
 use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::runtime::{WatchStreamExt, reflector};
 use tokio_util::sync::CancellationToken;
 
-use super::PoolKey;
-use super::crd::{InferenceWorkerSet, IntOrString, ModelDiscoveryMode};
-use super::rejection::{RejectReason, Rejection};
 use crate::config::{
     DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PoolSpec, PortRef, PortRefs, ProfileConfig,
 };
@@ -191,7 +191,7 @@ pub fn desired_pools(
 /// An unparseable or non-positive value falls back to the fleet default with a
 /// warning rather than rejecting the set. Sub-second values are clamped to 1s.
 fn refresh_secs(interval: &str, key: &PoolKey) -> Option<u64> {
-    match super::predicate::parse_duration_ms(interval) {
+    match kinference_policy::predicate::parse_duration_ms(interval) {
         Ok(ms) if ms >= 1.0 => Some(((ms / 1000.0).round() as u64).max(1)),
         Ok(ms) => {
             tracing::warn!(

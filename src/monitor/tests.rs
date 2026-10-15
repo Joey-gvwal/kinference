@@ -202,12 +202,12 @@ fn empty_model_list_is_noop() {
 // `model_router` only holds names engines report, so a declared alias is
 // translated before the "nothing serves this model" check.
 
-fn ws(aliases: &[(&str, &str)]) -> crate::policy::resolve::ResolvedWorkerSet {
-    crate::policy::resolve::ResolvedWorkerSet {
+fn ws(aliases: &[(&str, &str)]) -> kinference_policy::resolve::ResolvedWorkerSet {
+    kinference_policy::resolve::ResolvedWorkerSet {
         name: "set-a".into(),
         namespace: "default".into(),
         labels: std::collections::BTreeMap::new(),
-        pool_id: crate::policy::PoolId::from_raw(0),
+        pool_id: kinference_policy::PoolId::from_raw(0),
         service_name: "svc".into(),
         service_port: None,
         kv_events_declared: false,
@@ -215,7 +215,7 @@ fn ws(aliases: &[(&str, &str)]) -> crate::policy::resolve::ResolvedWorkerSet {
             .iter()
             // Fixtures pass (canonical, upstream); the canonical becomes an
             // alias of the upstream.
-            .map(|(n, u)| crate::policy::crd::ModelAlias {
+            .map(|(n, u)| kinference_policy::crd::ModelAlias {
                 name: Some(u.to_string()),
                 aliases: if n == u { vec![] } else { vec![n.to_string()] },
             })
@@ -287,19 +287,19 @@ fn aliases_on_a_later_destination_are_found() {
 fn resolved_provider(
     name: &str,
     models: &[(&str, &str, Option<u32>)],
-) -> crate::policy::resolve::ResolvedProvider {
-    crate::policy::resolve::ResolvedProvider {
+) -> kinference_policy::resolve::ResolvedProvider {
+    kinference_policy::resolve::ResolvedProvider {
         uid: None,
         name: name.into(),
         namespace: "default".into(),
         labels: std::collections::BTreeMap::new(),
-        backend_ref: crate::policy::engine::ObjectKey::new("default", format!("{name}-be")),
+        backend_ref: kinference_policy::engine::ObjectKey::new("default", format!("{name}-be")),
         path: None,
         models: models
             .iter()
             // (canonical, upstream, ctx); the canonical becomes an alias of
             // the upstream.
-            .map(|(n, u, ctx)| crate::policy::crd::ProviderModel {
+            .map(|(n, u, ctx)| kinference_policy::crd::ProviderModel {
                 name: Some(u.to_string()),
                 aliases: if n == u { vec![] } else { vec![n.to_string()] },
                 context_window: *ctx,
@@ -311,7 +311,7 @@ fn resolved_provider(
 /// Every per-endpoint signal is `None`, not a default.
 #[test]
 fn a_provider_candidate_carries_no_per_endpoint_signal() {
-    let health = crate::policy::provider_health::ProviderHealthStore::new();
+    let health = kinference_policy::provider_health::ProviderHealthStore::new();
     let prov = resolved_provider("together", &[("bar", "acme/llama-70b", Some(131072))]);
     let cands = provider_candidates_for(&health, &prov, "bar");
     assert_eq!(cands.len(), 1);
@@ -321,7 +321,10 @@ fn a_provider_candidate_carries_no_per_endpoint_signal() {
     // The vendor's own spelling.
     assert_eq!(c.upstream_model, "acme/llama-70b");
     assert_eq!(c.backend, "together");
-    assert_eq!(c.backend_type(), crate::policy::crd::BackendType::Provider);
+    assert_eq!(
+        c.backend_type(),
+        kinference_policy::crd::BackendType::Provider
+    );
 
     assert_eq!(c.attrs.predicted_ttft_ms, None);
     assert_eq!(c.attrs.prefix_cache_hit_ratio, None);
@@ -335,12 +338,12 @@ fn a_provider_candidate_carries_no_per_endpoint_signal() {
 /// `CandidateTarget`.
 #[test]
 fn a_provider_candidate_carries_the_dispatch_path() {
-    let health = crate::policy::provider_health::ProviderHealthStore::new();
+    let health = kinference_policy::provider_health::ProviderHealthStore::new();
     let mut prov = resolved_provider("together", &[("bar", "up", None)]);
     prov.path = Some("/serving-endpoints/chat/completions".into());
 
     let target = &provider_candidates_for(&health, &prov, "bar")[0].target;
-    let crate::policy::engine::CandidateTarget::Provider { path, .. } = target else {
+    let kinference_policy::engine::CandidateTarget::Provider { path, .. } = target else {
         panic!("a provider candidate");
     };
     assert_eq!(path.as_deref(), Some("/serving-endpoints/chat/completions"));
@@ -348,7 +351,7 @@ fn a_provider_candidate_carries_the_dispatch_path() {
     // A provider that declares none leaves the path alone.
     prov.path = None;
     let target = &provider_candidates_for(&health, &prov, "bar")[0].target;
-    let crate::policy::engine::CandidateTarget::Provider { path, .. } = target else {
+    let kinference_policy::engine::CandidateTarget::Provider { path, .. } = target else {
         panic!("a provider candidate");
     };
     assert_eq!(*path, None);
@@ -356,7 +359,7 @@ fn a_provider_candidate_carries_the_dispatch_path() {
 
 #[test]
 fn a_declaration_the_crd_would_reject_yields_no_candidate() {
-    let health = crate::policy::provider_health::ProviderHealthStore::new();
+    let health = kinference_policy::provider_health::ProviderHealthStore::new();
     // A canonical name nobody declared.
     let prov = resolved_provider("together", &[("bar", "up", None)]);
     assert!(provider_candidates_for(&health, &prov, "other").is_empty());
@@ -364,7 +367,7 @@ fn a_declaration_the_crd_would_reject_yields_no_candidate() {
 
 #[test]
 fn two_rows_under_one_name_are_two_candidates() {
-    let health = crate::policy::provider_health::ProviderHealthStore::new();
+    let health = kinference_policy::provider_health::ProviderHealthStore::new();
     let prov = resolved_provider(
         "together",
         &[("bar", "acme/v1", None), ("bar", "acme/v2", None)],
@@ -377,10 +380,10 @@ fn two_rows_under_one_name_are_two_candidates() {
 /// A provider the caller keeps failing to reach stops being offered.
 #[test]
 fn a_suppressed_provider_produces_no_candidates_at_all() {
-    use crate::policy::provider_health::FailureKind;
-    let health = crate::policy::provider_health::ProviderHealthStore::new();
+    use kinference_policy::provider_health::FailureKind;
+    let health = kinference_policy::provider_health::ProviderHealthStore::new();
     let prov = resolved_provider("together", &[("bar", "up", None)]);
-    let key = crate::policy::engine::ObjectKey::new("default", "together");
+    let key = kinference_policy::engine::ObjectKey::new("default", "together");
 
     assert_eq!(provider_candidates_for(&health, &prov, "bar").len(), 1);
 
@@ -399,9 +402,9 @@ fn a_suppressed_provider_produces_no_candidates_at_all() {
 
 #[test]
 fn an_observed_provider_carries_its_p95_as_both_signal_and_objective() {
-    let health = crate::policy::provider_health::ProviderHealthStore::new();
+    let health = kinference_policy::provider_health::ProviderHealthStore::new();
     let prov = resolved_provider("together", &[("bar", "up", None)]);
-    let key = crate::policy::engine::ObjectKey::new("default", "together");
+    let key = kinference_policy::engine::ObjectKey::new("default", "together");
     health.record_success(&key, 840.0);
 
     let c = &provider_candidates_for(&health, &prov, "bar")[0];
@@ -409,12 +412,12 @@ fn an_observed_provider_carries_its_p95_as_both_signal_and_objective() {
     assert_eq!(c.attrs.backend_observed_ttft_ms, Some(840.0));
     // ...and once as the value EstimatedTTFT ranks on, which must agree.
     assert_eq!(
-        c.objective_ms(&crate::policy::compile::Rank::MinimizeEstimatedTtft),
+        c.objective_ms(&kinference_policy::compile::Rank::MinimizeEstimatedTtft),
         Some(840.0)
     );
     // But never as PredictedTTFT, which is Local-only by construction.
     assert_eq!(
-        c.objective_ms(&crate::policy::compile::Rank::MinimizePredictedTtft),
+        c.objective_ms(&kinference_policy::compile::Rank::MinimizePredictedTtft),
         None
     );
 }
@@ -530,7 +533,7 @@ fn policy_fleet_with(
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
         let mut spec = crate::config::test_spec(name, 16);
-        spec.key = crate::policy::PoolKey::namespaced("default", *name);
+        spec.key = kinference_policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(
             PoolId::next(),
@@ -541,8 +544,11 @@ fn policy_fleet_with(
             id += 1;
             p.registry.register(id, offline_worker(model, addr));
         }
-        bound.insert(crate::policy::PoolKey::namespaced("default", *name), p.id);
-        worker_sets.push(cr::<crate::policy::crd::InferenceWorkerSet>(
+        bound.insert(
+            kinference_policy::PoolKey::namespaced("default", *name),
+            p.id,
+        );
+        worker_sets.push(cr::<kinference_policy::crd::InferenceWorkerSet>(
             serde_json::json!({
                 "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceWorkerSet",
                 "metadata": {"name": name, "namespace": "default"},
@@ -555,7 +561,7 @@ fn policy_fleet_with(
     registry.publish(Arc::new(crate::pool::PoolMap::from_pools(live.clone())));
     let mut provs = Vec::new();
     for (name, models) in providers {
-        provs.push(cr::<crate::policy::crd::InferenceProvider>(
+        provs.push(cr::<kinference_policy::crd::InferenceProvider>(
             serde_json::json!({
                 "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceProvider",
                 "metadata": {"name": name, "namespace": "default"},
@@ -565,18 +571,18 @@ fn policy_fleet_with(
         ));
         dests.push(serde_json::json!({"kind": "InferenceProvider", "name": name}));
     }
-    let pool = cr::<crate::policy::crd::InferencePool>(serde_json::json!({
+    let pool = cr::<kinference_policy::crd::InferencePool>(serde_json::json!({
         "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferencePool",
         "metadata": {"name": "pool", "namespace": "default"},
         "spec": {"destinations": dests, "policyRef": {"name": "p"}}
     }));
-    let policy = cr::<crate::policy::crd::InferencePolicy>(serde_json::json!({
+    let policy = cr::<kinference_policy::crd::InferencePolicy>(serde_json::json!({
         "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferencePolicy",
         "metadata": {"name": "p", "namespace": "default"},
         "spec": spec
     }));
     let store = crate::policy::store::PolicyStore::new();
-    store.publish(Arc::new(crate::policy::resolve::resolve(
+    store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[pool],
         &[policy],
         &worker_sets,
@@ -597,7 +603,7 @@ fn policy_fleet_with(
         Arc::new(RequestLabels::new(ttl)),
         Arc::new(crate::body_store::BodyStore::new(1 << 20, 1 << 20, ttl)),
         Some(store.clone()),
-        Arc::new(crate::policy::provider_health::ProviderHealthStore::new()),
+        Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         ttl,
         Arc::new(ObservationSink::from_env()),
         Arc::new(crate::prom::PromMetrics::new()),
@@ -639,7 +645,7 @@ async fn select(
     start: ScoredGroup,
     model: &str,
 ) -> Result<PolicySelection, PickAndRecordOutcome> {
-    let pref = crate::policy::PoolRef {
+    let pref = kinference_policy::PoolRef {
         namespace: "default".into(),
         name: "pool".into(),
         resource_version: String::new(),
@@ -649,7 +655,7 @@ async fn select(
         ChatExtras::default(),
         b"{}".to_vec(),
     ));
-    let attrs = crate::policy::predicate::RequestAttrs {
+    let attrs = kinference_policy::predicate::RequestAttrs {
         model: vec![model.into()],
         ..Default::default()
     };
@@ -746,12 +752,12 @@ async fn local_and_cloud_picks() -> KinferenceService {
         "qwen-ws",
         &["qwen".to_string()],
     );
-    let pool = crate::policy::PoolRef {
+    let pool = kinference_policy::PoolRef {
         namespace: "default".into(),
         name: "pool".into(),
         resource_version: String::new(),
     };
-    let tenant = crate::policy::RequestIdentity {
+    let tenant = kinference_policy::RequestIdentity {
         tenant: "acme".into(),
     };
     let body = br#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#;

@@ -12,12 +12,12 @@ use std::time::Instant;
 
 use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+use kinference_policy::{AUTO_MODEL, PoolId};
 
 use crate::metrics::MetricsRegistry;
 use crate::observation_sink::ObservationSink;
 use crate::observations::{PendingObservations, RequestLabels, RequestMeta, format_csv_row};
 use crate::picker::WorkerScore;
-use crate::policy::{AUTO_MODEL, PoolId};
 use crate::pool::Pool;
 use crate::tokenize::TokenizeInput;
 use crate::workers::WorkerEntry;
@@ -148,8 +148,8 @@ pub(crate) enum PolicySelection {
 /// spelling of the model. No URL or credential.
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderPick {
-    pub provider: crate::policy::engine::ObjectKey,
-    pub backend_ref: crate::policy::engine::ObjectKey,
+    pub provider: kinference_policy::engine::ObjectKey,
+    pub backend_ref: kinference_policy::engine::ObjectKey,
     pub path: Option<String>,
     /// The vendor's name for the model, written into the body.
     pub upstream_model: String,
@@ -163,10 +163,10 @@ pub(crate) struct ProviderPick {
 /// section commits against the pool that produced the scores.
 fn selection(
     scored: &mut Vec<ScoredGroup>,
-    candidate: crate::policy::engine::Candidate,
+    candidate: kinference_policy::engine::Candidate,
 ) -> PolicySelection {
     match candidate.target {
-        crate::policy::engine::CandidateTarget::Local {
+        kinference_policy::engine::CandidateTarget::Local {
             score_idx,
             endpoint,
             ..
@@ -174,7 +174,7 @@ fn selection(
             group: scored.swap_remove(score_idx),
             endpoint,
         },
-        crate::policy::engine::CandidateTarget::Provider {
+        kinference_policy::engine::CandidateTarget::Provider {
             provider,
             backend_ref,
             path,
@@ -193,11 +193,11 @@ fn selection(
 fn log_winner(
     req_label: &str,
     pool: &str,
-    candidate: &crate::policy::engine::Candidate,
-    trace: &crate::policy::engine::Trace,
+    candidate: &kinference_policy::engine::Candidate,
+    trace: &kinference_policy::engine::Trace,
 ) {
     let (endpoint, objective, path) = match &candidate.target {
-        crate::policy::engine::CandidateTarget::Local {
+        kinference_policy::engine::CandidateTarget::Local {
             endpoint,
             predicted_ttft_ms,
             ..
@@ -207,7 +207,7 @@ fn log_winner(
             // A local engine is OpenAI-native, so the path is never rewritten.
             "",
         ),
-        crate::policy::engine::CandidateTarget::Provider {
+        kinference_policy::engine::CandidateTarget::Provider {
             backend_ref,
             observed_ttft_ms,
             path,
@@ -241,11 +241,11 @@ fn log_winner(
 /// `None` (not a default, since a latency of 0 would win every ranking), and
 /// the only latency is the caller-reported p95.
 fn provider_candidates_for(
-    health: &crate::policy::provider_health::ProviderHealthStore,
-    prov: &crate::policy::resolve::ResolvedProvider,
+    health: &kinference_policy::provider_health::ProviderHealthStore,
+    prov: &kinference_policy::resolve::ResolvedProvider,
     canonical_model: &str,
-) -> Vec<crate::policy::engine::Candidate> {
-    let provider = crate::policy::engine::ObjectKey::new(&prov.namespace, &prov.name);
+) -> Vec<kinference_policy::engine::Candidate> {
+    let provider = kinference_policy::engine::ObjectKey::new(&prov.namespace, &prov.name);
     // A suppressed provider (repeated dispatch failures) produces no
     // candidates.
     if health.is_suppressed(&provider) {
@@ -256,12 +256,12 @@ fn provider_candidates_for(
     prov.upstreams_for(canonical_model)
         .into_iter()
         .map(
-            |(upstream, context_window)| crate::policy::engine::Candidate {
+            |(upstream, context_window)| kinference_policy::engine::Candidate {
                 canonical_model: canonical_model.to_string(),
                 upstream_model: upstream,
                 backend: prov.name.clone(),
                 labels: labels.clone(),
-                target: crate::policy::engine::CandidateTarget::Provider {
+                target: kinference_policy::engine::CandidateTarget::Provider {
                     provider: provider.clone(),
                     backend_ref: prov.backend_ref.clone(),
                     path: prov.path.clone(),
@@ -269,7 +269,7 @@ fn provider_candidates_for(
                     // EstimatedTTFT.
                     observed_ttft_ms,
                 },
-                attrs: crate::policy::predicate::CandidateAttrs {
+                attrs: kinference_policy::predicate::CandidateAttrs {
                     // Provider: no local engine, so neither saturation gauge exists.
                     kv_cache_usage: None,
                     // Declared, not discovered.
@@ -280,7 +280,7 @@ fn provider_candidates_for(
                     model_name: Some(canonical_model.to_string()),
                     backend_name: Some(prov.name.clone()),
                     backend_type: Some(
-                        crate::policy::crd::BackendType::Provider
+                        kinference_policy::crd::BackendType::Provider
                             .as_str()
                             .to_string(),
                     ),
@@ -350,7 +350,7 @@ pub struct KinferenceService {
     ///
     /// Always present, even with policy disabled, so the feedback handlers
     /// needn't check.
-    pub(crate) provider_health: Arc<crate::policy::provider_health::ProviderHealthStore>,
+    pub(crate) provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
     /// Maximum silence between two `PushBody` chunks before the push is
     /// abandoned. The push itself has no deadline, since it spans the client's
     /// upload.
@@ -371,7 +371,7 @@ impl KinferenceService {
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::body_store::BodyStore>,
         policy: Option<Arc<crate::policy::store::PolicyStore>>,
-        provider_health: Arc<crate::policy::provider_health::ProviderHealthStore>,
+        provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         body_idle_timeout: std::time::Duration,
         observation_sink: Arc<ObservationSink>,
         prom: Arc<crate::prom::PromMetrics>,
@@ -425,7 +425,7 @@ impl KinferenceService {
     /// spelling. Empty when no pool is named or policy is off.
     fn declared_aliases(
         &self,
-        pool_ref: Option<&crate::policy::PoolRef>,
+        pool_ref: Option<&kinference_policy::PoolRef>,
         upstream: &str,
     ) -> Vec<String> {
         let Some(store) = self.policy.as_ref() else {
@@ -460,14 +460,14 @@ impl KinferenceService {
     /// destinations only; providers map names when candidates are built.
     fn resolve_alias(
         &self,
-        pool_ref: Option<&crate::policy::PoolRef>,
+        pool_ref: Option<&kinference_policy::PoolRef>,
         canonical: &str,
     ) -> Option<String> {
         let store = self.policy.as_ref()?;
         let pref = pool_ref?;
         let snapshot = store.snapshot();
         let resolved = snapshot.lookup(&pref.namespace, &pref.name)?;
-        let local: Vec<&crate::policy::resolve::ResolvedWorkerSet> =
+        let local: Vec<&kinference_policy::resolve::ResolvedWorkerSet> =
             resolved.local_destinations().collect();
         first_served_upstream(&local, canonical, |m| !self.resolve_pools(m).is_empty())
     }
@@ -476,7 +476,7 @@ impl KinferenceService {
     ///
     /// Consulted after `resolve_pools` came back empty, so a model only a
     /// provider serves isn't refused before `policy_select` runs.
-    fn provider_serves(&self, pool_ref: Option<&crate::policy::PoolRef>, model: &str) -> bool {
+    fn provider_serves(&self, pool_ref: Option<&kinference_policy::PoolRef>, model: &str) -> bool {
         let Some(store) = self.policy.as_ref() else {
             return false;
         };
@@ -623,7 +623,7 @@ pub(crate) enum Input {
 /// canonical name itself, which no pool serves if we got here. Takes the first
 /// match, so interchangeable upstreams resolve to one fixed choice.
 pub(crate) fn first_served_upstream(
-    destinations: &[&crate::policy::resolve::ResolvedWorkerSet],
+    destinations: &[&kinference_policy::resolve::ResolvedWorkerSet],
     canonical: &str,
     is_served: impl Fn(&str) -> bool,
 ) -> Option<String> {
