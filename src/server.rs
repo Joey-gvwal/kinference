@@ -19,10 +19,10 @@ use crate::discovery::{
     static_config::StaticDiscovery,
 };
 use crate::mock::MockKinferenceService;
-use crate::monitor::KinferenceService;
 use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
 use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
+use crate::service::KinferenceService;
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
     admin, body_store, eviction, ingest, leader, local_tokenize, metrics, observation_sink,
@@ -790,7 +790,7 @@ fn handle_added(
     // route the model_name hint, before the first /v1/models scrape.
     worker_pool.insert(w.worker_id_num, pool.clone());
     if !w.model_name.is_empty() {
-        crate::monitor::associate_models(
+        crate::service::associate_models(
             model_router,
             pool.id,
             &pool.name,
@@ -843,11 +843,11 @@ fn handle_added(
                         "declared model list differs from this set's pinned models; \
                          routing anyway on the declared list"
                     );
-                    crate::monitor::associate_models(model_router, pool.id, &pool.name, models);
+                    crate::service::associate_models(model_router, pool.id, &pool.name, models);
                 }
                 crate::workers::ServedModelsVerdict::Accepted
                 | crate::workers::ServedModelsVerdict::Empty => {
-                    crate::monitor::associate_models(model_router, pool.id, &pool.name, models);
+                    crate::service::associate_models(model_router, pool.id, &pool.name, models);
                 }
                 crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                     // As above, but not routable: skip the worker rather than

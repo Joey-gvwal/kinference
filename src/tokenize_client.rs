@@ -1,5 +1,5 @@
 //! Tokenization for `score_workers`, as methods on
-//! [`crate::monitor::KinferenceService`]. One mode per pool profile:
+//! [`crate::service::KinferenceService`]. One mode per pool profile:
 //! - `Render`: vLLM's `/render`, rotating across workers.
 //! - `Local`: in-process tokenization, falling back to `/render`.
 //! - `Compare`: `/render` is authoritative; the local result is compared in
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::local_tokenize::LocalTokenizeConfig;
-use crate::monitor::KinferenceService;
+use crate::service::KinferenceService;
 use crate::tokenize::{
     TokenizeInput, TokenizeMode, render_post_raw_at_url, render_structured_at_url,
     render_via_vllm_raw, render_via_vllm_structured,

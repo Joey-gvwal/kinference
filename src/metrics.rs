@@ -115,7 +115,7 @@ const ITL_LE_LABELS: [&str; 15] = [
 /// Authoritative source: [`PickOutcome::as_label`].
 const PICK_OUTCOMES: [&str; 3] = ["ok", "bad_request", "no_workers"];
 
-/// `kinference_score_degraded_total{reason}`. Source: [`crate::monitor::Degraded::as_label`].
+/// `kinference_score_degraded_total{reason}`. Source: [`crate::service::Degraded::as_label`].
 const DEGRADE_REASONS: [&str; 2] = ["tokenize", "prefix_index"];
 
 /// `kinference_tokenize_total{path}`. Source: `crate::tokenize_client`; exactly one
@@ -144,8 +144,8 @@ const BODY_ABORT_REASONS: [&str; 5] = [
 
 /// `kinference_policy_decisions_total{outcome}`.
 ///
-/// No enum behind this one: call sites in `monitor::policy_driver` and
-/// `monitor::lifecycle` pass string literals, so add new outcomes here too.
+/// No enum behind this one: call sites in `service::policy_driver` and
+/// `service::lifecycle` pass string literals, so add new outcomes here too.
 const POLICY_DECISION_OUTCOMES: [&str; 9] = [
     "chosen",
     "unmatched_served",
@@ -384,7 +384,7 @@ pub struct PromMetrics {
     /// biased low).
     ///
     /// Recorded by exactly one ranker per request: `policy_driver`'s
-    /// `candidates_for` when a policy is in play, `monitor::best_group`
+    /// `candidates_for` when a policy is in play, `service::best_group`
     /// otherwise.
     predicted_ttft_ms: HistogramVec,
 }

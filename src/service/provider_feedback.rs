@@ -5,7 +5,7 @@
 //! over the feedback RPCs. `record_provider_pick` writes the labels that the
 //! report handlers read back.
 //!
-//! `record_provider_abort` is `monitor`'s one direct dependency on the proto
+//! `record_provider_abort` is `service`'s one direct dependency on the proto
 //! types, kept in this small file.
 
 use std::time::Instant;

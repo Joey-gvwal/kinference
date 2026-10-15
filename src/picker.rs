@@ -278,7 +278,7 @@ fn default_expected_overlap_alpha() -> f32 {
 }
 
 /// One worker's inputs to the picker, projected from `metrics::MetricsSample`
-/// by `monitor::scoring::worker_score`.
+/// by `service::scoring::worker_score`.
 #[derive(Debug, Clone)]
 pub struct WorkerScore {
     pub name: String,

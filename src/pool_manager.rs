@@ -194,9 +194,9 @@ impl PoolManager {
                         let touched = pool
                             .registry
                             .reset_declared_models(spec.static_models.as_deref());
-                        crate::monitor::release_models(&self.model_router, pool.id, &pool.name);
+                        crate::service::release_models(&self.model_router, pool.id, &pool.name);
                         if let Some(models) = spec.static_models.as_deref() {
-                            crate::monitor::associate_models(
+                            crate::service::associate_models(
                                 &self.model_router,
                                 pool.id,
                                 &pool.name,
@@ -342,7 +342,7 @@ impl PoolManager {
         // 1. Stop routing to it, so no new pick enters during teardown.
         self.publish();
         // 2. Drop its model claims.
-        crate::monitor::release_models(&self.model_router, pool.id, &pool.name);
+        crate::service::release_models(&self.model_router, pool.id, &pool.name);
         // 3. Fleet-wide worker state (metrics, per-worker tasks), without
         //    touching the indexer; see `PoolHooks::on_retire`.
         self.hooks.on_retire(&pool);

@@ -915,7 +915,7 @@ fn model_attr_set(
     // `resolve_alias`'s ordering rule. When nothing is served, fall back to
     // the raw table so simulation works against a cold fleet.
     let map = st.pools.snapshot();
-    let upstream = crate::monitor::first_served_upstream(&refs, requested, |u| {
+    let upstream = crate::service::first_served_upstream(&refs, requested, |u| {
         map.iter().any(|p| {
             p.registry
                 .iter_snapshot()
@@ -923,7 +923,7 @@ fn model_attr_set(
                 .any(|(_, e)| e.current_models.iter().any(|m| m == u))
         })
     })
-    .or_else(|| crate::monitor::first_served_upstream(&refs, requested, |_| true))
+    .or_else(|| crate::service::first_served_upstream(&refs, requested, |_| true))
     .unwrap_or_else(|| requested.to_string());
 
     // Upstream first, then aliases sorted, as `lifecycle.rs` builds it.

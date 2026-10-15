@@ -308,7 +308,7 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
         crate::workers::WorkerEntry::from_config(&worker_cfg(1), 16),
     );
     pool.registry.set_served_models(1, &["old".to_string()]);
-    crate::monitor::associate_models(&h.router, pool.id, "a", &["old".to_string()]);
+    crate::service::associate_models(&h.router, pool.id, "a", &["old".to_string()]);
 
     let mut next = spec("a", 16);
     next.static_models = Some(vec!["new".to_string()]);
@@ -353,7 +353,7 @@ async fn retiring_releases_the_model_claims() {
     let mut h = harness(eager());
     h.mgr.reconcile(vec![spec("a", 16)]);
     let id = h.mgr.live_pool(&PoolKey::local("a")).unwrap().id;
-    crate::monitor::associate_models(&h.router, id, "a", &["gemma".to_string()]);
+    crate::service::associate_models(&h.router, id, "a", &["gemma".to_string()]);
     assert!(h.router.read().unwrap().contains_key("gemma"));
 
     h.mgr.reconcile(Vec::new());

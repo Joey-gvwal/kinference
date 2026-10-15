@@ -1,8 +1,8 @@
-//! Thin tonic glue over [`crate::monitor::KinferenceService`].
+//! Thin tonic glue over [`crate::service::KinferenceService`].
 //!
 //! Implements the `Picker` gRPC service (`PushBody`, `Pick`, `PullBody`,
 //! `ReportFirstToken`, `ReportFinalToken`, `Abort`) by marshaling to and from
-//! `crate::monitor` and `crate::body_store`.
+//! `crate::service` and `crate::body_store`.
 //!
 //! Error model, per the proto:
 //! - `Pick` never fails with a `Status` for a routing outcome; `NO_WORKERS`,
@@ -19,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::metrics::PickOutcome;
-use crate::monitor::{KinferenceService, PickAndRecordOutcome, Qos};
+use crate::service::{KinferenceService, PickAndRecordOutcome, Qos};
 
 use crate::proto;
 use crate::proto::picker_server::Picker;
@@ -612,7 +612,7 @@ fn local_destination(endpoint: String) -> proto::pick_response::Destination {
 /// The backend to dispatch through, and the path to dispatch on (empty means
 /// the client's path). The model is in the rewritten body. Group and Kind are
 /// implied, as on `InferencePoolRef`.
-fn provider_destination(pick: &crate::monitor::ProviderPick) -> proto::pick_response::Destination {
+fn provider_destination(pick: &crate::service::ProviderPick) -> proto::pick_response::Destination {
     proto::pick_response::Destination::Provider(proto::ProviderTarget {
         backend_ref: Some(proto::BackendRef {
             namespace: pick.backend_ref.namespace.clone(),

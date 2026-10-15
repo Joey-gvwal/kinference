@@ -34,7 +34,7 @@ pub(crate) fn rewrite_model(body: &[u8], model: &str) -> Option<Vec<u8>> {
 /// `"on"`, `"t"`, `"y"` and `1` to `true` (other numbers are rejected, so stay
 /// false here). Plain `as_bool` would treat `"stream": "true"` as
 /// non-streaming while the engine streams. Shared by
-/// [`apply_pick_body_mutations`] and `monitor::lifecycle` so the two agree.
+/// [`apply_pick_body_mutations`] and `service::lifecycle` so the two agree.
 pub(crate) fn stream_flag(obj: &Value) -> bool {
     match obj.get("stream") {
         Some(Value::Bool(b)) => *b,

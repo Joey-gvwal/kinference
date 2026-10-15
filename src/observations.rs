@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::monitor::Qos;
 use crate::picker::WaitPrediction;
 use crate::picker::WorkerScore;
 use crate::picker::{PickerConfig, PredictorConfig};
+use crate::service::Qos;
 
 /// The per-pool state a completed pick must release: decrement the endpoint's
 /// shadow count, and forget its in-flight prefix.
