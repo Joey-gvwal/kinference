@@ -94,8 +94,11 @@ impl KinferenceService {
                     )
                     .await
                 {
-                    crate::tokenize_client::TokenizeOutcome::Ok(tokens) => tokens,
-                    crate::tokenize_client::TokenizeOutcome::Unavailable { reason, attempts } => {
+                    crate::router::tokenize_client::TokenizeOutcome::Ok(tokens) => tokens,
+                    crate::router::tokenize_client::TokenizeOutcome::Unavailable {
+                        reason,
+                        attempts,
+                    } => {
                         tracing::error!(
                             model = model,
                             attempts,

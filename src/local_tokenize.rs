@@ -1,7 +1,7 @@
 //! In-process tokenization via the HuggingFace `tokenizers` Rust crate.
 //!
 //! Used by pools whose profile sets tokenize mode `local` or `compare`; the
-//! mode handling and the compare harness live in [`crate::tokenize_client`].
+//! mode handling and the compare harness live in [`crate::router::tokenize_client`].
 //!
 //! ## Loading model tokenizers
 //!

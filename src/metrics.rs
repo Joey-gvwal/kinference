@@ -118,11 +118,11 @@ const PICK_OUTCOMES: [&str; 3] = ["ok", "bad_request", "no_workers"];
 /// `kinference_score_degraded_total{reason}`. Source: [`crate::router::service::Degraded::as_label`].
 const DEGRADE_REASONS: [&str; 2] = ["tokenize", "prefix_index"];
 
-/// `kinference_tokenize_total{path}`. Source: `crate::tokenize_client`; exactly one
+/// `kinference_tokenize_total{path}`. Source: `crate::router::tokenize_client`; exactly one
 /// per tokenize attempt.
 const TOKENIZE_PATHS: [&str; 3] = ["local", "http_fallback", "unavailable"];
 
-/// `kinference_tokenize_compare_total{result}`. Source: `crate::tokenize_client`.
+/// `kinference_tokenize_compare_total{result}`. Source: `crate::router::tokenize_client`.
 /// Only moves in compare mode.
 const TOKENIZE_COMPARE_RESULTS: [&str; 3] = ["match", "divergence", "error"];
 

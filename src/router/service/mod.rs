@@ -4,7 +4,7 @@
 //! This module owns the service struct, `score_workers` (tokenize, query the
 //! indexer, assemble `WorkerScore` rows), and the value types passed through
 //! it. The pick lifecycle is in `lifecycle`; tokenize/render HTTP plumbing is
-//! in [`crate::tokenize_client`].
+//! in [`crate::router::tokenize_client`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};

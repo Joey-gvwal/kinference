@@ -16,7 +16,6 @@ mod observations;
 mod policy;
 mod proto;
 mod router;
-mod tokenize_client;
 mod version;
 
 pub mod server;

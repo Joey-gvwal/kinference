@@ -14,7 +14,7 @@ use crate::leader::{self, LeaderElectionConfig};
 use crate::metrics::MetricsConfig;
 use crate::policy::PolicyConfig;
 use crate::policy::worker_sets::KubernetesConfig;
-use crate::tokenize_client::TokenizeConfig;
+use crate::router::tokenize_client::TokenizeConfig;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
