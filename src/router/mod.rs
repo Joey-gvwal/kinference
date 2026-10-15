@@ -4,6 +4,7 @@
 pub mod body_store;
 pub mod grpc;
 pub mod local_tokenize;
+pub mod mock;
 pub mod observations;
 pub mod pick_body;
 pub mod picker;

@@ -44,7 +44,7 @@ use crate::fleet::discovery::{
 /// https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/.
 const SVC_NAME_LABEL: &str = "kubernetes.io/service-name";
 
-/// FNV-1a 64-bit hash. Same algorithm as `src/mock.rs::fnv1a`.
+/// FNV-1a 64-bit hash. Same algorithm as `src/router/mock.rs::fnv1a`.
 fn fnv1a_u64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in bytes {

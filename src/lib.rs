@@ -9,7 +9,6 @@ mod config;
 mod fleet;
 mod leader;
 mod metrics;
-mod mock;
 mod policy;
 mod proto;
 mod router;
