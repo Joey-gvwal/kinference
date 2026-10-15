@@ -24,7 +24,9 @@ use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs};
+use crate::fleet::discovery::{
+    DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs,
+};
 use crate::fleet::pool::{PoolSpec, ProfileConfig};
 
 /// Worker sets that produced no pool, published for the status writer. A

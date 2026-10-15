@@ -35,7 +35,7 @@ pub enum ServedModelsVerdict {
     },
 }
 
-use crate::discovery::WorkerConfig;
+use crate::fleet::discovery::WorkerConfig;
 
 /// Extract `host:port` from an engine HTTP base URL.
 /// `http://127.0.0.1:8000/` → `127.0.0.1:8000`. Returns `None` if the

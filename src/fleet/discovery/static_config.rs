@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{Discovery, WorkerChange, WorkerConfig};
+use crate::fleet::discovery::{Discovery, WorkerChange, WorkerConfig};
 
 pub struct StaticDiscovery {
     workers: Vec<WorkerConfig>,

@@ -34,8 +34,8 @@ use kinference_policy::{PoolId, PoolKey};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::static_config::WorkersFile;
-use crate::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::fleet::discovery::static_config::WorkersFile;
+use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
 use crate::fleet::workers::WorkerRegistry;
 use crate::inflight::{InflightPrefixes, InflightRegistry};
 use crate::picker::{PickerConfig, PredictorConfig};

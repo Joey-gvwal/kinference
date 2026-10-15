@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use kinference_policy::PoolKey;
 use serde::Deserialize;
 
-use crate::discovery::static_config::WorkersFile;
-use crate::discovery::{DiscoveryConfig, DiscoveryMode};
+use crate::fleet::discovery::static_config::WorkersFile;
+use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode};
 use crate::fleet::pool::{PoolSpec, ProfileConfig};
 use crate::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use crate::leader::{self, LeaderElectionConfig};

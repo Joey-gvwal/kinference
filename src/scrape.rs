@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::WorkerConfig;
+use crate::fleet::discovery::WorkerConfig;
 use crate::fleet::workers::Engine;
 
 // vLLM and SGLang prefix metric names with `<engine>:`, which

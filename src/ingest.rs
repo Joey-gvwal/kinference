@@ -31,8 +31,8 @@ use dynamo_kv_router::zmq_wire::{
 use tokio::io::unix::AsyncFd;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::WorkerConfig;
 use crate::eviction::{EvictionReason, EvictionRequest, EvictionTx};
+use crate::fleet::discovery::WorkerConfig;
 use crate::fleet::workers::WorkerRegistry;
 use crate::inflight::InflightPrefixes;
 use crate::metrics::{IngestEvent, PromMetrics};

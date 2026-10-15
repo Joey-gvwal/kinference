@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
-use crate::discovery::{
+use crate::fleet::discovery::{
     Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
     static_config::StaticDiscovery,
 };
