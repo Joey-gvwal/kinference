@@ -608,9 +608,9 @@ fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(leader);
     let w = StatusWriter::new(
         client,
-        crate::policy::store::PolicyStore::new(),
+        crate::controller::policy::store::PolicyStore::new(),
         crate::fleet::pool::PoolRegistry::new(),
-        crate::policy::worker_sets::RejectionStore::new(),
+        crate::controller::policy::worker_sets::RejectionStore::new(),
         Arc::new(MetricsRegistry::new()),
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         rx,

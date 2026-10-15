@@ -428,10 +428,10 @@ fn no_configured_extension_lists_none() {
 /// A blank `backend_binding_extension` reads as none.
 #[test]
 fn a_blank_configured_name_is_no_extension() {
-    let cfg = crate::policy::PolicyConfig::default();
+    let cfg = crate::controller::policy::PolicyConfig::default();
     assert_eq!(cfg.binding_extension(), Some("chat-picker"));
 
-    let cleared = crate::policy::PolicyConfig {
+    let cleared = crate::controller::policy::PolicyConfig {
         backend_binding_extension: "  ".into(),
         ..Default::default()
     };

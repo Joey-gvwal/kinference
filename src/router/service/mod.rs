@@ -346,7 +346,7 @@ pub struct KinferenceService {
     pub(crate) body_store: Arc<crate::router::body_store::BodyStore>,
     /// CRD-sourced routing policy, when `[policy] enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
-    pub(crate) policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     /// What the caller has reported back about off-cluster destinations.
     ///
     /// Always present, even with policy disabled, so the feedback handlers
@@ -371,7 +371,7 @@ impl KinferenceService {
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::router::body_store::BodyStore>,
-        policy: Option<Arc<crate::policy::store::PolicyStore>>,
+        policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         body_idle_timeout: std::time::Duration,
         observation_sink: Arc<ObservationSink>,

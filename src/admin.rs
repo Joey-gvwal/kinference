@@ -31,7 +31,7 @@ struct AppState {
     pools: Arc<PoolRegistry>,
     /// CRD policy, when enabled. `/readyz` gates on it having listed; see
     /// [`readyz`].
-    policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     /// Prometheus registry for `/metrics`.
     prom: Arc<PromMetrics>,
     /// The policy API's state, built once so every request shares one
@@ -50,7 +50,7 @@ impl FromRef<AppState> for Arc<PoolRegistry> {
 #[derive(Clone)]
 struct ReadyzState {
     pools: Arc<PoolRegistry>,
-    policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
 }
 
 impl FromRef<AppState> for ReadyzState {
@@ -108,7 +108,7 @@ async fn fallback(uri: axum::http::Uri) -> Response {
 pub async fn serve(
     addr: SocketAddr,
     pools: Arc<PoolRegistry>,
-    policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     prom: Arc<PromMetrics>,
     metrics_registry: Arc<MetricsRegistry>,
     cancel: CancellationToken,

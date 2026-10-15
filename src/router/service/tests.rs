@@ -507,7 +507,7 @@ fn policy_fleet(
     spec: serde_json::Value,
 ) -> (
     KinferenceService,
-    Arc<crate::policy::store::PolicyStore>,
+    Arc<crate::controller::policy::store::PolicyStore>,
     Vec<Arc<Pool>>,
 ) {
     policy_fleet_with(sets, &[], spec)
@@ -521,7 +521,7 @@ fn policy_fleet_with(
     spec: serde_json::Value,
 ) -> (
     KinferenceService,
-    Arc<crate::policy::store::PolicyStore>,
+    Arc<crate::controller::policy::store::PolicyStore>,
     Vec<Arc<Pool>>,
 ) {
     let metrics = Arc::new(MetricsRegistry::new());
@@ -583,7 +583,7 @@ fn policy_fleet_with(
         "metadata": {"name": "p", "namespace": "default"},
         "spec": spec
     }));
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[pool],
         &[policy],
@@ -647,7 +647,7 @@ fn primary(pool: &Arc<Pool>, model: &str, workers: &[(&str, u32)]) -> ScoredGrou
 
 async fn select(
     svc: &KinferenceService,
-    store: &Arc<crate::policy::store::PolicyStore>,
+    store: &Arc<crate::controller::policy::store::PolicyStore>,
     start: ScoredGroup,
     model: &str,
 ) -> Result<PolicySelection, PickAndRecordOutcome> {

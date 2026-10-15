@@ -26,7 +26,7 @@ fn ready_entry() -> WorkerEntry {
 
 async fn status_and_body(
     pools: Arc<PoolRegistry>,
-    policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
 ) -> (StatusCode, String) {
     let resp = readyz(State(ReadyzState { pools, policy })).await;
     let status = resp.status();
@@ -74,7 +74,7 @@ async fn the_body_counts_pools_with_ready_endpoints() {
 /// route on load alone, bypassing the policy.
 #[tokio::test]
 async fn not_ready_until_the_policy_watch_has_listed() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     let (status, body) = status_and_body(PoolRegistry::new(), Some(store.clone())).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.contains("silently bypass"), "got: {body:?}");
@@ -98,7 +98,9 @@ async fn ready_immediately_when_policy_is_disabled() {
 
 use kinference_policy::resolve::PolicyIndex;
 
-fn api_state(policy: Option<Arc<crate::policy::store::PolicyStore>>) -> policy_api::PolicyApiState {
+fn api_state(
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
+) -> policy_api::PolicyApiState {
     policy_api::PolicyApiState::new(
         policy,
         PoolRegistry::new(),
@@ -136,7 +138,7 @@ async fn context_says_disabled_rather_than_returning_an_empty_list() {
 #[tokio::test]
 async fn context_says_not_listed_before_the_first_list_completes() {
     // A default `PolicyStore` has never published, so `listed()` is false.
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     let (status, body) = body_of(policy_api::context(State(api_state(Some(store)))).await).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "NotListed", "{body}");
@@ -145,7 +147,7 @@ async fn context_says_not_listed_before_the_first_list_completes() {
 /// A listed-but-empty cluster is an empty list.
 #[tokio::test]
 async fn context_returns_an_empty_list_once_listed_with_no_policies() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(PolicyIndex::listed_empty()));
     let (status, body) = body_of(policy_api::context(State(api_state(Some(store)))).await).await;
     assert_eq!(status, StatusCode::OK);
@@ -174,7 +176,7 @@ async fn context_returns_an_empty_list_once_listed_with_no_policies() {
 /// A `namespace/name` that does not resolve is a 404, not an empty explanation.
 #[tokio::test]
 async fn simulate_404s_on_an_unknown_policy() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(PolicyIndex::listed_empty()));
     let req = serde_json::from_value(serde_json::json!({
         "policy": "default/nope", "model": ["m"], "candidates": []
@@ -198,7 +200,7 @@ async fn simulate_404s_on_an_unknown_policy() {
 /// `policy` must be namespaced.
 #[tokio::test]
 async fn simulate_rejects_an_unnamespaced_policy() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(PolicyIndex::listed_empty()));
     let req = serde_json::from_value(serde_json::json!({
         "policy": "policy-5", "candidates": []
@@ -258,7 +260,7 @@ fn policy_5() -> serde_json::Value {
 /// An unattached policy is still listed.
 #[tokio::test]
 async fn context_lists_an_unattached_policy_and_flags_it() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy("policy-5", policy_5()));
     let (status, body) = body_of(policy_api::context(State(api_state(Some(store)))).await).await;
     assert_eq!(status, StatusCode::OK);
@@ -280,7 +282,7 @@ async fn context_lists_an_unattached_policy_and_flags_it() {
 /// `onEmpty: Reject`, and the override plumbing through `build_candidate`.
 #[tokio::test]
 async fn simulate_flips_verdict_when_a_candidate_override_is_edited() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy("policy-5", policy_5()));
 
     let run = |queued: i64| {
@@ -347,7 +349,7 @@ async fn simulate_flips_verdict_when_a_candidate_override_is_edited() {
 /// must say so.
 #[tokio::test]
 async fn an_uncomputable_prediction_is_disclosed_rather_than_shown_as_zero() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy("policy-5", policy_5()));
 
     // No `pool`, so there is no predictor to borrow and no override given.
@@ -463,7 +465,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
         pool_id,
     );
 
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[],
@@ -586,7 +588,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
         },
         pool_id,
     );
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[pol],
@@ -722,7 +724,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
             id,
         );
     }
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[Arc::new(kinference_policy::crd::InferencePolicy {
@@ -790,7 +792,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
 /// `queuedPrompts`.
 #[tokio::test]
 async fn kv_cache_usage_excludes_the_saturated_worker_the_queue_ranks_backwards() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy(
         "kv-guard",
         serde_json::json!({
@@ -862,7 +864,7 @@ async fn kv_cache_usage_excludes_the_saturated_worker_the_queue_ranks_backwards(
 /// build (`…-Turbo`) of the model, so it must be considered via the alias.
 #[tokio::test]
 async fn a_backed_up_local_worker_fails_over_to_the_provider() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy(
         "policy-3",
         serde_json::json!({
@@ -954,13 +956,13 @@ use tower::ServiceExt;
 /// The whole admin router over `policy`, plus the Prometheus registry it
 /// exposes, so a test can read `/metrics` the way a scraper does.
 fn admin_router(
-    policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
 ) -> (axum::Router, Arc<PromMetrics>) {
     app_with(policy, PoolRegistry::new())
 }
 
 fn app_with(
-    policy: Option<Arc<crate::policy::store::PolicyStore>>,
+    policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     pools: Arc<PoolRegistry>,
 ) -> (axum::Router, Arc<PromMetrics>) {
     let metrics = Arc::new(crate::fleet::scrape::MetricsRegistry::new());
@@ -1027,8 +1029,8 @@ fn json_body(h: &HeaderMap, b: &[u8]) -> serde_json::Value {
     serde_json::from_slice(b).unwrap()
 }
 
-fn listed_store() -> Arc<crate::policy::store::PolicyStore> {
-    let store = crate::policy::store::PolicyStore::new();
+fn listed_store() -> Arc<crate::controller::policy::store::PolicyStore> {
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy("policy-5", policy_5()));
     store
 }
@@ -1301,7 +1303,7 @@ fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> a
         kinference_policy::PoolKey::namespaced("default", "gemma-4-12b"),
         pool_id,
     );
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(Arc::new(kinference_policy::resolve::resolve(
         &[ip],
         &[pol],
@@ -1363,7 +1365,7 @@ async fn context_seeds_post_back_to_simulate_unchanged() {
 /// `drop:` predicates as they do in production.
 #[tokio::test]
 async fn derived_signals_reach_exclusions_as_in_production() {
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy(
         "thin",
         serde_json::json!({"rules": [{"name": "r", "route": {
@@ -1392,7 +1394,7 @@ async fn derived_signals_reach_exclusions_as_in_production() {
         "the one-endpoint set is excluded: {v}"
     );
 
-    let store = crate::policy::store::PolicyStore::new();
+    let store = crate::controller::policy::store::PolicyStore::new();
     store.publish(index_with_policy(
         "warm",
         serde_json::json!({"rules": [{"name": "r", "route": {

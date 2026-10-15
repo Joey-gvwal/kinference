@@ -38,9 +38,9 @@ use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
+use crate::controller::policy::store::PolicyStore;
 use crate::fleet::pool::PoolRegistry;
 use crate::fleet::scrape::MetricsRegistry;
-use crate::policy::store::PolicyStore;
 use crate::router::picker::{self, WorkerScore};
 
 // ── limits ───────────────────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
     let policies: Vec<Value> = snap
         .policies()
         .map(|p| {
-            let status = crate::policy::status::desired_policy_status(p, None);
+            let status = crate::controller::policy::status::desired_policy_status(p, None);
             let warnings: Vec<_> = p.all_warnings().collect();
             json!({
                 "namespace": p.namespace,

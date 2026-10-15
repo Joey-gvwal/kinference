@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
+use crate::controller::policy;
 use crate::fleet::discovery::{
     Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
     static_config::StaticDiscovery,
@@ -31,7 +32,7 @@ use crate::router::mock::MockKinferenceService;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
-use crate::{admin, leader, metrics, policy, version};
+use crate::{admin, leader, metrics, version};
 
 #[derive(Parser, Debug)]
 #[command(

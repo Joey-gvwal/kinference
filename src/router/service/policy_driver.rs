@@ -22,7 +22,7 @@ impl KinferenceService {
     pub(super) async fn policy_select(
         &self,
         pref: &kinference_policy::PoolRef,
-        store: &Arc<crate::policy::store::PolicyStore>,
+        store: &Arc<crate::controller::policy::store::PolicyStore>,
         primary: Option<ScoredGroup>,
         // Passed explicitly, since `primary` may not exist (a provider-only
         // model).
