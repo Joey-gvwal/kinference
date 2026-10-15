@@ -27,7 +27,7 @@ use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
-use crate::service::KinferenceService;
+use crate::router::service::KinferenceService;
 use crate::{admin, body_store, leader, local_tokenize, metrics, observations, policy, version};
 
 #[derive(Parser, Debug)]
@@ -791,7 +791,7 @@ fn handle_added(
     // route the model_name hint, before the first /v1/models scrape.
     worker_pool.insert(w.worker_id_num, pool.clone());
     if !w.model_name.is_empty() {
-        crate::service::associate_models(
+        crate::router::service::associate_models(
             model_router,
             pool.id,
             &pool.name,
@@ -844,11 +844,21 @@ fn handle_added(
                         "declared model list differs from this set's pinned models; \
                          routing anyway on the declared list"
                     );
-                    crate::service::associate_models(model_router, pool.id, &pool.name, models);
+                    crate::router::service::associate_models(
+                        model_router,
+                        pool.id,
+                        &pool.name,
+                        models,
+                    );
                 }
                 crate::fleet::workers::ServedModelsVerdict::Accepted
                 | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                    crate::service::associate_models(model_router, pool.id, &pool.name, models);
+                    crate::router::service::associate_models(
+                        model_router,
+                        pool.id,
+                        &pool.name,
+                        models,
+                    );
                 }
                 crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                     // As above, but not routable: skip the worker rather than

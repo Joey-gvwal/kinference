@@ -156,7 +156,7 @@ async fn abandoned_accumulate_leaks_no_bytes() {
 /// the path alone".
 #[test]
 fn a_provider_destination_carries_the_path_and_empty_means_unchanged() {
-    let pick = |path: Option<&str>| crate::service::ProviderPick {
+    let pick = |path: Option<&str>| crate::router::service::ProviderPick {
         provider: kinference_policy::engine::ObjectKey::new("infra", "together"),
         backend_ref: kinference_policy::engine::ObjectKey::new("infra", "together-backend"),
         path: path.map(str::to_string),

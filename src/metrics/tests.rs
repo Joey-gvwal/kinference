@@ -823,7 +823,7 @@ fn pick_outcome_labels_match_the_enum() {
 
 #[test]
 fn degrade_reason_labels_match_the_enum() {
-    use crate::service::Degraded as D;
+    use crate::router::service::Degraded as D;
     let all = [D::Tokenize, D::PrefixIndex];
     for v in all {
         match v {
@@ -977,7 +977,7 @@ fn orphaned_reports_are_counted_directly() {
 /// An orphan is labelled `unknown`, not folded into `interactive`.
 #[test]
 fn unknown_qos_is_its_own_label_value() {
-    use crate::service::Qos;
+    use crate::router::service::Qos;
     assert_eq!(Qos::Unknown.as_label(), "unknown");
     // The four are distinct: nothing silently aliases onto another class.
     let labels =
@@ -1003,7 +1003,7 @@ fn unknown_qos_is_its_own_label_value() {
 /// Policy matches on QoS, so declassifying there would change routing.
 #[test]
 fn from_proto_never_yields_unknown() {
-    use crate::service::Qos;
+    use crate::router::service::Qos;
     for wire in [-1i32, 0, 1, 2, 3, 99] {
         assert_ne!(
             Qos::from_proto(wire).as_label(),

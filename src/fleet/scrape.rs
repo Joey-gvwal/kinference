@@ -426,7 +426,7 @@ pub fn spawn_one_shot_warmup(
                             "warmup: worker serves models not previously seen in this set; \
                              widening the set's model list"
                         );
-                        crate::service::associate_models(
+                        crate::router::service::associate_models(
                             &model_router,
                             pool_id,
                             &pool_name,
@@ -440,7 +440,7 @@ pub fn spawn_one_shot_warmup(
                             "warmup: worker is missing models others in this set serve; \
                              routing to it only for what it has"
                         );
-                        crate::service::associate_models(
+                        crate::router::service::associate_models(
                             &model_router,
                             pool_id,
                             &pool_name,
@@ -449,7 +449,7 @@ pub fn spawn_one_shot_warmup(
                     }
                     crate::fleet::workers::ServedModelsVerdict::Accepted
                     | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                        crate::service::associate_models(
+                        crate::router::service::associate_models(
                             &model_router,
                             pool_id,
                             &pool_name,
@@ -607,7 +607,7 @@ pub fn spawn_metrics_poller(
                                     "poller: worker serves models not previously seen \
                                          in this set; widening the set's model list"
                                 );
-                                crate::service::associate_models(
+                                crate::router::service::associate_models(
                                     &model_router,
                                     pool_id,
                                     &pool_name,
@@ -621,7 +621,7 @@ pub fn spawn_metrics_poller(
                                     "poller: worker is missing models others in this \
                                          set serve; routing to it only for what it has"
                                 );
-                                crate::service::associate_models(
+                                crate::router::service::associate_models(
                                     &model_router,
                                     pool_id,
                                     &pool_name,
@@ -630,7 +630,7 @@ pub fn spawn_metrics_poller(
                             }
                             crate::fleet::workers::ServedModelsVerdict::Accepted
                             | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                                crate::service::associate_models(
+                                crate::router::service::associate_models(
                                     &model_router,
                                     pool_id,
                                     &pool_name,

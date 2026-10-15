@@ -115,7 +115,7 @@ const ITL_LE_LABELS: [&str; 15] = [
 /// Authoritative source: [`PickOutcome::as_label`].
 const PICK_OUTCOMES: [&str; 3] = ["ok", "bad_request", "no_workers"];
 
-/// `kinference_score_degraded_total{reason}`. Source: [`crate::service::Degraded::as_label`].
+/// `kinference_score_degraded_total{reason}`. Source: [`crate::router::service::Degraded::as_label`].
 const DEGRADE_REASONS: [&str; 2] = ["tokenize", "prefix_index"];
 
 /// `kinference_tokenize_total{path}`. Source: `crate::tokenize_client`; exactly one

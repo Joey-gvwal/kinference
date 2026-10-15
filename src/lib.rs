@@ -18,7 +18,7 @@ mod pick_body;
 mod picker;
 mod policy;
 mod proto;
-mod service;
+mod router;
 mod tokenize;
 mod tokenize_client;
 mod version;
