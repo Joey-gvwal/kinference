@@ -342,8 +342,8 @@ pub struct KinferenceService {
     /// Predicted-vs-observed CSV sink.
     pub(crate) observation_sink: Arc<ObservationSink>,
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
-    /// See [`crate::body_store`].
-    pub(crate) body_store: Arc<crate::body_store::BodyStore>,
+    /// See [`crate::router::body_store`].
+    pub(crate) body_store: Arc<crate::router::body_store::BodyStore>,
     /// CRD-sourced routing policy, when `[policy] enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
     pub(crate) policy: Option<Arc<crate::policy::store::PolicyStore>>,
@@ -370,7 +370,7 @@ impl KinferenceService {
         local_tokenizer: Option<Arc<crate::local_tokenize::LocalTokenizerRegistry>>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
-        body_store: Arc<crate::body_store::BodyStore>,
+        body_store: Arc<crate::router::body_store::BodyStore>,
         policy: Option<Arc<crate::policy::store::PolicyStore>>,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         body_idle_timeout: std::time::Duration,

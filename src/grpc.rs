@@ -2,7 +2,7 @@
 //!
 //! Implements the `Picker` gRPC service (`PushBody`, `Pick`, `PullBody`,
 //! `ReportFirstToken`, `ReportFinalToken`, `Abort`) by marshaling to and from
-//! `crate::router::service` and `crate::body_store`.
+//! `crate::router::service` and `crate::router::body_store`.
 //!
 //! Error model, per the proto:
 //! - `Pick` never fails with a `Status` for a routing outcome; `NO_WORKERS`,
@@ -43,7 +43,7 @@ pub(crate) enum PushFailure {
     /// No chunk arrived within the inter-chunk budget.
     Idle(Duration),
     /// A byte budget was exceeded; carries the metric label.
-    Budget(Status, crate::body_store::RejectReason),
+    Budget(Status, crate::router::body_store::RejectReason),
     /// The stream reset before half-close, so the body is incomplete.
     Transport(Status),
     /// The caller sent `kinference-declared-length` and delivered a different
@@ -52,7 +52,7 @@ pub(crate) enum PushFailure {
 }
 
 impl PushFailure {
-    pub(crate) fn reject_reason(&self) -> Option<crate::body_store::RejectReason> {
+    pub(crate) fn reject_reason(&self) -> Option<crate::router::body_store::RejectReason> {
         match self {
             PushFailure::Budget(_, reason) => Some(*reason),
             _ => None,
@@ -89,7 +89,7 @@ impl PushFailure {
 /// mismatch either way is rejected.
 pub(crate) async fn accumulate_body<S>(
     stream: &mut S,
-    reservation: &mut crate::body_store::Reservation,
+    reservation: &mut crate::router::body_store::Reservation,
     idle: Duration,
     declared: Option<u64>,
 ) -> Result<Vec<u8>, PushFailure>
@@ -575,7 +575,7 @@ impl KinferenceService {
     /// in which case the pushed body is reused.
     fn commit_picked_body(
         &self,
-        handle: crate::body_store::PickHandle,
+        handle: crate::router::body_store::PickHandle,
         response_id: u64,
         wire: Vec<u8>,
         pushed: &Arc<Vec<u8>>,

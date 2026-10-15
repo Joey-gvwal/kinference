@@ -27,8 +27,9 @@ use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
+use crate::router::body_store;
 use crate::router::service::KinferenceService;
-use crate::{admin, body_store, leader, local_tokenize, metrics, observations, policy, version};
+use crate::{admin, leader, local_tokenize, metrics, observations, policy, version};
 
 #[derive(Parser, Debug)]
 #[command(

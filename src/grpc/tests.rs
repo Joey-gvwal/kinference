@@ -7,10 +7,10 @@ fn chunk(bytes: &[u8]) -> Result<BodyChunk, Status> {
     })
 }
 
-fn store() -> Arc<crate::body_store::BodyStore> {
+fn store() -> Arc<crate::router::body_store::BodyStore> {
     // 1 MiB server-wide, 1 KiB per request, so the budget paths are cheap to
     // hit.
-    crate::body_store::shared(1024 * 1024, 1024, Duration::from_secs(60))
+    crate::router::body_store::shared(1024 * 1024, 1024, Duration::from_secs(60))
 }
 
 #[tokio::test]
@@ -61,7 +61,7 @@ async fn accumulate_enforces_the_byte_budget_mid_stream() {
         .expect_err("1400 bytes exceeds the 1 KiB cap");
     assert_eq!(
         failure.reject_reason(),
-        Some(crate::body_store::RejectReason::RequestTooLarge)
+        Some(crate::router::body_store::RejectReason::RequestTooLarge)
     );
     assert_eq!(failure.into_status().code(), tonic::Code::ResourceExhausted);
 }

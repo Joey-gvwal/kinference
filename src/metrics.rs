@@ -130,7 +130,7 @@ const TOKENIZE_COMPARE_RESULTS: [&str; 3] = ["match", "divergence", "error"];
 const INDEX_EVENT_KINDS: [&str; 3] = ["stored", "removed", "cleared"];
 
 /// `kinference_body_rejected_total{reason}`.
-/// Source: [`crate::body_store::RejectReason::as_label`].
+/// Source: [`crate::router::body_store::RejectReason::as_label`].
 const BODY_REJECT_REASONS: [&str; 3] = ["declared_too_large", "request_too_large", "server_full"];
 
 /// `kinference_body_aborted_total{reason}`. Source: `crate::grpc::abort_reason_label`.
@@ -1191,7 +1191,7 @@ impl PromMetrics {
     }
 
     /// One `PushBody` refused over budget. `reason` comes from
-    /// [`crate::body_store::RejectReason::as_label`] so the label and the
+    /// [`crate::router::body_store::RejectReason::as_label`] so the label and the
     /// caller-facing message can't drift.
     pub fn record_body_rejected(&self, reason: &str) {
         self.body_rejected.with_label_values(&[reason]).inc();

@@ -58,7 +58,7 @@ pub struct Config {
     /// swept mid-flight. Defaults to 600.
     #[serde(default)]
     pub observation_ttl_secs: Option<u64>,
-    /// Server-wide ceiling on buffered request bodies (see `crate::body_store`),
+    /// Server-wide ceiling on buffered request bodies (see `crate::router::body_store`),
     /// including uploads in progress. Once full, pushes are refused with
     /// `RESOURCE_EXHAUSTED`; keep it well under the container memory limit.
     /// Defaults to 262144 KB (256 MiB).

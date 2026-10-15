@@ -836,7 +836,7 @@ fn degrade_reason_labels_match_the_enum() {
 
 #[test]
 fn body_reject_reason_labels_match_the_enum() {
-    use crate::body_store::RejectReason as R;
+    use crate::router::body_store::RejectReason as R;
     let all = [R::DeclaredTooLarge, R::RequestTooLarge, R::ServerFull];
     for v in all {
         match v {

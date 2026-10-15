@@ -603,7 +603,11 @@ fn policy_fleet_with(
         None,
         Arc::new(PendingObservations::new(ttl)),
         Arc::new(RequestLabels::new(ttl)),
-        Arc::new(crate::body_store::BodyStore::new(1 << 20, 1 << 20, ttl)),
+        Arc::new(crate::router::body_store::BodyStore::new(
+            1 << 20,
+            1 << 20,
+            ttl,
+        )),
         Some(store.clone()),
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         ttl,

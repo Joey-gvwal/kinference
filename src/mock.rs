@@ -9,7 +9,7 @@
 //! - no per-request HTTP `/tokenize` call.
 //!
 //! Body buffering is real: the mock owns its own
-//! [`crate::body_store::BodyStore`] with the same push, pick, pull lifecycle,
+//! [`crate::router::body_store::BodyStore`] with the same push, pick, pull lifecycle,
 //! so clients exercise the true wire contract. Only routing is synthetic:
 //! `Pick` extracts `model` and chooses among the workers serving it by hashing
 //! `(model, body)`, deterministically across runs and machines. The report
@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::body_store::BodyStore;
 use crate::fleet::workers::WorkerRegistry;
 use crate::proto::picker_server::Picker;
 use crate::proto::{
@@ -30,6 +29,7 @@ use crate::proto::{
     PushBodyResponse, ReportFinalTokenRequest, ReportFinalTokenResponse, ReportFirstTokenRequest,
     ReportFirstTokenResponse, pick_response::Outcome as PickOutcome,
 };
+use crate::router::body_store::BodyStore;
 
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -55,7 +55,7 @@ impl MockKinferenceService {
             registry,
             // Generous fixed budgets: mock mode is for demos and client
             // integration tests, not memory-pressure testing.
-            body_store: crate::body_store::shared(
+            body_store: crate::router::body_store::shared(
                 256 * 1024 * 1024,
                 8 * 1024 * 1024,
                 Duration::from_secs(60),

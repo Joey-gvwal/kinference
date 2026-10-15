@@ -5,7 +5,6 @@
 //! `kinference-policy` crate this one imports too.
 
 mod admin;
-mod body_store;
 mod config;
 mod fleet;
 mod grpc;
