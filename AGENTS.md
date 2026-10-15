@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Architecture
+
+`ARCHITECTURE.md` is the map of the server: how the code is grouped, which
+way imports go and where new code goes. Read it before you add or move
+code, and change it in the same pull request as any move.
+
 ## Code comments and documentation
 
 Comments in this repo are kept short on purpose. Target an overall Rust comment
