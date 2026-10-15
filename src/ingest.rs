@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::WorkerConfig;
 use crate::eviction::{EvictionReason, EvictionRequest, EvictionTx};
-use crate::inflight_prefixes::InflightPrefixes;
+use crate::inflight::InflightPrefixes;
 use crate::metrics::{IngestEvent, PromMetrics};
 use crate::workers::WorkerRegistry;
 

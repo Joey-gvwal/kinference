@@ -660,7 +660,7 @@ fn best_group(
             .scores
             .iter()
             .map(|s| {
-                let summaries: Vec<crate::inflight_prefixes::InflightSummary> = group
+                let summaries: Vec<crate::inflight::InflightSummary> = group
                     .pool
                     .inflight_prefixes
                     .dispatches_for(&s.endpoint)

@@ -30,8 +30,8 @@ use crate::service::Qos;
 /// two small maps outlive it, for as long as an observation needs them.
 #[derive(Clone)]
 pub struct InflightHandles {
-    pub inflight: std::sync::Arc<crate::inflight_registry::InflightRegistry>,
-    pub prefixes: std::sync::Arc<crate::inflight_prefixes::InflightPrefixes>,
+    pub inflight: std::sync::Arc<crate::inflight::InflightRegistry>,
+    pub prefixes: std::sync::Arc<crate::inflight::InflightPrefixes>,
 }
 
 impl InflightHandles {

@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::inflight_prefixes::InflightSummary;
+use crate::inflight::InflightSummary;
 
 /// Latency-model coefficients consumed by
 /// `picker::predicted_wait_ms` / `compute_queue_cost`. Refit these
