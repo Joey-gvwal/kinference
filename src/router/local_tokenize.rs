@@ -42,7 +42,7 @@ use tokenizers::tokenizer::Tokenizer;
 
 use crate::router::tokenize::TokenizeInput;
 
-/// `[tokenize.local]`. See `src/local_tokenize.rs`.
+/// `[tokenize.local]`. See `src/router/local_tokenize.rs`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalTokenizeConfig {

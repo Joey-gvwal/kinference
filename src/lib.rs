@@ -9,7 +9,6 @@ mod config;
 mod fleet;
 mod grpc;
 mod leader;
-mod local_tokenize;
 mod metrics;
 mod mock;
 mod observations;

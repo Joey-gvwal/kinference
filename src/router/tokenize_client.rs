@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::fleet::workers::WorkerEntry;
-use crate::local_tokenize::LocalTokenizeConfig;
+use crate::router::local_tokenize::LocalTokenizeConfig;
 use crate::router::service::KinferenceService;
 use crate::router::tokenize::{
     TokenizeInput, TokenizeMode, render_post_raw_at_url, render_structured_at_url,
@@ -344,7 +344,7 @@ impl KinferenceService {
     /// tokens. Errors are counted, never returned. No `&self`, so it can run
     /// in a spawned task.
     async fn compare_local_tokenize_inner(
-        local_reg: &crate::local_tokenize::LocalTokenizerRegistry,
+        local_reg: &crate::router::local_tokenize::LocalTokenizerRegistry,
         prom: &crate::metrics::PromMetrics,
         model: &str,
         input: &TokenizeInput,
