@@ -10,12 +10,29 @@
 
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
+
+use crate::local_tokenize::LocalTokenizeConfig;
 use crate::monitor::KinferenceService;
 use crate::tokenize::{
-    TokenizeInput, render_post_raw_at_url, render_structured_at_url, render_via_vllm_raw,
-    render_via_vllm_structured,
+    TokenizeInput, TokenizeMode, render_post_raw_at_url, render_structured_at_url,
+    render_via_vllm_raw, render_via_vllm_structured,
 };
 use crate::workers::WorkerEntry;
+
+/// `[tokenize]`: tokenization settings shared by all pools. The mode is set
+/// per profile.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TokenizeConfig {
+    /// Idle keep-alive connections kept per host. Set it at or above peak
+    /// concurrency when all renders go to a single `render_url`. `None` means
+    /// 16.
+    #[serde(default)]
+    pub pool_max_idle_per_host: Option<usize>,
+    #[serde(default)]
+    pub local: LocalTokenizeConfig,
+}
 
 /// Maximum number of workers tried in sequence, freshest metrics first, so
 /// an outage doesn't try every worker on every request.
@@ -43,7 +60,7 @@ impl KinferenceService {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn render_with_fallback(
         &self,
-        mode: crate::config::TokenizeMode,
+        mode: TokenizeMode,
         render_url: Option<&str>,
         workers: &[(u64, WorkerEntry)],
         model: &str,
@@ -57,7 +74,6 @@ impl KinferenceService {
         // mode. `raw_body` is only used for `/render`; local tokenization
         // uses the structured input. Without a raw body, `/render` gets a
         // synthesized one.
-        use crate::config::TokenizeMode;
         let outcome = match mode {
             TokenizeMode::Render => {
                 self.render_via_http(render_url, workers, model, &input, raw_body, req_id)

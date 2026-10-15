@@ -31,11 +31,12 @@ use kinference_policy::{PoolId, PoolKey};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{PickerConfig, PredictorConfig, TokenizeMode};
 use crate::discovery::static_config::WorkersFile;
 use crate::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
 use crate::inflight_prefixes::InflightPrefixes;
 use crate::inflight_registry::InflightRegistry;
+use crate::picker::{PickerConfig, PredictorConfig};
+use crate::tokenize::TokenizeMode;
 use crate::workers::WorkerRegistry;
 
 /// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.

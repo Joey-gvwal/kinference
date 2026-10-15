@@ -25,8 +25,8 @@ use crate::pool::Pool;
 use crate::proto::picker_server::PickerServer;
 use crate::workers::{WorkerEntry, WorkerRegistry};
 use crate::{
-    admin, body_store, config, eviction, ingest, leader, local_tokenize, observation_sink,
-    observations, policy, pool, pool_manager, prom, rollup, version,
+    admin, body_store, eviction, ingest, leader, local_tokenize, observation_sink, observations,
+    policy, pool, pool_manager, prom, rollup, version,
 };
 
 #[derive(Parser, Debug)]
@@ -758,7 +758,7 @@ fn handle_added(
     let inflight_prefixes = &pool.inflight_prefixes;
     // Warm up only for pools using the in-process tokenizer (Local/Compare).
     let warmup_tokenizer =
-        if warmup_enabled && !matches!(pool.tokenize_mode, config::TokenizeMode::Render) {
+        if warmup_enabled && !matches!(pool.tokenize_mode, crate::tokenize::TokenizeMode::Render) {
             local_tokenizer
         } else {
             None

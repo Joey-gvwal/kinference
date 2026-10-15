@@ -37,10 +37,38 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
+use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
 
-use crate::config::LocalTokenizeConfig;
 use crate::tokenize::TokenizeInput;
+
+/// `[tokenize.local]`. See `src/local_tokenize.rs`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct LocalTokenizeConfig {
+    /// Directory checked for tokenizer files before fetching from the Hub:
+    /// `{mount_dir}/{model_name}/{tokenizer,tokenizer_config}.json`. A `/` in
+    /// the model name is a nested directory.
+    #[serde(default)]
+    pub mount_dir: Option<std::path::PathBuf>,
+    /// Load tokenizers for newly discovered models in the background instead
+    /// of on first request.
+    #[serde(default = "default_warmup")]
+    pub warmup: bool,
+}
+
+impl Default for LocalTokenizeConfig {
+    fn default() -> Self {
+        Self {
+            mount_dir: None,
+            warmup: default_warmup(),
+        }
+    }
+}
+
+fn default_warmup() -> bool {
+    true
+}
 
 /// Cached, loaded artifacts for one model. Cheap to `Arc`-share.
 struct LoadedTokenizer {

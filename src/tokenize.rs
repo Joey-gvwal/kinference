@@ -256,5 +256,31 @@ pub async fn render_via_vllm_structured(
     parse_render_response(&bytes)
 }
 
+/// Primary tokenization path.
+///
+/// The HTTP path calls vLLM's `/v1/chat/completions/render`, which applies the
+/// same preprocessing (tools, multimodal, reasoning prefixes) as inference.
+///
+/// Recommended rollout: start with `Render`, switch to `Compare` and watch
+/// `tokenize_divergence_total` until it stays at zero on real traffic, then
+/// switch to `Local`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenizeMode {
+    /// Every request goes through HTTP `/render`. `http` is accepted as a
+    /// legacy alias.
+    #[default]
+    #[serde(alias = "http")]
+    Render,
+    /// In-process tokenization (`tokenizers` + `minijinja`), falling back to
+    /// `/render` when a model fails to load. Only use after `Compare` shows no
+    /// divergence; otherwise prefix-cache routing is silently wrong.
+    Local,
+    /// `/render` is authoritative; the local path runs alongside it and
+    /// divergences are counted.
+    Compare,
+}
+
 #[cfg(test)]
 mod tests;

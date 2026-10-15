@@ -1,4 +1,7 @@
 use super::*;
+use crate::picker::{PickerConfig, PredictorConfig};
+use crate::prom::TenantLabels;
+use crate::tokenize::TokenizeMode;
 
 #[test]
 fn config_without_worker_sets_fails_validate() {
