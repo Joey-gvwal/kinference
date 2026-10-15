@@ -6,5 +6,6 @@ pub mod eviction;
 pub mod inflight;
 pub mod ingest;
 pub mod pool;
+pub mod rollup;
 pub mod scrape;
 pub mod workers;

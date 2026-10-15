@@ -22,14 +22,13 @@ use crate::fleet::eviction;
 use crate::fleet::ingest;
 use crate::fleet::pool;
 use crate::fleet::pool::Pool;
+use crate::fleet::rollup;
 use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::mock::MockKinferenceService;
 use crate::proto::picker_server::PickerServer;
 use crate::service::KinferenceService;
-use crate::{
-    admin, body_store, leader, local_tokenize, metrics, observations, policy, rollup, version,
-};
+use crate::{admin, body_store, leader, local_tokenize, metrics, observations, policy, version};
 
 #[derive(Parser, Debug)]
 #[command(

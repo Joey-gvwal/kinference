@@ -18,7 +18,6 @@ mod pick_body;
 mod picker;
 mod policy;
 mod proto;
-mod rollup;
 mod service;
 mod tokenize;
 mod tokenize_client;
