@@ -532,7 +532,7 @@ fn policy_fleet_with(
     for (name, model, addrs) in sets {
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
-        let mut spec = crate::config::test_spec(name, 16);
+        let mut spec = crate::pool::test_spec(name, 16);
         spec.key = kinference_policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(

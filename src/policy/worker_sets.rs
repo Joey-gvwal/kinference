@@ -23,9 +23,8 @@ use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::runtime::{WatchStreamExt, reflector};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{
-    DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PoolSpec, PortRef, PortRefs, ProfileConfig,
-};
+use crate::discovery::{DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs};
+use crate::pool::{PoolSpec, ProfileConfig};
 
 /// Worker sets that produced no pool, published for the status writer. A
 /// rejected set appears in no `PolicyIndex`, so this is the only way its status

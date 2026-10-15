@@ -4,6 +4,10 @@ use anyhow::{Context, Result};
 use kinference_policy::PoolKey;
 use serde::Deserialize;
 
+use crate::discovery::static_config::WorkersFile;
+use crate::discovery::{DiscoveryConfig, DiscoveryDefaults, DiscoveryMode};
+use crate::pool::{PoolSpec, ProfileConfig};
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 // Unknown top-level keys are a startup error, so a mistyped or renamed key
@@ -275,32 +279,6 @@ fn default_lease_retry_secs() -> u64 {
     2
 }
 
-/// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.
-///
-/// `kv_block_size` and the render URL are per-deployment facts, so they live on
-/// the worker set instead.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProfileConfig {
-    /// Referenced by `[[workerset]].profile`. Must be unique.
-    pub name: String,
-    /// Refit with `analysis/analyze-latency.py`.
-    #[serde(default)]
-    pub predictor: PredictorConfig,
-    #[serde(default)]
-    pub picker: PickerConfig,
-    #[serde(default)]
-    pub tokenize: ProfileTokenizeConfig,
-}
-
-/// `[profile.tokenize]`
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ProfileTokenizeConfig {
-    #[serde(default)]
-    pub mode: TokenizeMode,
-}
-
 /// `[[workerset]]`: one declared worker set. The Kubernetes equivalent is an
 /// `InferenceWorkerSet`; both reduce to a [`PoolSpec`].
 #[allow(dead_code)]
@@ -322,32 +300,6 @@ pub struct WorkerSetConfig {
     pub render_url: Option<String>,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
-}
-
-/// A worker set with its profile resolved: everything needed to build a
-/// `pool::Pool`, whether declared in TOML or by an `InferenceWorkerSet`.
-///
-/// Reconciles compare specs with `PartialEq` to decide whether a pool needs
-/// updating, and to decide whether a retired pool can be resurrected.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct PoolSpec {
-    pub key: PoolKey,
-    pub name: String,
-    pub profile: String,
-    pub kv_block_size: u32,
-    pub predictor: PredictorConfig,
-    pub picker: PickerConfig,
-    pub tokenize_mode: TokenizeMode,
-    pub render_url: Option<String>,
-    pub discovery: DiscoveryConfig,
-    /// Per-set `/v1/models` refresh interval
-    /// (`spec.modelDiscovery.interval`). `None` uses the fleet-wide
-    /// `models_refresh_secs`.
-    pub models_refresh_secs: Option<u64>,
-    /// A fixed model list (`spec.modelDiscovery.mode: Static`); `/v1/models`
-    /// is not polled. Lets engines that don't serve `/v1/models` be routable.
-    pub static_models: Option<Vec<String>>,
 }
 
 fn default_expected_overlap_alpha() -> f32 {
@@ -708,203 +660,6 @@ fn default_warmup() -> bool {
     true
 }
 
-/// `[workerset.discovery]`: where a pool's workers come from.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct DiscoveryConfig {
-    #[serde(default)]
-    pub mode: DiscoveryMode,
-    /// TOML file with a `[[workers]]` array of `WorkerConfig`. Required in
-    /// static mode. Relative paths resolve against the config file's directory.
-    #[serde(default)]
-    pub workers_file: Option<std::path::PathBuf>,
-    /// Namespace of the Service; `None` means all namespaces. Kubernetes mode
-    /// only.
-    #[serde(default)]
-    pub namespace: Option<String>,
-    /// Service fronting the workers. Each Ready endpoint in its EndpointSlices
-    /// becomes a worker, dialed by pod IP, so any Service type works. Required
-    /// in Kubernetes mode.
-    #[serde(default)]
-    pub service_name: Option<String>,
-    /// `namespace/name` of the owning `InferenceWorkerSet`, for logs only,
-    /// since two sets can share a Service.
-    #[serde(skip)]
-    pub workerset: Option<String>,
-    /// Last-resort ports, used when the Pod has neither a matching named port
-    /// nor a `kinference.buoyant.io/*` annotation.
-    #[serde(default)]
-    pub defaults: DiscoveryDefaults,
-    /// Explicit ports from an `InferenceWorkerSet`. Always empty for TOML
-    /// worker sets.
-    #[serde(skip)]
-    pub ports: PortRefs,
-}
-
-/// Explicit per-role ports. `None` means resolve by conventional name, then
-/// fall back to [`DiscoveryDefaults`].
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PortRefs {
-    pub http: Option<PortRef>,
-    pub metrics: Option<PortRef>,
-    pub zmq: Option<PortRef>,
-    pub replay: Option<PortRef>,
-    /// The workers publish no KV events, so no SUB socket is opened. Unlike
-    /// `zmq: None`, which falls back to a default port: a ZMQ `connect` to a
-    /// port nobody publishes on succeeds and stays silent forever.
-    pub kv_events_declared_absent: bool,
-}
-
-/// A port named by a CR, either by Service port name or by number.
-///
-/// Names are matched against the EndpointSlice's ports. A number is a Service
-/// port, but kinference dials pods directly, so it is matched against the
-/// slice's target ports first and only used verbatim (with a warning) if
-/// nothing matches.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortRef {
-    Name(String),
-    Number(u16),
-}
-
-/// Last-resort per-pod ports. See [`DiscoveryConfig::defaults`].
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DiscoveryDefaults {
-    /// OpenAI-compatible HTTP port, also used for `/metrics`.
-    #[serde(default = "default_http_port")]
-    pub http_port: u16,
-    /// ZMQ PUB port for KV-cache events.
-    #[serde(default = "default_zmq_port")]
-    pub zmq_port: u16,
-    /// ZMQ DEALER replay port. `None` disables replay unless a named port or
-    /// annotation supplies one.
-    #[serde(default)]
-    pub replay_port: Option<u16>,
-}
-
-impl Default for DiscoveryDefaults {
-    fn default() -> Self {
-        Self {
-            http_port: default_http_port(),
-            zmq_port: default_zmq_port(),
-            replay_port: None,
-        }
-    }
-}
-
-fn default_http_port() -> u16 {
-    8000
-}
-
-fn default_zmq_port() -> u16 {
-    5557
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DiscoveryMode {
-    /// Workers listed in `discovery.workers_file`.
-    #[default]
-    Static,
-    /// Workers from the EndpointSlices of `discovery.service_name`.
-    Kubernetes,
-}
-
-/// A worker's inference engine, detected from the `owned_by` field of
-/// `/v1/models`. Only used for display.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Engine {
-    #[default]
-    Vllm,
-    Sglang,
-}
-
-impl std::fmt::Display for Engine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Engine::Vllm => "vllm",
-            Engine::Sglang => "sglang",
-        };
-        f.write_str(s)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkerConfig {
-    pub worker_id_str: String,
-    pub worker_id_num: u64,
-    /// ZMQ PUB endpoint for KV-cache events. Required unless `mock_mode`.
-    #[serde(default)]
-    pub zmq_endpoint: Option<String>,
-    /// DEALER endpoint for replaying event history from seq=0 at startup.
-    #[serde(default)]
-    pub replay_endpoint: Option<String>,
-    /// The engine's Prometheus `/metrics` URL.
-    #[serde(default)]
-    pub metrics_url: Option<String>,
-    /// Base URL (no path) of the engine's OpenAI-compatible API, used for
-    /// scrapes and tokenization, and as the fallback for `endpoint`.
-    #[serde(default)]
-    pub http_url: Option<String>,
-    /// Routable `ip:port` returned to clients (`WorkerScore.endpoint` and
-    /// `x-gateway-destination-endpoint`). Takes precedence over `http_url`'s
-    /// `host:port`; needed when `http_url` uses a hostname, since the gateways
-    /// don't resolve names here.
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    pub model_name: String,
-
-    // Placement metadata, emitted by aws-harness's gen-monitor-config.sh. Not
-    // used yet.
-    #[serde(default)]
-    pub pod_name: Option<String>,
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default)]
-    pub node_name: Option<String>,
-    #[serde(default)]
-    pub node_ip: Option<String>,
-    #[serde(default)]
-    pub pod_ip: Option<String>,
-    #[serde(default)]
-    pub availability_zone: Option<String>,
-    #[serde(default)]
-    pub instance_type: Option<String>,
-}
-
-/// A static worker list, loaded from `discovery.workers_file`.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkersFile {
-    #[serde(default)]
-    pub workers: Vec<WorkerConfig>,
-}
-
-impl WorkersFile {
-    pub fn load(path: impl AsRef<Path>) -> Result<Vec<WorkerConfig>> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading workers file from {}", path.display()))?;
-        let wf: Self = toml::from_str(&text)
-            .with_context(|| format!("parsing workers TOML from {}", path.display()))?;
-        Ok(wf.workers)
-    }
-}
-
-impl PoolSpec {
-    /// Load this set's static workers; empty unless in static mode with a
-    /// `workers_file`.
-    pub fn load_static_workers(&self) -> Result<Vec<WorkerConfig>> {
-        match (&self.discovery.mode, &self.discovery.workers_file) {
-            (DiscoveryMode::Static, Some(p)) => WorkersFile::load(p),
-            _ => Ok(Vec::new()),
-        }
-    }
-}
-
 impl Config {
     /// Load the config file at `path`: JSON when the extension is `.json`,
     /// TOML otherwise.
@@ -1114,24 +869,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-}
-
-/// A minimal static spec shared by tests that need a `Pool`.
-#[cfg(test)]
-pub(crate) fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
-    PoolSpec {
-        key: PoolKey::local(name),
-        name: name.to_string(),
-        profile: "test-profile".to_string(),
-        kv_block_size,
-        predictor: PredictorConfig::default(),
-        picker: PickerConfig::default(),
-        tokenize_mode: TokenizeMode::default(),
-        render_url: None,
-        discovery: DiscoveryConfig::default(),
-        models_refresh_secs: None,
-        static_models: None,
     }
 }
 

@@ -129,7 +129,7 @@ fn a_kv_events_declaration_resolves_both_sockets_by_convention() {
 
 fn refs_declaring_http(name: &str) -> PortRefs {
     PortRefs {
-        http: Some(crate::config::PortRef::Name(name.to_string())),
+        http: Some(PortRef::Name(name.to_string())),
         ..PortRefs::default()
     }
 }

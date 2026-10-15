@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
 use dashmap::DashMap;
+use serde::Deserialize;
 
 /// Verdict returned by [`WorkerRegistry::set_served_models`].
 ///
@@ -34,7 +35,7 @@ pub enum ServedModelsVerdict {
     },
 }
 
-use crate::config::{Engine, WorkerConfig};
+use crate::discovery::WorkerConfig;
 
 /// Extract `host:port` from an engine HTTP base URL.
 /// `http://127.0.0.1:8000/` → `127.0.0.1:8000`. Returns `None` if the
@@ -447,6 +448,26 @@ impl WorkerRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.by_num.is_empty()
+    }
+}
+
+/// A worker's inference engine, detected from the `owned_by` field of
+/// `/v1/models`. Only used for display.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Vllm,
+    Sglang,
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Engine::Vllm => "vllm",
+            Engine::Sglang => "sglang",
+        };
+        f.write_str(s)
     }
 }
 

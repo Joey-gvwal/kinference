@@ -13,9 +13,10 @@ use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
-use crate::config::{Config, DiscoveryMode};
+use crate::config::Config;
 use crate::discovery::{
-    Discovery, WorkerChange, kubernetes::KubeDiscovery, static_config::StaticDiscovery,
+    Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
+    static_config::StaticDiscovery,
 };
 use crate::metrics::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::mock::MockKinferenceService;
@@ -733,7 +734,7 @@ pub async fn run() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn handle_added(
     pool: &Arc<pool::Pool>,
-    w: config::WorkerConfig,
+    w: WorkerConfig,
     poll_ms: u64,
     models_refresh_secs: u64,
     replay_timeout_ms: u64,
@@ -942,7 +943,7 @@ struct MainHooks {
 }
 
 impl pool_manager::PoolHooks for MainHooks {
-    fn on_create(&self, pool: &Arc<Pool>, spec: &config::PoolSpec) -> anyhow::Result<()> {
+    fn on_create(&self, pool: &Arc<Pool>, spec: &pool::PoolSpec) -> anyhow::Result<()> {
         let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
             DiscoveryMode::Static => {
                 let workers = spec.load_static_workers()?;
