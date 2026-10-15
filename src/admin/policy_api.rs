@@ -38,10 +38,10 @@ use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::metrics::MetricsRegistry;
 use crate::picker::{self, WorkerScore};
 use crate::policy::store::PolicyStore;
 use crate::pool::PoolRegistry;
+use crate::scrape::MetricsRegistry;
 
 // ── limits ───────────────────────────────────────────────────────────────────
 

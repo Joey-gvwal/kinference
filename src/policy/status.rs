@@ -34,8 +34,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::store::PolicyStore;
-use crate::metrics::MetricsRegistry;
 use crate::pool::Pool;
+use crate::scrape::MetricsRegistry;
 
 /// The controller identity written into `status.parents[].controllerName`.
 pub const CONTROLLER_NAME: &str = "kinference.buoyant.io/router";

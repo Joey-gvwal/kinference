@@ -102,7 +102,7 @@ fn api_state(policy: Option<Arc<crate::policy::store::PolicyStore>>) -> policy_a
     policy_api::PolicyApiState::new(
         policy,
         PoolRegistry::new(),
-        Arc::new(crate::metrics::MetricsRegistry::new()),
+        Arc::new(crate::scrape::MetricsRegistry::new()),
     )
 }
 
@@ -476,7 +476,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
     let st = policy_api::PolicyApiState::new(
         Some(store),
         pools,
-        Arc::new(crate::metrics::MetricsRegistry::new()),
+        Arc::new(crate::scrape::MetricsRegistry::new()),
     );
     let (status, body) = body_of(policy_api::context(State(st)).await).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -622,7 +622,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
             let st = policy_api::PolicyApiState::new(
                 Some(store),
                 pools,
-                Arc::new(crate::metrics::MetricsRegistry::new()),
+                Arc::new(crate::scrape::MetricsRegistry::new()),
             );
             body_of(policy_api::simulate(State(st), policy_api::ApiJson(req)).await).await
         }
@@ -754,7 +754,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
     let st = policy_api::PolicyApiState::new(
         Some(store),
         pools,
-        Arc::new(crate::metrics::MetricsRegistry::new()),
+        Arc::new(crate::scrape::MetricsRegistry::new()),
     );
     let (status, body) =
         body_of(policy_api::simulate(State(st), policy_api::ApiJson(req)).await).await;
@@ -957,7 +957,7 @@ fn app_with(
     policy: Option<Arc<crate::policy::store::PolicyStore>>,
     pools: Arc<PoolRegistry>,
 ) -> (axum::Router, Arc<PromMetrics>) {
-    let metrics = Arc::new(crate::metrics::MetricsRegistry::new());
+    let metrics = Arc::new(crate::scrape::MetricsRegistry::new());
     let prom = Arc::new(PromMetrics::new());
     let state = AppState {
         pools: pools.clone(),
