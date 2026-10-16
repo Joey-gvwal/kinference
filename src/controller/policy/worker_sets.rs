@@ -27,7 +27,8 @@ use tokio_util::sync::CancellationToken;
 use crate::fleet::discovery::{
     DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs,
 };
-use crate::fleet::pool::{PoolSpec, ProfileConfig};
+use crate::fleet::pool::PoolSpec;
+use crate::fleet::profile::ProfileConfig;
 
 /// Worker sets that produced no pool, published for the status writer. A
 /// rejected set appears in no `PolicyIndex`, so this is the only way its status

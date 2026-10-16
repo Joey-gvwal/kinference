@@ -106,7 +106,8 @@ async fn inflight_handles_outlive_their_pool() {
     let pool_token = pool.cancel.clone();
 
     // What a pick stashes on its observation record.
-    let handles = crate::router::observations::InflightHandles::of(&pool);
+    let inflight = pool.inflight.clone();
+    let prefixes = pool.inflight_prefixes.clone();
     pool.inflight.inc("10.0.0.1:8000");
     assert_eq!(pool.inflight.get("10.0.0.1:8000"), 1);
 
@@ -116,9 +117,9 @@ async fn inflight_handles_outlive_their_pool() {
     assert!(registry.snapshot().is_empty());
 
     // The release still lands, on the right counter.
-    handles.inflight.dec("10.0.0.1:8000");
+    inflight.dec("10.0.0.1:8000");
     assert_eq!(
-        handles.inflight.get("10.0.0.1:8000"),
+        inflight.get("10.0.0.1:8000"),
         0,
         "the decrement must reach the pool the pick was made against"
     );
@@ -129,7 +130,7 @@ async fn inflight_handles_outlive_their_pool() {
         "the pool is reclaimed promptly; only the inflight maps linger"
     );
 
-    drop(handles);
+    drop((inflight, prefixes));
 }
 
 /// Process shutdown still reaches every pool: `child_token` propagates from

@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use crate::fleet::profile::{PickerConfig, PredictorConfig};
 use crate::router::picker::WaitPrediction;
 use crate::router::picker::WorkerScore;
-use crate::router::picker::{PickerConfig, PredictorConfig};
 use crate::router::service::Qos;
 
 /// The per-pool state a completed pick must release: decrement the endpoint's
