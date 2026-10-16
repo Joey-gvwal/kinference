@@ -90,3 +90,46 @@ fn empty_model_list_is_noop() {
     idx.associate(PoolId::from_raw(0), "a", &[]);
     assert!(idx.models().is_empty());
 }
+
+/// Each new (model, pool) pair is published once; a repeat claim is silent.
+#[tokio::test]
+async fn a_new_claim_is_published_once() {
+    let idx = ModelIndex::new();
+    let mut rx = idx.subscribe();
+    idx.associate(PoolId::from_raw(0), "a", &gemma());
+    idx.associate(PoolId::from_raw(0), "a", &gemma());
+    idx.associate(PoolId::from_raw(1), "b", &gemma());
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        ModelClaim {
+            pool: PoolId::from_raw(0),
+            model: "gemma".to_string()
+        }
+    );
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        ModelClaim {
+            pool: PoolId::from_raw(1),
+            model: "gemma".to_string()
+        }
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the repeat claim must not be published"
+    );
+}
+
+/// A list with one new model among known ones publishes only the new one.
+#[tokio::test]
+async fn only_the_new_models_of_a_list_are_published() {
+    let idx = ModelIndex::new();
+    idx.associate(PoolId::from_raw(0), "a", &gemma());
+    let mut rx = idx.subscribe();
+    idx.associate(
+        PoolId::from_raw(0),
+        "a",
+        &["gemma".to_string(), "llama".to_string()],
+    );
+    assert_eq!(rx.try_recv().unwrap().model, "llama");
+    assert!(rx.try_recv().is_err());
+}

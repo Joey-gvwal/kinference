@@ -374,12 +374,10 @@ impl MetricsRegistry {
 /// served models and the detected engine.
 ///
 /// Fire-and-forget: on failure, the periodic refresh catches up.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_one_shot_warmup(
     cfg: WorkerConfig,
     registry: Arc<MetricsRegistry>,
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
-    local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: crate::fleet::eviction::EvictionTx,
     index: Arc<crate::fleet::models::ModelIndex>,
     pool_id: PoolId,
@@ -460,23 +458,6 @@ pub fn spawn_one_shot_warmup(
                 if let Some(eng) = detected_engine {
                     workers.set_engine(cfg.worker_id_num, eng);
                 }
-                // Background tokenizer warmup for every served model;
-                // `get_or_load` is idempotent.
-                if let Some(local_reg) = local_tokenizer.as_ref() {
-                    for name in &names {
-                        let reg = local_reg.clone();
-                        let model = name.clone();
-                        tokio::spawn(async move {
-                            if let Err(err) = reg.warmup(&model).await {
-                                tracing::warn!(
-                                    model,
-                                    error = %err,
-                                    "tokenizer warmup failed; first request will pay load cost or fall back to HTTP"
-                                );
-                            }
-                        });
-                    }
-                }
                 registry.models_by_worker.insert(
                     cfg.worker_id_num,
                     ModelsInfo {
@@ -503,7 +484,6 @@ pub fn spawn_metrics_poller(
     cfg: WorkerConfig,
     poll_ms: u64,
     models_refresh_secs: u64,
-    local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
     registry: Arc<MetricsRegistry>,
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
     eviction_tx: crate::fleet::eviction::EvictionTx,
@@ -554,10 +534,6 @@ pub fn spawn_metrics_poller(
         let refresh_every: u64 = ((models_refresh_secs * 1000) / poll_ms).max(1);
         let mut n: u64 = 0;
         let mut warned_about_models = false;
-        // Models already warmed, so a tokenizer that can't load isn't retried
-        // (and re-warned) on every refresh. Requests still load on demand.
-        let mut warmup_attempted: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
 
         tracing::info!(
             worker_id = cfg.worker_id_str,
@@ -628,27 +604,6 @@ pub fn spawn_metrics_poller(
                         }
                         if let Some(eng) = detected_engine {
                             workers.set_engine(cfg.worker_id_num, eng);
-                        }
-                        // Tokenizer warmup for newly seen models, e.g. a
-                        // hot-loaded LoRA adapter.
-                        if let Some(local_reg) = local_tokenizer.as_ref() {
-                            for name in &names {
-                                if !warmup_attempted.insert(name.clone()) {
-                                    continue; // already tried this model
-                                }
-                                let reg = local_reg.clone();
-                                let model = name.clone();
-                                tokio::spawn(async move {
-                                    if let Err(err) = reg.warmup(&model).await {
-                                        tracing::warn!(
-                                            model,
-                                            error = %err,
-                                            "tokenizer warmup failed; on-demand \
-                                             requests will fall back to HTTP /render"
-                                        );
-                                    }
-                                });
-                            }
                         }
                         // Single model: filter by its name. Otherwise no
                         // filter.

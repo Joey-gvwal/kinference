@@ -231,7 +231,6 @@ pub async fn run() -> Result<()> {
 
         // The local tokenizer registry is fleet-wide and cheap to build, so it
         // is always built; each pool's tokenize mode decides whether to use it.
-        // It must exist before the coordinator spawns, for `handle_added`.
         let warmup_enabled = cfg.tokenize.local.warmup;
         let local_tokenizer =
             match local_tokenize::LocalTokenizerRegistry::new(cfg.tokenize.local.clone()) {
@@ -252,6 +251,14 @@ pub async fn run() -> Result<()> {
                     None
                 }
             };
+        if warmup_enabled && let Some(registry) = local_tokenizer.as_ref() {
+            local_tokenize::spawn_warmup(
+                registry.clone(),
+                pool_registry.clone(),
+                models.subscribe(),
+                cancel.clone(),
+            );
+        }
 
         // Coordinator channel of (pool, change). Each pool runs its own
         // discovery, and a per-pool forwarder tags its events with the pool.
@@ -379,7 +386,6 @@ pub async fn run() -> Result<()> {
         let coord_metrics = metrics.clone();
         let coord_cancel = cancel.clone();
         let coord_task_tokens = task_tokens.clone();
-        let coord_local_tokenizer = local_tokenizer.clone();
         let coord_eviction_tx = eviction_tx.clone();
         let coord_models = models.clone();
         let coord_worker_pool = worker_pool.clone();
@@ -429,12 +435,10 @@ pub async fn run() -> Result<()> {
                                     poll_ms,
                                     models_refresh_secs,
                                     ingest_cfg,
-                                    warmup_enabled,
                                     &coord_metrics,
                                     &coord_prom,
                                     &coord_task_tokens,
                                     &coord_cancel,
-                                    coord_local_tokenizer.clone(),
                                     &coord_eviction_tx,
                                     &coord_models,
                                     &coord_worker_pool,
@@ -731,8 +735,8 @@ pub async fn run() -> Result<()> {
 
 /// Handle a `WorkerChange::Added`. Registers the worker across all state
 /// stores, spawns its ZMQ listener + metrics poller (under a per-worker
-/// cancel token), and kicks a one-shot warmup so the worker is routable
-/// before the next periodic `/v1/models` tick.
+/// cancel token), and kicks a one-shot `/v1/models` scrape so the worker is
+/// routable before the next periodic tick.
 ///
 /// On `SlotExhausted`, logs an error and skips the worker.
 #[allow(clippy::too_many_arguments)]
@@ -742,14 +746,10 @@ fn handle_added(
     poll_ms: u64,
     models_refresh_secs: u64,
     ingest_cfg: ingest::IngestConfig,
-    warmup_enabled: bool,
     metrics: &Arc<MetricsRegistry>,
     prom: &Arc<metrics::PromMetrics>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     parent_cancel: &CancellationToken,
-    // Passed to the per-worker tasks only when this pool's tokenize mode
-    // uses it.
-    local_tokenizer: Option<Arc<local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: &eviction::EvictionTx,
     models: &Arc<ModelIndex>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
@@ -758,16 +758,6 @@ fn handle_added(
     let registry = &pool.registry;
     let indexer = &pool.indexer;
     let inflight_prefixes = &pool.inflight_prefixes;
-    // Warm up only for pools using the in-process tokenizer (Local/Compare).
-    let warmup_tokenizer = if warmup_enabled
-        && !matches!(
-            pool.tokenize_mode,
-            crate::router::tokenize::TokenizeMode::Render
-        ) {
-        local_tokenizer
-    } else {
-        None
-    };
     tracing::info!(
         pool = pool.name,
         worker_id = w.worker_id_str,
@@ -894,7 +884,6 @@ fn handle_added(
         w.clone(),
         poll_ms,
         refresh_secs,
-        warmup_tokenizer.clone(),
         metrics.clone(),
         registry.clone(),
         eviction_tx.clone(),
@@ -904,14 +893,12 @@ fn handle_added(
         pool.name.clone(),
     );
 
-    // 5. Warmup: an immediate /v1/models scrape, so the worker is routable
-    //    without waiting for the periodic tick, plus tokenizer warmup in
-    //    local mode.
+    // 5. An immediate /v1/models scrape, so the worker is routable without
+    //    waiting for the periodic tick.
     spawn_one_shot_warmup(
         w,
         metrics.clone(),
         registry.clone(),
-        warmup_tokenizer,
         eviction_tx.clone(),
         models.clone(),
         pool.id,

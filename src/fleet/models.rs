@@ -1,19 +1,46 @@
 //! The model index: which pools serve each model name. Written by the
 //! scrape and the pool manager, read on the pick path.
+//!
+//! A new claim is published after the map holds it, so a subscriber that
+//! looks the claim up sees it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::RwLock;
 
 use kinference_policy::PoolId;
+use tokio::sync::broadcast;
 
-#[derive(Default)]
+/// A (model, pool) pair the index did not hold before. A repeat claim sends
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelClaim {
+    pub pool: PoolId,
+    pub model: String,
+}
+
 pub struct ModelIndex {
     claims: RwLock<HashMap<String, BTreeSet<PoolId>>>,
+    changes: broadcast::Sender<ModelClaim>,
+}
+
+impl Default for ModelIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ModelIndex {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            claims: RwLock::new(HashMap::new()),
+            changes: broadcast::channel(256).0,
+        }
+    }
+
+    /// New claims, from the point of subscription on. A receiver that falls
+    /// behind sees `Lagged` and misses the oldest claims.
+    pub fn subscribe(&self) -> broadcast::Receiver<ModelClaim> {
+        self.changes.subscribe()
     }
 
     /// Record that `pool_id` serves `models`. Several pools may serve one
@@ -33,21 +60,32 @@ impl ModelIndex {
                 return;
             }
         }
-        let mut map = self.claims.write().unwrap();
-        for m in models {
-            if map.entry(m.clone()).or_default().insert(pool_id) {
-                let serving = map[m].len();
-                if serving > 1 {
-                    tracing::info!(
-                        model = %m,
-                        pool = %pool_name,
-                        pools_serving = serving,
-                        "model also served by this pool; both are pick candidates"
-                    );
-                } else {
-                    tracing::info!(model = %m, pool = %pool_name, "model routed to pool");
+        let mut added = Vec::new();
+        {
+            let mut map = self.claims.write().unwrap();
+            for m in models {
+                if map.entry(m.clone()).or_default().insert(pool_id) {
+                    let serving = map[m].len();
+                    if serving > 1 {
+                        tracing::info!(
+                            model = %m,
+                            pool = %pool_name,
+                            pools_serving = serving,
+                            "model also served by this pool; both are pick candidates"
+                        );
+                    } else {
+                        tracing::info!(model = %m, pool = %pool_name, "model routed to pool");
+                    }
+                    added.push(m.clone());
                 }
             }
+        }
+        for model in added {
+            // `Err` means nobody is listening.
+            let _ = self.changes.send(ModelClaim {
+                pool: pool_id,
+                model,
+            });
         }
     }
 
