@@ -454,3 +454,6 @@ impl PoolHooks for Coordinator {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
