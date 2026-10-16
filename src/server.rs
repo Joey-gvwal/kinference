@@ -35,7 +35,7 @@ use kinference_fleet::scrape::MetricsRegistry;
     about = "KV-cache aware routing scorer"
 )]
 struct Args {
-    /// Path to the TOML config file.
+    /// Path to the JSON config file.
     #[arg(long, short = 'c')]
     config: PathBuf,
 }

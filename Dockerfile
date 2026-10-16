@@ -4,8 +4,8 @@
 # pass their own config via -v + --config, e.g.
 #
 #   docker run --rm -p 50051:50051 \
-#       -v $(pwd)/config.toml:/etc/kinference/config.toml:ro \
-#       kinference --config /etc/kinference/config.toml
+#       -v $(pwd)/config.json:/etc/kinference/config.json:ro \
+#       kinference --config /etc/kinference/config.json
 #
 # Build:
 #   DOCKER_BUILDKIT=1 docker build -t kinference .

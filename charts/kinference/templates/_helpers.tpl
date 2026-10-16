@@ -38,10 +38,8 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
 {{/*
-The rendered kinference config.
-JSON, not TOML: Helm reads every number in values.yaml as a float64, and
-`toToml` writes `1000` as `1000.0`, which an integer field rejects. `toJson`
-writes `1000`. kinference picks the parser from the file extension.
+The rendered kinference config, as JSON: Helm reads every number in
+values.yaml as a float64, and `toJson` still writes `1000` as `1000`.
 */}}
 {{- define "kinference.config" -}}
 {{- $cfg := deepCopy (.Values.config | default dict) -}}

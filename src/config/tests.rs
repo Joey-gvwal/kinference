@@ -1,13 +1,26 @@
+use serde_json::{Value, json};
+
 use super::*;
 use crate::router::metrics::TenantLabels;
 use kinference_fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
 
+fn parse(v: Value) -> serde_json::Result<Config> {
+    serde_json::from_value(v)
+}
+
+fn workerset(name: &str, profile: &str, kv_block_size: u32, service: &str) -> Value {
+    json!({
+        "name": name,
+        "profile": profile,
+        "kv_block_size": kv_block_size,
+        "discovery": {"service_name": service},
+    })
+}
+
 #[test]
 fn config_without_worker_sets_fails_validate() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses (pools defaults to empty)");
+    let cfg =
+        parse(json!({"listen": "127.0.0.1:50051"})).expect("parses (pools defaults to empty)");
     let err = cfg
         .validate()
         .expect_err("empty worker_sets should fail validate");
@@ -16,21 +29,12 @@ listen = "127.0.0.1:50051"
 
 #[test]
 fn workerset_with_zero_block_size_fails_validate() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "t"
-
-[[workerset]]
-name = "p"
-profile = "t"
-kv_block_size = 0
-
-[workerset.discovery]
-service_name = "svc"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [workerset("p", "t", 0, "svc")],
+    }))
+    .expect("parses");
     let err = cfg
         .validate()
         .expect_err("zero kv_block_size should fail validate");
@@ -39,27 +43,12 @@ service_name = "svc"
 
 #[test]
 fn duplicate_workerset_names_fail_validate() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "t"
-
-[[workerset]]
-name = "dup"
-profile = "t"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "a"
-
-[[workerset]]
-name = "dup"
-profile = "t"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "b"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [workerset("dup", "t", 16, "a"), workerset("dup", "t", 16, "b")],
+    }))
+    .expect("parses");
     let err = cfg
         .validate()
         .expect_err("duplicate workerset names should fail");
@@ -68,46 +57,27 @@ service_name = "b"
 
 #[test]
 fn workerset_without_service_name_fails_validate() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "t"
-
-[[workerset]]
-name = "p"
-profile = "t"
-kv_block_size = 16
-[workerset.discovery]
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [{"name": "p", "profile": "t", "kv_block_size": 16}],
+    }))
+    .expect("parses");
     let err = cfg
         .validate()
         .expect_err("workerset without service_name should fail");
     assert!(err.to_string().contains("service_name"));
 }
 
-/// Build a minimal valid config with a `[leader_election]` body appended.
-fn cfg_with_leader_election(body: &str) -> Config {
-    let toml_str = format!(
-        r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "t"
-
-[[workerset]]
-name = "p"
-profile = "t"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "svc"
-
-[leader_election]
-{body}
-"#
-    );
-    toml::from_str(&toml_str).expect("parses")
+/// Build a minimal valid config with the given `leader_election` section.
+fn cfg_with_leader_election(section: Value) -> Config {
+    parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [workerset("p", "t", 16, "svc")],
+        "leader_election": section,
+    }))
+    .expect("parses")
 }
 
 /// `renew_grace >= lease_duration` makes the holder permanently due for
@@ -116,9 +86,11 @@ service_name = "svc"
 #[test]
 fn renew_grace_at_or_above_lease_duration_is_rejected() {
     for grace in [15, 16, 100] {
-        let cfg = cfg_with_leader_election(&format!(
-            "enabled = true\nlease_duration_secs = 15\nrenew_grace_secs = {grace}"
-        ));
+        let cfg = cfg_with_leader_election(json!({
+            "enabled": true,
+            "lease_duration_secs": 15,
+            "renew_grace_secs": grace,
+        }));
         let err = cfg
             .validate()
             .expect_err("grace >= duration must be rejected");
@@ -130,55 +102,47 @@ fn renew_grace_at_or_above_lease_duration_is_rejected() {
         );
     }
     // The shipped default pair is valid.
-    cfg_with_leader_election("enabled = true")
+    cfg_with_leader_election(json!({"enabled": true}))
         .validate()
         .expect("10 < 15 is fine");
 }
 
 #[test]
 fn zero_and_empty_leader_election_settings_are_rejected() {
-    for body in [
-        "enabled = true\nlease_duration_secs = 0",
-        "enabled = true\nrenew_grace_secs = 0",
-        "enabled = true\nretry_secs = 0",
-        "enabled = true\nlease_name = \"  \"",
+    for section in [
+        json!({"enabled": true, "lease_duration_secs": 0}),
+        json!({"enabled": true, "renew_grace_secs": 0}),
+        json!({"enabled": true, "retry_secs": 0}),
+        json!({"enabled": true, "lease_name": "  "}),
     ] {
-        cfg_with_leader_election(body).validate().unwrap_err();
+        cfg_with_leader_election(section).validate().unwrap_err();
     }
 }
 
 /// While disabled (the default), the timings are not validated.
 #[test]
 fn leader_election_defaults_off_and_is_not_validated_when_off() {
-    let cfg = cfg_with_leader_election("");
+    let cfg = cfg_with_leader_election(json!({}));
     assert!(!cfg.leader_election.enabled);
     assert_eq!(cfg.leader_election.lease_name, "kinference");
     assert_eq!(cfg.leader_election.lease_duration_secs, 15);
     assert_eq!(cfg.leader_election.renew_grace_secs, 10);
 
-    cfg_with_leader_election("lease_duration_secs = 1\nrenew_grace_secs = 99")
+    cfg_with_leader_election(json!({"lease_duration_secs": 1, "renew_grace_secs": 99}))
         .validate()
         .expect("timings are inert while disabled");
 }
 
 #[test]
 fn a_profile_that_omits_everything_gets_the_struct_defaults() {
-    // A profile with no [profile.predictor] / [profile.picker] tables
-    // still resolves; expected_overlap_alpha defaults to 1.0.
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "t"
-
-[[workerset]]
-name = "p"
-profile = "t"
-kv_block_size = 64
-[workerset.discovery]
-service_name = "svc"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    // A profile with no predictor / picker sections still resolves;
+    // expected_overlap_alpha defaults to 1.0.
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [workerset("p", "t", 64, "svc")],
+    }))
+    .expect("parses");
     cfg.validate().expect("validates");
     let spec = &cfg.pool_specs().expect("resolves")[0];
     assert_eq!(spec.profile, "t");
@@ -192,23 +156,12 @@ service_name = "svc"
 /// and lists the defined profiles.
 #[test]
 fn an_undefined_profile_is_rejected_and_names_both_sides() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "h100"
-
-[[profile]]
-name = "a100"
-
-[[workerset]]
-name = "ws"
-profile = "typo-h100"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "svc"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "h100"}, {"name": "a100"}],
+        "workerset": [workerset("ws", "typo-h100", 16, "svc")],
+    }))
+    .expect("parses");
     let err = cfg.validate().expect_err("unknown profile must fail");
     let msg = err.to_string();
     assert!(msg.contains("ws"), "names the worker set: {msg}");
@@ -225,34 +178,20 @@ service_name = "svc"
 /// Two sets sharing a profile get identical tuning.
 #[test]
 fn two_worker_sets_sharing_a_profile_get_identical_tuning() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "shared"
-[profile.predictor]
-base_ms = 777.0
-expected_overlap_alpha = 0.8
-[profile.picker]
-top_k_min = 3
-[profile.tokenize]
-mode = "local"
-
-[[workerset]]
-name = "a"
-profile = "shared"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "svc-a"
-
-[[workerset]]
-name = "b"
-profile = "shared"
-kv_block_size = 64
-[workerset.discovery]
-service_name = "svc-b"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{
+            "name": "shared",
+            "predictor": {"base_ms": 777.0, "expected_overlap_alpha": 0.8},
+            "picker": {"top_k_min": 3},
+            "tokenize": {"mode": "local"},
+        }],
+        "workerset": [
+            workerset("a", "shared", 16, "svc-a"),
+            workerset("b", "shared", 64, "svc-b"),
+        ],
+    }))
+    .expect("parses");
     cfg.validate().expect("validates");
     let specs = cfg.pool_specs().expect("resolves");
     assert_eq!(specs.len(), 2);
@@ -269,23 +208,12 @@ service_name = "svc-b"
 
 #[test]
 fn duplicate_profile_names_fail_validate() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "dup"
-
-[[profile]]
-name = "dup"
-
-[[workerset]]
-name = "ws"
-profile = "dup"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "svc"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "dup"}, {"name": "dup"}],
+        "workerset": [workerset("ws", "dup", 16, "svc")],
+    }))
+    .expect("parses");
     let err = cfg
         .validate()
         .expect_err("duplicate profile names must fail");
@@ -295,60 +223,63 @@ service_name = "svc"
 /// `profile` has no default: a worker set that omits it fails to parse.
 #[test]
 fn a_workerset_without_a_profile_does_not_parse() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[workerset]]
-name = "ws"
-kv_block_size = 16
-[workerset.discovery]
-service_name = "svc"
-"#;
-    let err = toml::from_str::<Config>(toml_str).expect_err("missing profile must not parse");
+    let err = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "workerset": [{"name": "ws", "kv_block_size": 16, "discovery": {"service_name": "svc"}}],
+    }))
+    .expect_err("missing profile must not parse");
     assert!(err.to_string().contains("profile"), "got: {err}");
 }
 
-/// `[metrics] tenant_labels` accepts its three forms, and an absent section
+/// `metrics.tenant_labels` accepts its three forms, and an absent section
 /// means `none`.
 #[test]
 fn tenant_labels_accepts_its_three_forms() {
-    let parse = |section: &str| -> TenantLabels {
-        let toml_str = format!("listen = \"127.0.0.1:50051\"\n{section}");
-        toml::from_str::<Config>(&toml_str)
-            .expect("parses")
-            .metrics
-            .tenant_labels
+    let labels = |metrics: Option<Value>| -> TenantLabels {
+        let mut v = json!({"listen": "127.0.0.1:50051"});
+        if let Some(m) = metrics {
+            v["metrics"] = m;
+        }
+        parse(v).expect("parses").metrics.tenant_labels
     };
-    assert_eq!(parse(""), TenantLabels::None, "absent section means none");
-    assert_eq!(parse("[metrics]\n"), TenantLabels::None, "absent key too");
     assert_eq!(
-        parse("[metrics]\ntenant_labels = \"none\"\n"),
+        labels(None),
+        TenantLabels::None,
+        "absent section means none"
+    );
+    assert_eq!(
+        labels(Some(json!({}))),
+        TenantLabels::None,
+        "absent key too"
+    );
+    assert_eq!(
+        labels(Some(json!({"tenant_labels": "none"}))),
         TenantLabels::None
     );
     assert_eq!(
-        parse("[metrics]\ntenant_labels = \"all\"\n"),
+        labels(Some(json!({"tenant_labels": "all"}))),
         TenantLabels::All
     );
     assert_eq!(
-        parse("[metrics]\ntenant_labels = [\"acme\", \"globex\"]\n"),
+        labels(Some(json!({"tenant_labels": ["acme", "globex"]}))),
         TenantLabels::Allow(vec!["acme".into(), "globex".into()])
     );
     // An empty list is how a templating tool spells "none".
-    assert_eq!(parse("[metrics]\ntenant_labels = []\n"), TenantLabels::None);
+    assert_eq!(
+        labels(Some(json!({"tenant_labels": []}))),
+        TenantLabels::None
+    );
 }
 
 /// A mistyped value fails the parse, with an error naming the accepted
 /// forms, rather than falling back to the default.
 #[test]
 fn a_mistyped_tenant_labels_value_is_rejected_rather_than_defaulted() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[metrics]
-tenant_labels = "sure"
-"#;
-    let err =
-        toml::from_str::<Config>(toml_str).expect_err("a bogus tenant_labels value must not parse");
+    let err = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "metrics": {"tenant_labels": "sure"},
+    }))
+    .expect_err("a bogus tenant_labels value must not parse");
     let msg = err.to_string();
     assert!(
         msg.contains("none") && msg.contains("all"),
@@ -366,23 +297,21 @@ tenant_labels = "sure"
 /// `deny_unknown_fields`, so a byte value can't be read as KB.
 #[test]
 fn body_caps_are_configured_in_kb() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-body_max_total_kb = 1024
-body_max_request_kb = 64
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "body_max_total_kb": 1024,
+        "body_max_request_kb": 64,
+    }))
+    .expect("parses");
     assert_eq!(cfg.body_max_total_kb, Some(1024));
     assert_eq!(cfg.body_max_request_kb, Some(64));
 
     // The old spelling is a startup error.
-    let stale = r#"
-listen = "127.0.0.1:50051"
-
-body_max_total_bytes = 268435456
-"#;
-    let err = toml::from_str::<Config>(stale).expect_err("the old key must not parse");
+    let err = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "body_max_total_bytes": 268435456,
+    }))
+    .expect_err("the old key must not parse");
     let msg = err.to_string();
     assert!(
         msg.contains("body_max_total_bytes"),
@@ -394,54 +323,30 @@ body_max_total_bytes = 268435456
     );
 }
 
-/// A `.json` config loads through the same structs as TOML, so the chart's
-/// `toJson` rendering and a hand-written TOML file mean the same thing.
+/// Helm's `toJson` writes integral numbers without a fraction (`400`, not
+/// `400.0`); float fields accept them.
 #[test]
-fn json_config_loads_like_toml() {
+fn integral_numbers_load_into_float_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let toml_path = dir.path().join("config.toml");
-    let json_path = dir.path().join("config.json");
+    let path = dir.path().join("config.json");
     std::fs::write(
-        &toml_path,
-        r#"
-listen = "127.0.0.1:50051"
-metrics_poll_ms = 1000
-
-[metrics]
-tenant_labels = ["acme"]
-
-[[profile]]
-name = "t"
-[profile.predictor]
-base_ms = 400.0
-
-[kubernetes]
-enabled = true
-"#,
-    )
-    .expect("write toml");
-    // Helm's `toJson` writes integral numbers without a fraction (`400`, not
-    // `400.0`), for float fields as well as integer ones.
-    std::fs::write(
-        &json_path,
+        &path,
         r#"{
   "listen": "127.0.0.1:50051",
   "metrics_poll_ms": 1000,
-  "metrics": {"tenant_labels": ["acme"]},
   "profile": [{"name": "t", "predictor": {"base_ms": 400}}],
   "kubernetes": {"enabled": true}
 }"#,
     )
     .expect("write json");
-    let from_toml = Config::load(&toml_path).expect("toml loads");
-    let from_json = Config::load(&json_path).expect("json loads");
-    assert_eq!(format!("{from_toml:?}"), format!("{from_json:?}"));
+    let cfg = Config::load(&path).expect("loads");
+    assert_eq!(cfg.metrics_poll_ms, Some(1000));
+    assert_eq!(cfg.profiles[0].predictor.base_ms, 400.0);
 }
 
-/// `deny_unknown_fields` holds for JSON too: a mistyped top-level key is a
-/// startup error, not a silent default.
+/// A mistyped top-level key is a startup error, not a silent default.
 #[test]
-fn json_config_rejects_unknown_top_level_key() {
+fn unknown_top_level_key_fails_load() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.json");
     std::fs::write(

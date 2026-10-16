@@ -23,7 +23,6 @@ getrandom = "0.2"
 dynamo-kv-router = { git = "https://github.com/ai-dynamo/dynamo", rev = "12207ba2cb397e40e260d39bce3f65c6fc799a49", default-features = false }
 tokio = "1"
 tokio-util = "0.7"
-toml = "0.8"
 zmq = "0.10"
 reqwest = { version = "0.12", default-features = false }
 dashmap = "6"
@@ -58,7 +57,7 @@ tokio-util.workspace = true
 # pulled in directly for clarity.
 tokio-stream = "0.1"
 serde.workspace = true
-toml.workspace = true
+zmq = "0.10"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
