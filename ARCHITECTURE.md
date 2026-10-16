@@ -50,10 +50,8 @@ Imports point down, never up or sideways:
   router.
 - The operator surface imports all of the above.
 
-Today the tree breaks this rule in four places:
+Today the tree breaks this rule in three places:
 
-- Two imports point up from the fleet into the router. `pool` takes the
-  picker and tokenize config types from the router (#37).
 - The router imports the controller's policy store to read the snapshot.
   #49 moves the snapshot holder into `kinference-policy`.
 - Every group records into the one `metrics` struct at the top. #40 gives
@@ -71,6 +69,7 @@ Today the tree breaks this rule in four places:
 | `fleet::ingest` | the ZMQ KV-event listener per worker, replay, and block-size checks |
 | `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
+| `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::rollup` | the task that sets the fleet gauges once a second |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
@@ -83,7 +82,7 @@ Today the tree breaks this rule in four places:
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
 | `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
-| `router::tokenize` | HTTP `/render` helpers and `TokenizeMode` |
+| `router::tokenize` | HTTP `/render` helpers |
 | `router::tokenize_client` | `/render` with local fallback and compare mode, as methods on the service |
 | `controller::leader` | Lease-based leader election |
 | `controller::policy` | the CRD watch and snapshot, the status writer, the binding writer, the worker-set reconcile |
