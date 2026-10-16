@@ -6,5 +6,5 @@ metadata:
   labels:
     {{- include "kinference.labels" . | nindent 4 }}
 data:
-  {{ include "kinference.configFileName" . }}: |
-    {{- include "kinference.configContents" . | nindent 4 }}
+  config.json: |
+    {{- include "kinference.config" . | nindent 4 }}

@@ -187,15 +187,3 @@ config:
       http_port: 8000
       zmq_port: 5557
       replay_port: 5558
-
-# An alternative to `config`: a complete kinference TOML config, the same
-# file kinference reads when run outside Kubernetes. Use it to share one
-# config file across deployments, or to keep its comments and layout, e.g.
-# --set-file configFile=my.toml. When set, it is used verbatim and `config`
-# is ignored.
-#
-# Nothing is derived into it, so keep its listen/admin_listen ports,
-# namespaces and extension name in line with the values above yourself. The
-# policy ClusterRole pair is always created in this mode, since the chart
-# cannot see whether policy is on.
-configFile: ""
