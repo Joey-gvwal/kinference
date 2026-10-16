@@ -45,7 +45,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fleet::models::ModelClaim;
 use crate::fleet::pool::{Pool, PoolRegistry};
-use crate::router::tokenize::{TokenizeInput, TokenizeMode};
+use crate::fleet::profile::TokenizeMode;
+use crate::router::tokenize::TokenizeInput;
 
 /// `[tokenize.local]`. See `src/router/local_tokenize.rs`.
 #[allow(dead_code)]
