@@ -45,7 +45,6 @@ use crate::fleet::workers::WorkerRegistry;
 ///
 /// Reconciles compare specs with `PartialEq` to decide whether a pool needs
 /// updating, and to decide whether a retired pool can be resurrected.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoolSpec {
     pub key: PoolKey,
@@ -87,7 +86,6 @@ pub struct PoolMap {
     ordered: Vec<Arc<Pool>>,
 }
 
-#[allow(dead_code)]
 impl PoolMap {
     pub fn from_pools(pools: Vec<Arc<Pool>>) -> Self {
         Self {
@@ -366,7 +364,6 @@ pub struct ReconcileReport {
 }
 
 impl ReconcileReport {
-    #[allow(dead_code)] // asserted in tests; a caller wanting "did anything change?"
     pub fn is_noop(&self) -> bool {
         self == &Self::default()
     }
@@ -542,7 +539,6 @@ impl PoolManager {
     }
 
     /// Live pools, for logging and tests.
-    #[allow(dead_code)] // the watch-driven reconcile logs against this
     pub fn live_keys(&self) -> Vec<PoolKey> {
         self.live.keys().cloned().collect()
     }

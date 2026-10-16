@@ -30,7 +30,6 @@ pub enum WorkerChange {
     Added(WorkerConfig),
     /// A previously-Added worker is gone. The coordinator should cancel
     /// its per-worker tasks and unregister it from every state store.
-    #[allow(dead_code)]
     Removed(u64),
 }
 
@@ -56,7 +55,6 @@ pub trait Discovery: Send + Sync + 'static {
 }
 
 /// `[workerset.discovery]`: where a pool's workers come from.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct DiscoveryConfig {
     #[serde(default)]
@@ -115,7 +113,6 @@ pub enum PortRef {
 }
 
 /// Last-resort per-pod ports. See [`DiscoveryConfig::defaults`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DiscoveryDefaults {
     /// OpenAI-compatible HTTP port, also used for `/metrics`.
@@ -148,7 +145,6 @@ fn default_zmq_port() -> u16 {
     5557
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiscoveryMode {

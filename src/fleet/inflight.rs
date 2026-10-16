@@ -227,7 +227,6 @@ impl InflightPrefixes {
     }
 
     /// Pending dispatch count across all endpoints. Diagnostic only.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.dispatches.len()
     }

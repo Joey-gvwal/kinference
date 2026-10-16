@@ -64,8 +64,6 @@ pub struct WorkerRegistry {
     canonical_models: Mutex<Option<BTreeSet<String>>>,
 }
 
-#[allow(dead_code)]
-// Some placement metadata is loaded but not read yet.
 #[derive(Debug, Clone)]
 pub struct WorkerEntry {
     pub worker_id_str: String,
@@ -150,7 +148,6 @@ impl WorkerEntry {
     }
 }
 
-#[allow(dead_code)]
 impl WorkerRegistry {
     pub fn new() -> Self {
         Self::default()

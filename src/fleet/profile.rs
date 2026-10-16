@@ -8,7 +8,6 @@ use serde::Deserialize;
 ///
 /// `kv_block_size` and the render URL are per-deployment facts, so they live on
 /// the worker set instead.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileConfig {
     /// Referenced by `[[workerset]].profile`. Must be unique.
@@ -23,7 +22,6 @@ pub struct ProfileConfig {
 }
 
 /// `[profile.tokenize]`
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ProfileTokenizeConfig {
     #[serde(default)]
@@ -35,7 +33,6 @@ pub struct ProfileTokenizeConfig {
 /// from `latency.csv` via `analysis/analyze-latency.py`. Same values
 /// drive every routing decision regardless of which front-end (gRPC
 /// `Pick()`) accepted the request.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PredictorConfig {
     /// Fixed per-request overhead added to every prediction, in
@@ -183,7 +180,6 @@ impl Default for PredictorConfig {
 }
 
 /// Post-prediction routing policy.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PickerConfig {
     /// Pick uniformly at random from the top
@@ -306,7 +302,6 @@ fn default_expected_overlap_alpha() -> f32 {
 /// Recommended rollout: start with `Render`, switch to `Compare` and watch
 /// `tokenize_divergence_total` until it stays at zero on real traffic, then
 /// switch to `Local`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TokenizeMode {
