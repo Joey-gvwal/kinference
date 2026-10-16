@@ -166,7 +166,7 @@ pub enum DiscoveryMode {
 pub struct WorkerConfig {
     pub worker_id_str: String,
     pub worker_id_num: u64,
-    /// ZMQ PUB endpoint for KV-cache events. Required unless `mock_mode`.
+    /// ZMQ PUB endpoint for KV-cache events. Required for static workers.
     #[serde(default)]
     pub zmq_endpoint: Option<String>,
     /// DEALER endpoint for replaying event history from seq=0 at startup.

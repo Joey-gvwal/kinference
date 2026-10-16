@@ -6,7 +6,6 @@ use kinference_fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
 fn config_without_worker_sets_fails_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses (pools defaults to empty)");
     let err = cfg
@@ -19,7 +18,6 @@ mock_mode = true
 fn workerset_with_zero_block_size_fails_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "t"
@@ -44,7 +42,6 @@ service_name = "svc"
 fn duplicate_workerset_names_fail_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "t"
@@ -76,7 +73,6 @@ service_name = "b"
 fn static_workerset_without_workers_file_fails_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "t"
@@ -99,7 +95,6 @@ mode = "static"
 fn kubernetes_workerset_without_service_name_fails_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "t"
@@ -123,7 +118,6 @@ fn cfg_with_leader_election(body: &str) -> Config {
     let toml_str = format!(
         r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "t"
@@ -200,7 +194,6 @@ fn a_profile_that_omits_everything_gets_the_struct_defaults() {
     // still resolves; expected_overlap_alpha defaults to 1.0.
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "t"
@@ -229,7 +222,6 @@ service_name = "svc"
 fn an_undefined_profile_is_rejected_and_names_both_sides() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "h100"
@@ -264,7 +256,6 @@ service_name = "svc"
 fn two_worker_sets_sharing_a_profile_get_identical_tuning() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "shared"
@@ -311,7 +302,6 @@ service_name = "svc-b"
 fn duplicate_profile_names_fail_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[profile]]
 name = "dup"
@@ -339,7 +329,6 @@ service_name = "svc"
 fn a_workerset_without_a_profile_does_not_parse() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [[workerset]]
 name = "ws"
@@ -389,7 +378,7 @@ zmq_endpoint = "tcp://127.0.0.1:5558"
 #[test]
 fn tenant_labels_accepts_its_three_forms() {
     let parse = |section: &str| -> TenantLabels {
-        let toml_str = format!("listen = \"127.0.0.1:50051\"\nmock_mode = true\n{section}");
+        let toml_str = format!("listen = \"127.0.0.1:50051\"\n{section}");
         toml::from_str::<Config>(&toml_str)
             .expect("parses")
             .metrics
@@ -419,7 +408,6 @@ fn tenant_labels_accepts_its_three_forms() {
 fn a_mistyped_tenant_labels_value_is_rejected_rather_than_defaulted() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 [metrics]
 tenant_labels = "sure"
@@ -445,7 +433,6 @@ tenant_labels = "sure"
 fn body_caps_are_configured_in_kb() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 body_max_total_kb = 1024
 body_max_request_kb = 64
@@ -457,7 +444,6 @@ body_max_request_kb = 64
     // The old spelling is a startup error.
     let stale = r#"
 listen = "127.0.0.1:50051"
-mock_mode = true
 
 body_max_total_bytes = 268435456
 "#;

@@ -37,8 +37,8 @@ modules and holds nothing else beyond re-exports.
   collector behind the fleet gauges, the fleet's own metric families, and
   its error type.
 - Router, `src/router`. The request path. The service, scoring, the
-  picker, the body store, the tokenizer, observations, the gRPC glue, the
-  mock, and the request-path metric families.
+  picker, the body store, the tokenizer, observations, the gRPC glue, and
+  the request-path metric families.
 - Controller, `src/controller`. The Kubernetes control plane. The CRD
   watch and its snapshot, the status and binding writers, the worker-set
   reconcile, leader election, EndpointSlice discovery, and the control
@@ -89,7 +89,6 @@ Rows name a module by its group; in code the fleet's are under
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
 | `router::local_tokenize` | the in-process tokenizer registry: tokenizers, chat templates, and the warm-up that follows the model index |
 | `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `[metrics]` config |
-| `router::mock` | the deterministic `Picker` used in mock mode |
 | `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |

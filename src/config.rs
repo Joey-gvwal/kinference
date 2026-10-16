@@ -83,13 +83,9 @@ pub struct Config {
     #[serde(default)]
     pub body_idle_timeout_secs: Option<u64>,
     /// HTTP bind address for the admin listener: `/readyz`, `/metrics` and `/api`.
-    /// Unset disables them. Ignored in mock mode.
+    /// Unset disables them.
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
-    /// Answer with synthetic, deterministic scores: no KV ingest, no scrapes,
-    /// no tokenization. The gRPC surface is unchanged.
-    #[serde(default)]
-    pub mock_mode: bool,
     #[serde(default)]
     pub tokenize: TokenizeConfig,
     #[serde(default)]
@@ -339,10 +335,9 @@ impl Config {
                                 w.worker_id_str
                             );
                         }
-                        if !self.mock_mode && w.zmq_endpoint.is_none() {
+                        if w.zmq_endpoint.is_none() {
                             anyhow::bail!(
-                                "workerset {}: worker {}: zmq_endpoint is required when \
-                                 mock_mode is false",
+                                "workerset {}: worker {}: zmq_endpoint is required",
                                 spec.name,
                                 w.worker_id_str
                             );
