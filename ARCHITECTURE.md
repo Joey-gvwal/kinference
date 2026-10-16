@@ -19,7 +19,7 @@ code goes. Change it in the same pull request as any move.
 
 Target: the fleet, the router and the controller become crates. The server
 crate keeps wiring, config assembly, the admin listener and the metrics
-exposition. The plan is BuoyantIO/llm-monitor#50.
+exposition. The plan is #32.
 
 ## Groups
 
@@ -53,16 +53,13 @@ Imports point down, never up or sideways:
 Today the tree breaks this rule in four places:
 
 - Two imports point up from the fleet into the router. `pool` takes the
-  picker and tokenize config types from the router
-  (BuoyantIO/llm-monitor#67).
+  picker and tokenize config types from the router (#37).
 - The router imports the controller's policy store to read the snapshot.
-  BuoyantIO/llm-monitor#43 moves the snapshot holder into
-  `kinference-policy`.
-- Every group records into the one `metrics` struct at the top.
-  BuoyantIO/llm-monitor#56 gives each group its own families.
+  #49 moves the snapshot holder into `kinference-policy`.
+- Every group records into the one `metrics` struct at the top. #40 gives
+  each group its own families.
 - Two pairs inside the router import each other: `service` and
-  `observations` (BuoyantIO/llm-monitor#60), and `service` and
-  `tokenize_client` (BuoyantIO/llm-monitor#59).
+  `observations` (#45), and `service` and `tokenize_client` (#44).
 
 ## Module map
 
