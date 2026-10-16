@@ -34,10 +34,6 @@
 #   http://dummy-vllm.default.svc.cluster.local:8000/v1/completions
 #   tcp://dummy-vllm.default.svc.cluster.local:5557       (KV events PUB)
 #
-# Or from the host (Docker Desktop / kind / minikube):
-#   kubectl port-forward svc/dummy-vllm 8000:8000 5557:5557 5558:5558
-#   → point kinference's workers.toml at 127.0.0.1:{8000,5557,5558}
-#
 # Teardown:
 #   kubectl delete -f tests/e2e/manifests/dummy-vllm.yaml
 ---

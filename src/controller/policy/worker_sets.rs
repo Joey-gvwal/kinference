@@ -24,9 +24,7 @@ use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use kinference_fleet::discovery::{
-    DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs,
-};
+use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
 
@@ -144,8 +142,6 @@ pub fn desired_pools(
                 // Renders rotate across the pool's own workers.
                 render_url: None,
                 discovery: DiscoveryConfig {
-                    mode: DiscoveryMode::Kubernetes,
-                    workers_file: None,
                     // Never `None`, which would watch every namespace and merge
                     // same-named Services into one pool.
                     namespace: Some(key.namespace.clone().unwrap_or_default()),

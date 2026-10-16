@@ -50,7 +50,6 @@ fn a_complete_set_resolves_against_its_profile() {
     assert_eq!(spec.profile, "h100");
     assert_eq!(spec.kv_block_size, 16);
     assert_eq!(spec.tokenize_mode, TokenizeMode::Local);
-    assert_eq!(spec.discovery.mode, DiscoveryMode::Kubernetes);
     assert_eq!(spec.discovery.service_name.as_deref(), Some("vllm"));
     assert_eq!(
         spec.discovery.namespace.as_deref(),

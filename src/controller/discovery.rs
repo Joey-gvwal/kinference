@@ -71,16 +71,15 @@ impl KubeDiscovery {
              KubeDiscovery only works when the monitor runs as a pod inside the \
              cluster it should watch (~/.kube/config is intentionally NOT honored — \
              discovered pod IPs would not be reachable from outside the cluster \
-             network). If you're running locally, use discovery.mode = \"static\" \
-             with [[workers]].",
+             network).",
         )?;
         kube::Client::try_from(kube_cfg)
             .context("failed to build Kubernetes client from in-cluster config")
     }
 
     /// Bind a config to an already-acquired client. Synchronous and infallible:
-    /// `service_name` is validated at config load and, in Kubernetes mode, by
-    /// the desired-set resolution.
+    /// `service_name` is validated at config load or by the desired-set
+    /// resolution.
     pub fn from_client(cfg: DiscoveryConfig, client: kube::Client) -> Self {
         debug_assert!(
             !cfg.service_name.as_deref().unwrap_or("").is_empty(),

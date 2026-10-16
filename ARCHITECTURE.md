@@ -31,7 +31,7 @@ crate under `crates` once it has moved. Its `mod.rs` or `lib.rs` lists the
 modules and holds nothing else beyond re-exports.
 
 - Fleet, `crates/kinference-fleet`. Which workers exist and what state they are in.
-  Pools, the worker registry, the discovery trait and static discovery,
+  Pools, the worker registry, the discovery trait and its config,
   the coordinator that adds and evicts workers, the scrape of engine
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
   collector behind the fleet gauges, the fleet's own metric families, and
@@ -72,7 +72,7 @@ Rows name a module by its group; in code the fleet's are under
 | Module | Owns |
 | --- | --- |
 | `fleet::coordinator` | the worker lifecycle: the loop that takes discovery and eviction events, add, evict and drop, and the pool hooks that start and stop a pool's discovery |
-| `fleet::discovery` | the `Discovery` trait, its config types, static workers, and the factory the server supplies for Kubernetes discovery |
+| `fleet::discovery` | the `Discovery` trait, its config types, and the factory the server supplies for Kubernetes discovery |
 | `fleet::error` | `Error`, the fleet's error type |
 | `fleet::eviction` | the channel that asks the coordinator to drop a worker |
 | `fleet::gauges` | the Prometheus collector for the fleet gauges: worker health and saturation computed at gather, the index size from a tree dump at most once every 10s |

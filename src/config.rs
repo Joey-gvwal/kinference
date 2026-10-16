@@ -11,8 +11,7 @@ use crate::controller::policy::PolicyConfig;
 use crate::controller::policy::worker_sets::KubernetesConfig;
 use crate::router::metrics::MetricsConfig;
 use crate::router::tokenize_client::TokenizeConfig;
-use kinference_fleet::discovery::static_config::WorkersFile;
-use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryMode};
+use kinference_fleet::discovery::DiscoveryConfig;
 use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
@@ -158,17 +157,6 @@ impl Config {
             toml::from_str(&text)
                 .with_context(|| format!("parsing config TOML from {}", path.display()))?
         };
-        // Resolve relative `workers_file`s against the config file's directory
-        // rather than the CWD.
-        if let Some(base) = path.parent() {
-            for ws in &mut cfg.worker_sets {
-                if let Some(wf) = ws.discovery.workers_file.as_ref()
-                    && wf.is_relative()
-                {
-                    ws.discovery.workers_file = Some(base.join(wf));
-                }
-            }
-        }
         cfg.validate()?;
         cfg.read_env();
         Ok(cfg)
@@ -264,8 +252,7 @@ impl Config {
             .collect()
     }
 
-    /// Validate cross-set invariants. Static workers files are loaded here
-    /// because worker IDs must be unique across all sets, not just within one.
+    /// Validate cross-set invariants.
     fn validate(&self) -> Result<()> {
         if self.worker_sets.is_empty() && !self.kubernetes.enabled {
             anyhow::bail!(
@@ -293,8 +280,6 @@ impl Config {
         }
         let specs = self.pool_specs()?;
         let mut seen_set_names = std::collections::HashSet::new();
-        let mut seen_num = std::collections::HashSet::new();
-        let mut seen_str = std::collections::HashSet::new();
         for spec in &specs {
             if spec.name.trim().is_empty() {
                 anyhow::bail!("every workerset must have a non-empty `name`");
@@ -305,60 +290,17 @@ impl Config {
             if spec.kv_block_size == 0 {
                 anyhow::bail!("workerset {}: kv_block_size must be > 0", spec.name);
             }
-            match spec.discovery.mode {
-                DiscoveryMode::Static => {
-                    let Some(wf) = spec.discovery.workers_file.as_ref() else {
-                        anyhow::bail!(
-                            "workerset {}: discovery.mode = \"static\" requires \
-                             discovery.workers_file",
-                            spec.name
-                        );
-                    };
-                    let workers = WorkersFile::load(wf).with_context(|| {
-                        format!("workerset {}: loading workers_file", spec.name)
-                    })?;
-                    for w in &workers {
-                        if !seen_num.insert(w.worker_id_num) {
-                            anyhow::bail!(
-                                "workerset {}: worker_id_num {} is not unique across \
-                                 worker sets (IDs key the fleet-wide metrics \
-                                 registry)",
-                                spec.name,
-                                w.worker_id_num
-                            );
-                        }
-                        if !seen_str.insert(w.worker_id_str.clone()) {
-                            anyhow::bail!(
-                                "workerset {}: worker_id_str {} is not unique across \
-                                 worker sets",
-                                spec.name,
-                                w.worker_id_str
-                            );
-                        }
-                        if w.zmq_endpoint.is_none() {
-                            anyhow::bail!(
-                                "workerset {}: worker {}: zmq_endpoint is required",
-                                spec.name,
-                                w.worker_id_str
-                            );
-                        }
-                    }
-                }
-                DiscoveryMode::Kubernetes => {
-                    if spec
-                        .discovery
-                        .service_name
-                        .as_deref()
-                        .unwrap_or("")
-                        .is_empty()
-                    {
-                        anyhow::bail!(
-                            "workerset {}: discovery.mode = \"kubernetes\" requires \
-                             discovery.service_name",
-                            spec.name
-                        );
-                    }
-                }
+            if spec
+                .discovery
+                .service_name
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+            {
+                anyhow::bail!(
+                    "workerset {}: discovery.service_name is required",
+                    spec.name
+                );
             }
         }
         Ok(())

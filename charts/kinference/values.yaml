@@ -167,7 +167,7 @@ config:
       tokenize:
         mode: local
 
-  # Static or EndpointSlice-discovered worker sets, in addition to the ones
+  # EndpointSlice-discovered worker sets, in addition to the ones
   # [kubernetes] derives from InferenceWorkerSet CRs. None by default.
   workersets: {}
 

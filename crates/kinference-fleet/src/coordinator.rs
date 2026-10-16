@@ -15,10 +15,7 @@ use kinference_policy::PoolId;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{
-    Discovery, DiscoveryFactory, DiscoveryMode, WorkerChange, WorkerConfig,
-    static_config::StaticDiscovery,
-};
+use crate::discovery::{Discovery, DiscoveryFactory, WorkerChange, WorkerConfig};
 use crate::error::Error;
 use crate::eviction::{self, EvictionReason};
 use crate::ingest::{self, IngestConfig};
@@ -365,19 +362,11 @@ impl Coordinator {
 
 impl PoolHooks for Coordinator {
     fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> Result<(), Error> {
-        let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
-            DiscoveryMode::Static => {
-                let workers = spec.load_static_workers()?;
-                Arc::new(StaticDiscovery::new(workers))
-            }
-            DiscoveryMode::Kubernetes => {
-                let build = self
-                    .kubernetes
-                    .as_ref()
-                    .ok_or(Error::KubeDiscoveryUnavailable)?;
-                build(spec.discovery.clone())
-            }
-        };
+        let build = self
+            .kubernetes
+            .as_ref()
+            .ok_or(Error::KubeDiscoveryUnavailable)?;
+        let discovery: Arc<dyn Discovery> = build(spec.discovery.clone());
 
         let token = self.cancel.child_token();
         self.discovery_tokens.insert(pool.id, token.clone());

@@ -22,7 +22,7 @@ use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use kinference_fleet::discovery::{Discovery, DiscoveryFactory, DiscoveryMode};
+use kinference_fleet::discovery::{Discovery, DiscoveryFactory};
 use kinference_fleet::metrics::FleetMetrics;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool;
@@ -108,7 +108,7 @@ pub async fn run() -> Result<()> {
             workerset = spec.name,
             profile = spec.profile,
             block_size = spec.kv_block_size,
-            discovery = ?spec.discovery.mode,
+            service = ?spec.discovery.service_name,
             "Worker set configured"
         );
     }
@@ -207,14 +207,10 @@ pub async fn run() -> Result<()> {
     }
 
     // In-cluster credentials, acquired once here so pool creation stays
-    // synchronous and infallible. Required (fatal) when a TOML worker set
-    // uses kubernetes discovery; with only `[kubernetes]` on, a failure
-    // surfaces per pool instead, so CR resolution can run outside a
-    // cluster.
-    let needs_kube_now = specs
-        .iter()
-        .any(|s| s.discovery.mode == DiscoveryMode::Kubernetes);
-    let kube_client = if needs_kube_now {
+    // synchronous and infallible. Required (fatal) when the config declares
+    // a worker set; with only `kubernetes.enabled`, a failure surfaces per
+    // pool instead, so CR resolution can run outside a cluster.
+    let kube_client = if !specs.is_empty() {
         Some(KubeDiscovery::client().await?)
     } else if cfg.kubernetes.enabled {
         match KubeDiscovery::client().await {

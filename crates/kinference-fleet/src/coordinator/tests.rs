@@ -10,6 +10,16 @@ struct Harness {
     process: CancellationToken,
 }
 
+/// A discovery that announces nothing and waits for cancellation.
+struct Idle;
+
+#[async_trait::async_trait]
+impl Discovery for Idle {
+    async fn run(self: Arc<Self>, _tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
+        cancel.cancelled().await;
+    }
+}
+
 fn harness() -> Harness {
     let metrics = Arc::new(MetricsRegistry::new());
     let models = Arc::new(ModelIndex::new());
@@ -17,7 +27,7 @@ fn harness() -> Harness {
     let (coordinator, _inbox) = Coordinator::new(
         Handles {
             cancel: process.clone(),
-            kubernetes: None,
+            kubernetes: Some(Arc::new(|_| Arc::new(Idle) as Arc<dyn Discovery>)),
             metrics: metrics.clone(),
             prom: Arc::new(FleetMetrics::new(&prometheus::Registry::new())),
             models: models.clone(),
@@ -39,14 +49,12 @@ fn harness() -> Harness {
 
 /// No endpoints, so the per-worker tasks return before any I/O.
 fn worker(num: u64, hint: &str) -> WorkerConfig {
-    toml::from_str(&format!(
-        r#"
-worker_id_str = "w-{num}"
-worker_id_num = {num}
-model_name = "{hint}"
-"#
-    ))
-    .expect("valid worker config")
+    WorkerConfig {
+        worker_id_str: format!("w-{num}"),
+        worker_id_num: num,
+        model_name: hint.to_string(),
+        ..Default::default()
+    }
 }
 
 fn pool_with_declared_models(name: &str, models: &[&str]) -> Arc<Pool> {
@@ -193,7 +201,7 @@ async fn retire_stops_discovery_and_drops_every_worker() {
     let pool = test_pool("a");
     h.coordinator
         .on_create(&pool, &test_spec("a", 16))
-        .expect("static discovery starts");
+        .expect("discovery starts");
     let discovery = h
         .coordinator
         .discovery_tokens

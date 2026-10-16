@@ -5,13 +5,10 @@
 //! `fleet::coordinator` registers or unregisters each worker and spawns or
 //! cancels its per-worker tasks.
 //!
-//! Two implementations:
-//! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
-//!   set's `workers_file`, then waits on `cancel`.
-//! - `controller::discovery::KubeDiscovery` watches a Service's
-//!   EndpointSlices and emits `Added`/`Removed` as endpoints become or stop
-//!   being Ready. The server builds it through a [`DiscoveryFactory`], so
-//!   the fleet never holds a Kubernetes client.
+//! One implementation, `controller::discovery::KubeDiscovery`, watches a
+//! Service's EndpointSlices and emits `Added`/`Removed` as endpoints become
+//! or stop being Ready. The server builds it through a [`DiscoveryFactory`],
+//! so the fleet never holds a Kubernetes client.
 
 use std::sync::Arc;
 
@@ -19,8 +16,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-pub mod static_config;
 
 /// One discovery event, consumed by `fleet::coordinator`.
 // `Added(WorkerConfig)` dwarfs `Removed(u64)`, but discovery events are rare,
@@ -64,19 +59,11 @@ pub type DiscoveryFactory = Arc<dyn Fn(DiscoveryConfig) -> Arc<dyn Discovery> + 
 /// `[workerset.discovery]`: where a pool's workers come from.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct DiscoveryConfig {
-    #[serde(default)]
-    pub mode: DiscoveryMode,
-    /// TOML file with a `[[workers]]` array of `WorkerConfig`. Required in
-    /// static mode. Relative paths resolve against the config file's directory.
-    #[serde(default)]
-    pub workers_file: Option<std::path::PathBuf>,
-    /// Namespace of the Service; `None` means all namespaces. Kubernetes mode
-    /// only.
+    /// Namespace of the Service; `None` means all namespaces.
     #[serde(default)]
     pub namespace: Option<String>,
     /// Service fronting the workers. Each Ready endpoint in its EndpointSlices
-    /// becomes a worker, dialed by pod IP, so any Service type works. Required
-    /// in Kubernetes mode.
+    /// becomes a worker, dialed by pod IP, so any Service type works. Required.
     #[serde(default)]
     pub service_name: Option<String>,
     /// `namespace/name` of the owning `InferenceWorkerSet`, for logs only,
@@ -152,55 +139,33 @@ fn default_zmq_port() -> u16 {
     5557
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DiscoveryMode {
-    /// Workers listed in `discovery.workers_file`.
-    #[default]
-    Static,
-    /// Workers from the EndpointSlices of `discovery.service_name`.
-    Kubernetes,
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkerConfig {
     pub worker_id_str: String,
     pub worker_id_num: u64,
-    /// ZMQ PUB endpoint for KV-cache events. Required for static workers.
-    #[serde(default)]
+    /// ZMQ PUB endpoint for KV-cache events. `None` when the set declares no
+    /// KV events.
     pub zmq_endpoint: Option<String>,
     /// DEALER endpoint for replaying event history from seq=0 at startup.
-    #[serde(default)]
     pub replay_endpoint: Option<String>,
     /// The engine's Prometheus `/metrics` URL.
-    #[serde(default)]
     pub metrics_url: Option<String>,
     /// Base URL (no path) of the engine's OpenAI-compatible API, used for
     /// scrapes and tokenization, and as the fallback for `endpoint`.
-    #[serde(default)]
     pub http_url: Option<String>,
     /// Routable `ip:port` returned to clients (`WorkerScore.endpoint` and
     /// `x-gateway-destination-endpoint`). Takes precedence over `http_url`'s
     /// `host:port`; needed when `http_url` uses a hostname, since the gateways
     /// don't resolve names here.
-    #[serde(default)]
     pub endpoint: Option<String>,
     pub model_name: String,
 
-    // Placement metadata, emitted by aws-harness's gen-monitor-config.sh. Not
-    // used yet.
-    #[serde(default)]
+    // Placement metadata. Not used yet.
     pub pod_name: Option<String>,
-    #[serde(default)]
     pub namespace: Option<String>,
-    #[serde(default)]
     pub node_name: Option<String>,
-    #[serde(default)]
     pub node_ip: Option<String>,
-    #[serde(default)]
     pub pod_ip: Option<String>,
-    #[serde(default)]
     pub availability_zone: Option<String>,
-    #[serde(default)]
     pub instance_type: Option<String>,
 }

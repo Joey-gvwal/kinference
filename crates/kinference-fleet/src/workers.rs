@@ -51,7 +51,7 @@ fn host_port_from_http_url(url: &str) -> Option<String> {
 ///
 /// `by_model` is populated from each worker's `/v1/models` scrape (via
 /// [`Self::set_served_models`]); a worker may serve several models (LoRA
-/// adapters). In static mode the config's `model_name` is an initial hint,
+/// adapters). A non-empty `WorkerConfig.model_name` is an initial hint,
 /// routable until the first scrape replaces it.
 #[derive(Debug, Default)]
 pub struct WorkerRegistry {
@@ -68,7 +68,7 @@ pub struct WorkerRegistry {
 #[derive(Debug, Clone)]
 pub struct WorkerEntry {
     pub worker_id_str: String,
-    /// Bootstrap hint from `WorkerConfig.model_name` (static mode only),
+    /// Bootstrap hint from `WorkerConfig.model_name`,
     /// superseded by `current_models` once `/v1/models` lands.
     pub model_name_hint: Option<String>,
     /// Models this worker is currently serving, as reported by the latest
@@ -93,7 +93,7 @@ pub struct WorkerEntry {
     /// route to it verbatim without resolving hostnames:
     ///
     /// 1. `WorkerConfig.endpoint` if set, for when `http_url` is a hostname.
-    /// 2. Else `host:port` from `http_url` (an IP in Kubernetes mode).
+    /// 2. Else `host:port` from `http_url` (the pod IP).
     /// 3. Else `worker_id_str`, to keep it non-empty.
     pub score_addr: String,
     /// Engine identity, from `/v1/models` `owned_by`. Diagnostics only.

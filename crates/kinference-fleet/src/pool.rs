@@ -32,8 +32,7 @@ use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use kinference_policy::{PoolId, PoolKey};
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::static_config::WorkersFile;
-use crate::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::discovery::{DiscoveryConfig, WorkerConfig};
 use crate::error::Error;
 use crate::eviction::EvictionTx;
 use crate::inflight::{InflightPrefixes, InflightRegistry};
@@ -66,17 +65,6 @@ pub struct PoolSpec {
     /// A fixed model list (`spec.modelDiscovery.mode: Static`); `/v1/models`
     /// is not polled. Lets engines that don't serve `/v1/models` be routable.
     pub static_models: Option<Vec<String>>,
-}
-
-impl PoolSpec {
-    /// Load this set's static workers; empty unless in static mode with a
-    /// `workers_file`.
-    pub fn load_static_workers(&self) -> Result<Vec<WorkerConfig>, Error> {
-        match (&self.discovery.mode, &self.discovery.workers_file) {
-            (DiscoveryMode::Static, Some(p)) => WorkersFile::load(p),
-            _ => Ok(Vec::new()),
-        }
-    }
 }
 
 /// An immutable view of the fleet's pools.
@@ -683,7 +671,7 @@ pub fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool> {
     ))
 }
 
-/// A minimal static spec shared by tests that need a `Pool`.
+/// A minimal spec shared by tests that need a `Pool`.
 #[cfg(any(test, feature = "test-util"))]
 pub fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
     PoolSpec {

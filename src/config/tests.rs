@@ -28,7 +28,6 @@ profile = "t"
 kv_block_size = 0
 
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
@@ -51,7 +50,6 @@ name = "dup"
 profile = "t"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "a"
 
 [[workerset]]
@@ -59,7 +57,6 @@ name = "dup"
 profile = "t"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "b"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
@@ -70,7 +67,7 @@ service_name = "b"
 }
 
 #[test]
-fn static_workerset_without_workers_file_fails_validate() {
+fn workerset_without_service_name_fails_validate() {
     let toml_str = r#"
 listen = "127.0.0.1:50051"
 
@@ -82,34 +79,11 @@ name = "p"
 profile = "t"
 kv_block_size = 16
 [workerset.discovery]
-mode = "static"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
     let err = cfg
         .validate()
-        .expect_err("static workerset without workers_file should fail");
-    assert!(err.to_string().contains("workers_file"));
-}
-
-#[test]
-fn kubernetes_workerset_without_service_name_fails_validate() {
-    let toml_str = r#"
-listen = "127.0.0.1:50051"
-
-[[profile]]
-name = "t"
-
-[[workerset]]
-name = "p"
-profile = "t"
-kv_block_size = 16
-[workerset.discovery]
-mode = "kubernetes"
-"#;
-    let cfg: Config = toml::from_str(toml_str).expect("parses");
-    let err = cfg
-        .validate()
-        .expect_err("kubernetes workerset without service_name should fail");
+        .expect_err("workerset without service_name should fail");
     assert!(err.to_string().contains("service_name"));
 }
 
@@ -127,7 +101,6 @@ name = "p"
 profile = "t"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc"
 
 [leader_election]
@@ -203,7 +176,6 @@ name = "p"
 profile = "t"
 kv_block_size = 64
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
@@ -234,7 +206,6 @@ name = "ws"
 profile = "typo-h100"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
@@ -272,7 +243,6 @@ name = "a"
 profile = "shared"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc-a"
 
 [[workerset]]
@@ -280,7 +250,6 @@ name = "b"
 profile = "shared"
 kv_block_size = 64
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc-b"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
@@ -314,7 +283,6 @@ name = "ws"
 profile = "dup"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc"
 "#;
     let cfg: Config = toml::from_str(toml_str).expect("parses");
@@ -334,43 +302,10 @@ listen = "127.0.0.1:50051"
 name = "ws"
 kv_block_size = 16
 [workerset.discovery]
-mode = "kubernetes"
 service_name = "svc"
 "#;
     let err = toml::from_str::<Config>(toml_str).expect_err("missing profile must not parse");
     assert!(err.to_string().contains("profile"), "got: {err}");
-}
-
-#[test]
-fn workers_file_loads_worker_list() {
-    // Write a temp workers file and load it via WorkersFile.
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!(
-        "kinference-test-workers-{}.toml",
-        std::process::id()
-    ));
-    std::fs::write(
-        &path,
-        r#"
-[[workers]]
-worker_id_str = "w-1"
-worker_id_num = 1
-model_name = "gemma"
-zmq_endpoint = "tcp://127.0.0.1:5557"
-
-[[workers]]
-worker_id_str = "w-2"
-worker_id_num = 2
-model_name = "gemma"
-zmq_endpoint = "tcp://127.0.0.1:5558"
-"#,
-    )
-    .expect("write temp workers file");
-    let workers = WorkersFile::load(&path).expect("loads");
-    assert_eq!(workers.len(), 2);
-    assert_eq!(workers[0].worker_id_num, 1);
-    assert_eq!(workers[1].worker_id_str, "w-2");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// `[metrics] tenant_labels` accepts its three forms, and an absent section

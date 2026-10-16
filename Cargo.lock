@@ -1833,7 +1833,6 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-util",
- "toml",
  "tracing",
  "zmq",
 ]
