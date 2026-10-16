@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::fleet::discovery::static_config::WorkersFile;
 use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
 use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
+use crate::fleet::models::ModelIndex;
 use crate::fleet::workers::WorkerRegistry;
 use crate::router::picker::{PickerConfig, PredictorConfig};
 use crate::router::tokenize::TokenizeMode;
@@ -409,7 +410,7 @@ impl ReconcileReport {
 /// token is cancelled:
 ///
 /// 1. Retire, synchronously: publish a snapshot without the pool, drop its
-///    `model_router` claims, stop its discovery, evict its workers without
+///    model claims, stop its discovery, evict its workers without
 ///    touching the indexer, and move it to `retired`. The token stays live.
 /// 2. Reap, on a sweep: once nothing else holds the pool and a linger has
 ///    passed, cancel the token (the indexer thread exits) and drop it.
@@ -430,9 +431,7 @@ pub struct PoolManager {
     hooks: Arc<dyn PoolHooks>,
     /// Process-wide token; every pool takes a child of it.
     parent: tokio_util::sync::CancellationToken,
-    model_router: Arc<
-        std::sync::RwLock<std::collections::HashMap<String, std::collections::BTreeSet<PoolId>>>,
-    >,
+    models: Arc<ModelIndex>,
     reap: ReapPolicy,
 }
 
@@ -441,11 +440,7 @@ impl PoolManager {
         registry: Arc<PoolRegistry>,
         hooks: Arc<dyn PoolHooks>,
         parent: tokio_util::sync::CancellationToken,
-        model_router: Arc<
-            std::sync::RwLock<
-                std::collections::HashMap<String, std::collections::BTreeSet<PoolId>>,
-            >,
-        >,
+        models: Arc<ModelIndex>,
         reap: ReapPolicy,
     ) -> Self {
         Self {
@@ -454,7 +449,7 @@ impl PoolManager {
             retired: Vec::new(),
             hooks,
             parent,
-            model_router,
+            models,
             reap,
         }
     }
@@ -508,18 +503,9 @@ impl PoolManager {
                         let touched = pool
                             .registry
                             .reset_declared_models(spec.static_models.as_deref());
-                        crate::router::service::release_models(
-                            &self.model_router,
-                            pool.id,
-                            &pool.name,
-                        );
+                        self.models.release(pool.id, &pool.name);
                         if let Some(models) = spec.static_models.as_deref() {
-                            crate::router::service::associate_models(
-                                &self.model_router,
-                                pool.id,
-                                &pool.name,
-                                models,
-                            );
+                            self.models.associate(pool.id, &pool.name, models);
                         }
                         tracing::info!(
                             workerset = %key,
@@ -660,7 +646,7 @@ impl PoolManager {
         // 1. Stop routing to it, so no new pick enters during teardown.
         self.publish();
         // 2. Drop its model claims.
-        crate::router::service::release_models(&self.model_router, pool.id, &pool.name);
+        self.models.release(pool.id, &pool.name);
         // 3. Fleet-wide worker state (metrics, per-worker tasks), without
         //    touching the indexer; see `PoolHooks::on_retire`.
         self.hooks.on_retire(&pool);

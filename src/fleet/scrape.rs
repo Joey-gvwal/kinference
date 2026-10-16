@@ -1,5 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -382,7 +381,7 @@ pub fn spawn_one_shot_warmup(
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
     local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: crate::fleet::eviction::EvictionTx,
-    model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
+    index: Arc<crate::fleet::models::ModelIndex>,
     pool_id: PoolId,
     pool_name: String,
 ) {
@@ -426,12 +425,7 @@ pub fn spawn_one_shot_warmup(
                             "warmup: worker serves models not previously seen in this set; \
                              widening the set's model list"
                         );
-                        crate::router::service::associate_models(
-                            &model_router,
-                            pool_id,
-                            &pool_name,
-                            &names,
-                        );
+                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
                         tracing::info!(
@@ -440,21 +434,11 @@ pub fn spawn_one_shot_warmup(
                             "warmup: worker is missing models others in this set serve; \
                              routing to it only for what it has"
                         );
-                        crate::router::service::associate_models(
-                            &model_router,
-                            pool_id,
-                            &pool_name,
-                            &names,
-                        );
+                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::fleet::workers::ServedModelsVerdict::Accepted
                     | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                        crate::router::service::associate_models(
-                            &model_router,
-                            pool_id,
-                            &pool_name,
-                            &names,
-                        );
+                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                         tracing::warn!(
@@ -524,7 +508,7 @@ pub fn spawn_metrics_poller(
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
     eviction_tx: crate::fleet::eviction::EvictionTx,
     cancel: CancellationToken,
-    model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
+    index: Arc<crate::fleet::models::ModelIndex>,
     pool_id: PoolId,
     pool_name: String,
 ) {
@@ -607,12 +591,7 @@ pub fn spawn_metrics_poller(
                                     "poller: worker serves models not previously seen \
                                          in this set; widening the set's model list"
                                 );
-                                crate::router::service::associate_models(
-                                    &model_router,
-                                    pool_id,
-                                    &pool_name,
-                                    &names,
-                                );
+                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
                                 tracing::info!(
@@ -621,21 +600,11 @@ pub fn spawn_metrics_poller(
                                     "poller: worker is missing models others in this \
                                          set serve; routing to it only for what it has"
                                 );
-                                crate::router::service::associate_models(
-                                    &model_router,
-                                    pool_id,
-                                    &pool_name,
-                                    &names,
-                                );
+                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::fleet::workers::ServedModelsVerdict::Accepted
                             | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                                crate::router::service::associate_models(
-                                    &model_router,
-                                    pool_id,
-                                    &pool_name,
-                                    &names,
-                                );
+                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::fleet::workers::ServedModelsVerdict::Mismatch {
                                 expected,

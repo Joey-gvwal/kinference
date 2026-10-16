@@ -1,9 +1,8 @@
 //! The `kinference` server: the gRPC picker, the admin listener, discovery and
 //! the policy machinery, wired together and run until shutdown.
 
-use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,6 +21,7 @@ use crate::fleet::discovery::{
 };
 use crate::fleet::eviction;
 use crate::fleet::ingest;
+use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;
 use crate::fleet::pool::Pool;
 use crate::fleet::rollup;
@@ -164,9 +164,8 @@ pub async fn run() -> Result<()> {
             );
         }
 
-        // Model to pools routing, and the worker to pool reverse index.
-        let model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        // Model to pools, and the worker to pool reverse index.
+        let models = Arc::new(ModelIndex::new());
         let worker_pool: Arc<DashMap<u64, Arc<Pool>>> = Arc::new(DashMap::new());
 
         // TTL for a pick's in-flight bookkeeping (pending observation +
@@ -314,7 +313,7 @@ pub async fn run() -> Result<()> {
             pool_registry.clone(),
             hooks,
             cancel.clone(),
-            model_router.clone(),
+            models.clone(),
             pool::ReapPolicy {
                 linger: std::time::Duration::from_secs(30),
                 // A retired pool must outlive observations that may still
@@ -382,7 +381,7 @@ pub async fn run() -> Result<()> {
         let coord_task_tokens = task_tokens.clone();
         let coord_local_tokenizer = local_tokenizer.clone();
         let coord_eviction_tx = eviction_tx.clone();
-        let coord_model_router = model_router.clone();
+        let coord_models = models.clone();
         let coord_worker_pool = worker_pool.clone();
         let coord_prom = prom.clone();
         tokio::spawn(async move {
@@ -437,7 +436,7 @@ pub async fn run() -> Result<()> {
                                     &coord_cancel,
                                     coord_local_tokenizer.clone(),
                                     &coord_eviction_tx,
-                                    &coord_model_router,
+                                    &coord_models,
                                     &coord_worker_pool,
                                 );
                             }
@@ -620,7 +619,7 @@ pub async fn run() -> Result<()> {
         };
         let service = Arc::new(KinferenceService::new(
             pool_registry.clone(),
-            model_router.clone(),
+            models.clone(),
             metrics.clone(),
             tokenize_client.clone(),
             local_tokenizer,
@@ -752,9 +751,7 @@ fn handle_added(
     // uses it.
     local_tokenizer: Option<Arc<local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: &eviction::EvictionTx,
-    model_router: &Arc<
-        std::sync::RwLock<std::collections::HashMap<String, std::collections::BTreeSet<PoolId>>>,
-    >,
+    models: &Arc<ModelIndex>,
     worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
 ) {
     let block_size = pool.block_size;
@@ -799,12 +796,7 @@ fn handle_added(
     // route the model_name hint, before the first /v1/models scrape.
     worker_pool.insert(w.worker_id_num, pool.clone());
     if !w.model_name.is_empty() {
-        crate::router::service::associate_models(
-            model_router,
-            pool.id,
-            &pool.name,
-            std::slice::from_ref(&w.model_name),
-        );
+        models.associate(pool.id, &pool.name, std::slice::from_ref(&w.model_name));
     }
 
     // 2. WorkerRegistry, seeded from config.model_name; `by_model` is updated
@@ -829,8 +821,8 @@ fn handle_added(
 
     // 3b. A declared model list is authoritative: seed it and skip
     //     `/v1/models`, for engines that don't serve it.
-    if let Some(models) = pool.static_models.as_deref() {
-        if models.is_empty() {
+    if let Some(declared) = pool.static_models.as_deref() {
+        if declared.is_empty() {
             tracing::warn!(
                 workerset = pool.name,
                 worker_id = w.worker_id_str,
@@ -840,7 +832,7 @@ fn handle_added(
         } else {
             // `set_served_models` refuses on a mismatch, so only claim the
             // models when it accepted them.
-            match registry.set_served_models(w.worker_id_num, models) {
+            match registry.set_served_models(w.worker_id_num, declared) {
                 // Every worker gets the same declared list, so these mean the
                 // pin outlived a `spec.models` edit (`reset_declared_models`
                 // didn't run). Still routable.
@@ -852,21 +844,11 @@ fn handle_added(
                         "declared model list differs from this set's pinned models; \
                          routing anyway on the declared list"
                     );
-                    crate::router::service::associate_models(
-                        model_router,
-                        pool.id,
-                        &pool.name,
-                        models,
-                    );
+                    models.associate(pool.id, &pool.name, declared);
                 }
                 crate::fleet::workers::ServedModelsVerdict::Accepted
                 | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                    crate::router::service::associate_models(
-                        model_router,
-                        pool.id,
-                        &pool.name,
-                        models,
-                    );
+                    models.associate(pool.id, &pool.name, declared);
                 }
                 crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                     // As above, but not routable: skip the worker rather than
@@ -917,7 +899,7 @@ fn handle_added(
         registry.clone(),
         eviction_tx.clone(),
         worker_token,
-        model_router.clone(),
+        models.clone(),
         pool.id,
         pool.name.clone(),
     );
@@ -931,7 +913,7 @@ fn handle_added(
         registry.clone(),
         warmup_tokenizer,
         eviction_tx.clone(),
-        model_router.clone(),
+        models.clone(),
         pool.id,
         pool.name.clone(),
     );
@@ -1111,7 +1093,7 @@ fn drop_worker_state(
     // Fleet-wide state is keyed by `worker_id_num` alone, so only drop it while
     // this pool is the owner; blanked metrics would make the worker look idle.
     //
-    // `model_router` is left alone: other workers may still serve the model.
+    // The model index is left alone: other workers may still serve the model.
     let still_ours = worker_pool
         .get(&worker_id_num)
         .is_none_or(|e| e.value().id == pool.id);

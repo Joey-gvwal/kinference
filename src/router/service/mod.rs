@@ -6,14 +6,15 @@
 //! it. The pick lifecycle is in `lifecycle`; tokenize/render HTTP plumbing is
 //! in [`crate::router::tokenize_client`].
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
-use kinference_policy::{AUTO_MODEL, PoolId};
+use kinference_policy::AUTO_MODEL;
 
+use crate::fleet::models::ModelIndex;
 use crate::fleet::pool::Pool;
 use crate::fleet::scrape::MetricsRegistry;
 use crate::fleet::workers::WorkerEntry;
@@ -316,10 +317,9 @@ pub struct KinferenceService {
     /// block size, indexer and registry. Pools come and go, and the service is
     /// shared behind an `Arc`, so the set is swapped rather than edited.
     pub(crate) pools: Arc<crate::fleet::pool::PoolRegistry>,
-    /// Model to serving pools, populated as workers report `/v1/models` (and
-    /// seeded from static `model_name` hints). Read on the pick hot path.
-    /// Several pools may serve one model; `pick_and_record` ranks across them.
-    pub(crate) model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
+    /// Which pools serve each model, read on the pick hot path. Several pools
+    /// may serve one model; `pick_and_record` ranks across them.
+    pub(crate) models: Arc<ModelIndex>,
     pub(crate) metrics: Arc<MetricsRegistry>,
     /// Shared HTTP client for tokenization calls, with a per-request timeout.
     /// The tokenization mode and render URL are per pool.
@@ -364,7 +364,7 @@ impl KinferenceService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pools: Arc<crate::fleet::pool::PoolRegistry>,
-        model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
+        models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
         tokenize_client: Arc<reqwest::Client>,
         local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
@@ -379,7 +379,7 @@ impl KinferenceService {
     ) -> Self {
         Self {
             pools,
-            model_router,
+            models,
             metrics,
             tokenize_client,
             local_tokenizer,
@@ -501,10 +501,10 @@ impl KinferenceService {
     /// since been removed (ids that resolve to nothing are dropped). The
     /// returned handles keep their pools alive.
     pub(crate) fn resolve_pools(&self, model: &str) -> Vec<Arc<Pool>> {
-        let ids: Vec<PoolId> = match self.model_router.read().unwrap().get(model) {
-            Some(set) => set.iter().copied().collect(),
-            None => return Vec::new(),
-        };
+        let ids = self.models.pools_for(model);
+        if ids.is_empty() {
+            return Vec::new();
+        }
         let snapshot = self.pools.snapshot();
         ids.into_iter()
             .filter_map(|id| snapshot.get(id).cloned())
@@ -517,9 +517,9 @@ impl KinferenceService {
     /// passed for future prompt-aware selection. `None` when no model is known
     /// yet, which the caller treats like an unknown model.
     pub(crate) fn choose_model_for_auto(&self, _messages: &[serde_json::Value]) -> Option<String> {
-        let router = self.model_router.read().unwrap();
+        let models = self.models.models();
         // Never route "auto" to itself.
-        let candidates: Vec<&String> = router.keys().filter(|m| m.as_str() != AUTO_MODEL).collect();
+        let candidates: Vec<&String> = models.iter().filter(|m| m.as_str() != AUTO_MODEL).collect();
         match candidates.len() {
             0 => None,
             1 => Some(candidates[0].clone()),
@@ -558,50 +558,6 @@ fn worker_score(
         kv_cache_usage: sample.kv_cache_usage,
         block_size,
         total_blocks,
-    }
-}
-
-/// Associate `models` with `pool_id` in the model router. Called after a
-/// `/v1/models` scrape, and provisionally from `handle_added` with the static
-/// `model_name` hint.
-///
-/// Several pools may serve one model, and all are recorded; ranking happens at
-/// pick time. Claims are removed by [`release_models`].
-pub(crate) fn associate_models(
-    router: &RwLock<HashMap<String, BTreeSet<PoolId>>>,
-    pool_id: PoolId,
-    pool_name: &str,
-    models: &[String],
-) {
-    if models.is_empty() {
-        return;
-    }
-    // Fast path for the steady state, so concurrent picks aren't blocked by
-    // the write lock.
-    {
-        let map = router.read().unwrap();
-        if models
-            .iter()
-            .all(|m| map.get(m).is_some_and(|set| set.contains(&pool_id)))
-        {
-            return;
-        }
-    }
-    let mut map = router.write().unwrap();
-    for m in models {
-        if map.entry(m.clone()).or_default().insert(pool_id) {
-            let serving = map[m].len();
-            if serving > 1 {
-                tracing::info!(
-                    model = %m,
-                    pool = %pool_name,
-                    pools_serving = serving,
-                    "model also served by this pool; both are pick candidates"
-                );
-            } else {
-                tracing::info!(model = %m, pool = %pool_name, "model routed to pool");
-            }
-        }
     }
 }
 
@@ -712,32 +668,6 @@ fn best_group(
         );
     }
     Some(group)
-}
-
-/// Drop every claim held by `pool_id`, and forget models nobody serves.
-///
-/// Called when a pool leaves the fleet.
-pub(crate) fn release_models(
-    router: &RwLock<HashMap<String, BTreeSet<PoolId>>>,
-    pool_id: PoolId,
-    pool_name: &str,
-) {
-    let mut map = router.write().unwrap();
-    map.retain(|model, set| {
-        if !set.remove(&pool_id) {
-            return true;
-        }
-        if set.is_empty() {
-            tracing::info!(
-                model = %model,
-                workerset = %pool_name,
-                "last worker set serving this model went away"
-            );
-            false
-        } else {
-            true
-        }
-    });
 }
 
 /// OpenAI ChatCompletionRequest fields beyond `messages` that local

@@ -104,7 +104,7 @@ impl KinferenceService {
         //     ranked against each other.
         let mut serving = self.resolve_pools(&model);
 
-        // 1b-i. Alias fallback. `model_router` only holds names engines
+        // 1b-i. Alias fallback. The model index only holds names engines
         //     report, so translate a declared alias via the named pool's worker
         //     sets (requires policy and a named pool).
         //

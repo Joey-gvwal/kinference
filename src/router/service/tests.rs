@@ -1,88 +1,5 @@
 use super::*;
-
-fn router() -> RwLock<HashMap<String, BTreeSet<PoolId>>> {
-    RwLock::new(HashMap::new())
-}
-
-fn serving(r: &RwLock<HashMap<String, BTreeSet<PoolId>>>, model: &str) -> Vec<PoolId> {
-    r.read()
-        .unwrap()
-        .get(model)
-        .map(|s| s.iter().copied().collect())
-        .unwrap_or_default()
-}
-
-#[test]
-fn a_claim_is_recorded() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(0)]);
-}
-
-/// A second pool's claim is recorded alongside the first.
-#[test]
-fn a_second_pool_joins_rather_than_being_ignored() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    associate_models(&r, PoolId::from_raw(1), "b", &["gemma".to_string()]);
-    assert_eq!(
-        serving(&r, "gemma"),
-        vec![PoolId::from_raw(0), PoolId::from_raw(1)]
-    );
-}
-
-/// Both arrival orders produce the same set, iterated in the same order.
-#[test]
-fn claim_order_does_not_affect_the_result() {
-    let forward = router();
-    associate_models(&forward, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    associate_models(&forward, PoolId::from_raw(2), "c", &["gemma".to_string()]);
-    let reverse = router();
-    associate_models(&reverse, PoolId::from_raw(2), "c", &["gemma".to_string()]);
-    associate_models(&reverse, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    assert_eq!(serving(&forward, "gemma"), serving(&reverse, "gemma"));
-}
-
-#[test]
-fn re_claiming_is_idempotent() {
-    let r = router();
-    for _ in 0..3 {
-        associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    }
-    assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(0)]);
-}
-
-#[test]
-fn distinct_models_route_to_distinct_pools() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    associate_models(&r, PoolId::from_raw(1), "b", &["llama".to_string()]);
-    assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(0)]);
-    assert_eq!(serving(&r, "llama"), vec![PoolId::from_raw(1)]);
-}
-
-/// A departed pool's claim is released.
-#[test]
-fn releasing_a_pool_frees_the_model_for_its_replacement() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    release_models(&r, PoolId::from_raw(0), "x");
-    assert!(
-        !r.read().unwrap().contains_key("gemma"),
-        "a model nobody serves should not linger as an empty entry"
-    );
-    associate_models(&r, PoolId::from_raw(7), "a-v2", &["gemma".to_string()]);
-    assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(7)]);
-}
-
-#[test]
-fn releasing_one_of_two_pools_leaves_the_other_serving() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    associate_models(&r, PoolId::from_raw(1), "b", &["gemma".to_string()]);
-    release_models(&r, PoolId::from_raw(0), "x");
-    assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(1)]);
-}
+use kinference_policy::PoolId;
 
 use crate::fleet::pool::test_pool;
 
@@ -182,24 +99,9 @@ fn the_two_degradations_are_told_apart() {
     }
 }
 
-#[test]
-fn releasing_an_unknown_pool_is_a_noop() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &["gemma".to_string()]);
-    release_models(&r, PoolId::from_raw(9), "x");
-    assert_eq!(serving(&r, "gemma"), vec![PoolId::from_raw(0)]);
-}
-
-#[test]
-fn empty_model_list_is_noop() {
-    let r = router();
-    associate_models(&r, PoolId::from_raw(0), "a", &[]);
-    assert!(r.read().unwrap().is_empty());
-}
-
 // --- alias fallback -------------------------------------------------
 //
-// `model_router` only holds names engines report, so a declared alias is
+// The model index only holds names engines report, so a declared alias is
 // translated before the "nothing serves this model" check.
 
 fn ws(aliases: &[(&str, &str)]) -> kinference_policy::resolve::ResolvedWorkerSet {
@@ -597,7 +499,7 @@ fn policy_fleet_with(
     let ttl = std::time::Duration::from_secs(30);
     let svc = KinferenceService::new(
         registry,
-        Arc::new(router()),
+        Arc::new(ModelIndex::new()),
         metrics.clone(),
         Arc::new(reqwest::Client::new()),
         None,
@@ -752,12 +654,8 @@ async fn local_and_cloud_picks() -> KinferenceService {
             "matches": [{"qos": ["batch"]}],
             "route": {"consider": [{"type": "Provider"}], "select": [{"order": ["cloud"]}]}}]}),
     );
-    associate_models(
-        &svc.model_router,
-        live[0].id,
-        "qwen-ws",
-        &["qwen".to_string()],
-    );
+    svc.models
+        .associate(live[0].id, "qwen-ws", &["qwen".to_string()]);
     let pool = kinference_policy::PoolRef {
         namespace: "default".into(),
         name: "pool".into(),
