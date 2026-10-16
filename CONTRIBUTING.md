@@ -4,6 +4,12 @@ These guidelines apply to everyone, whether you write the code yourself or
 with a coding agent. Agents get the same rules, in more detail, from
 [AGENTS.md](AGENTS.md).
 
+## Architecture
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the map of the server: how the code is
+grouped, which way imports go and where new code goes. Read it before you add
+or move code, and change it in the same pull request as any move.
+
 ## Code comments
 
 Keep comments short. Comment only what the code can't say on its own: the
