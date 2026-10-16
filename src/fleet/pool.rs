@@ -295,7 +295,8 @@ impl Pool {
 }
 
 /// Side effects that belong to subsystems the manager doesn't depend on
-/// (discovery, the coordinator channel). Implemented in `server.rs`.
+/// (discovery, the coordinator channel). Implemented by
+/// `fleet::coordinator::Coordinator`.
 pub trait PoolHooks: Send + Sync {
     /// Start everything that feeds a new pool: its `Discovery` task and the
     /// forwarder that tags its `WorkerChange`s onto the shared coordinator

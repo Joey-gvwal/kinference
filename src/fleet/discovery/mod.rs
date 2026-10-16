@@ -1,9 +1,9 @@
 //! Worker discovery layer.
 //!
 //! A `Discovery` is the source of truth for which workers in one worker set
-//! are live. It emits `WorkerChange::{Added, Removed}` events; the coordinator
-//! in `server.rs` registers or unregisters each worker and spawns or cancels
-//! its per-worker tasks.
+//! are live. It emits `WorkerChange::{Added, Removed}` events;
+//! `fleet::coordinator` registers or unregisters each worker and spawns or
+//! cancels its per-worker tasks.
 //!
 //! Two implementations:
 //! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 pub mod kubernetes;
 pub mod static_config;
 
-/// One discovery event, consumed by the coordinator in `server.rs`.
+/// One discovery event, consumed by `fleet::coordinator`.
 // `Added(WorkerConfig)` dwarfs `Removed(u64)`, but discovery events are rare,
 // so boxing isn't worth it.
 #[allow(clippy::large_enum_variant)]
