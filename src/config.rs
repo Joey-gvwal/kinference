@@ -6,15 +6,15 @@ use anyhow::{Context, Result};
 use kinference_policy::PoolKey;
 use serde::Deserialize;
 
-use crate::discovery::static_config::WorkersFile;
-use crate::discovery::{DiscoveryConfig, DiscoveryMode};
-use crate::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
-use crate::leader::{self, LeaderElectionConfig};
-use crate::policy::PolicyConfig;
-use crate::policy::worker_sets::KubernetesConfig;
-use crate::pool::{PoolSpec, ProfileConfig};
-use crate::prom::MetricsConfig;
-use crate::tokenize_client::TokenizeConfig;
+use crate::controller::leader::{self, LeaderElectionConfig};
+use crate::controller::policy::PolicyConfig;
+use crate::controller::policy::worker_sets::KubernetesConfig;
+use crate::fleet::discovery::static_config::WorkersFile;
+use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode};
+use crate::fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
+use crate::fleet::pool::{PoolSpec, ProfileConfig};
+use crate::metrics::MetricsConfig;
+use crate::router::tokenize_client::TokenizeConfig;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -33,8 +33,8 @@ pub struct Config {
     pub profiles: Vec<ProfileConfig>,
     /// The worker sets this instance manages. Workers within a set share model,
     /// engine and `kv_block_size`. Requests are routed by `model` through
-    /// `monitor::model_router`; when several sets serve one model, all are
-    /// scored (see `monitor::best_group`). At least one is required unless
+    /// `service::model_router`; when several sets serve one model, all are
+    /// scored (see `service::best_group`). At least one is required unless
     /// `[kubernetes]` is enabled.
     #[serde(default, rename = "workerset")]
     pub worker_sets: Vec<WorkerSetConfig>,
@@ -58,7 +58,7 @@ pub struct Config {
     /// swept mid-flight. Defaults to 600.
     #[serde(default)]
     pub observation_ttl_secs: Option<u64>,
-    /// Server-wide ceiling on buffered request bodies (see `crate::body_store`),
+    /// Server-wide ceiling on buffered request bodies (see `crate::router::body_store`),
     /// including uploads in progress. Once full, pushes are refused with
     /// `RESOURCE_EXHAUSTED`; keep it well under the container memory limit.
     /// Defaults to 262144 KB (256 MiB).
@@ -93,7 +93,7 @@ pub struct Config {
     pub tokenize: TokenizeConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
-    /// Labelling of the metrics kinference *publishes* (`crate::prom`). Not to
+    /// Labelling of the metrics kinference *publishes* (`crate::metrics`). Not to
     /// be confused with `metrics_poll_ms` and friends, which concern scraping
     /// the engines.
     #[serde(default)]

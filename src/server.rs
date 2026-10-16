@@ -14,20 +14,26 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
-use crate::discovery::{
+use crate::controller::leader;
+use crate::controller::policy;
+use crate::fleet::discovery::{
     Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
     static_config::StaticDiscovery,
 };
-use crate::metrics::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
-use crate::mock::MockKinferenceService;
-use crate::monitor::KinferenceService;
-use crate::pool::Pool;
-use crate::proto::picker_server::PickerServer;
-use crate::workers::{WorkerEntry, WorkerRegistry};
-use crate::{
-    admin, body_store, eviction, ingest, leader, local_tokenize, observation_sink, observations,
-    policy, pool, pool_manager, prom, rollup, version,
-};
+use crate::fleet::eviction;
+use crate::fleet::ingest;
+use crate::fleet::pool;
+use crate::fleet::pool::Pool;
+use crate::fleet::rollup;
+use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
+use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
+use crate::router::body_store;
+use crate::router::local_tokenize;
+use crate::router::mock::MockKinferenceService;
+use crate::router::observations;
+use crate::router::proto::picker_server::PickerServer;
+use crate::router::service::KinferenceService;
+use crate::{admin, metrics, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -133,7 +139,7 @@ pub async fn run() -> Result<()> {
         let metrics = Arc::new(MetricsRegistry::new());
         // Prometheus registry, shared by the gRPC handlers and the admin
         // listener's `/metrics`.
-        let prom = Arc::new(prom::PromMetrics::with_config(&cfg.metrics));
+        let prom = Arc::new(metrics::PromMetrics::with_config(&cfg.metrics));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
         let ingest_cfg = cfg.ingest;
@@ -304,12 +310,12 @@ pub async fn run() -> Result<()> {
         // Written by the worker-set watch, read by the status writer. Empty
         // with `[kubernetes]` off.
         let rejection_store = policy::worker_sets::RejectionStore::new();
-        let mut pool_manager = pool_manager::PoolManager::new(
+        let mut pool_manager = pool::PoolManager::new(
             pool_registry.clone(),
             hooks,
             cancel.clone(),
             model_router.clone(),
-            pool_manager::ReapPolicy {
+            pool::ReapPolicy {
                 linger: std::time::Duration::from_secs(30),
                 // A retired pool must outlive observations that may still
                 // reference it.
@@ -498,7 +504,7 @@ pub async fn run() -> Result<()> {
 
         // The observation CSV sink is shared across pools; rows carry their
         // pool and config snapshot.
-        let observation_sink = Arc::new(observation_sink::ObservationSink::open(
+        let observation_sink = Arc::new(observations::ObservationSink::open(
             cfg.observations_csv.clone(),
         ));
 
@@ -739,7 +745,7 @@ fn handle_added(
     ingest_cfg: ingest::IngestConfig,
     warmup_enabled: bool,
     metrics: &Arc<MetricsRegistry>,
-    prom: &Arc<prom::PromMetrics>,
+    prom: &Arc<metrics::PromMetrics>,
     task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
     parent_cancel: &CancellationToken,
     // Passed to the per-worker tasks only when this pool's tokenize mode
@@ -756,12 +762,15 @@ fn handle_added(
     let indexer = &pool.indexer;
     let inflight_prefixes = &pool.inflight_prefixes;
     // Warm up only for pools using the in-process tokenizer (Local/Compare).
-    let warmup_tokenizer =
-        if warmup_enabled && !matches!(pool.tokenize_mode, crate::tokenize::TokenizeMode::Render) {
-            local_tokenizer
-        } else {
-            None
-        };
+    let warmup_tokenizer = if warmup_enabled
+        && !matches!(
+            pool.tokenize_mode,
+            crate::router::tokenize::TokenizeMode::Render
+        ) {
+        local_tokenizer
+    } else {
+        None
+    };
     tracing::info!(
         pool = pool.name,
         worker_id = w.worker_id_str,
@@ -790,7 +799,7 @@ fn handle_added(
     // route the model_name hint, before the first /v1/models scrape.
     worker_pool.insert(w.worker_id_num, pool.clone());
     if !w.model_name.is_empty() {
-        crate::monitor::associate_models(
+        crate::router::service::associate_models(
             model_router,
             pool.id,
             &pool.name,
@@ -835,21 +844,31 @@ fn handle_added(
                 // Every worker gets the same declared list, so these mean the
                 // pin outlived a `spec.models` edit (`reset_declared_models`
                 // didn't run). Still routable.
-                crate::workers::ServedModelsVerdict::Widened { .. }
-                | crate::workers::ServedModelsVerdict::Narrowed { .. } => {
+                crate::fleet::workers::ServedModelsVerdict::Widened { .. }
+                | crate::fleet::workers::ServedModelsVerdict::Narrowed { .. } => {
                     tracing::warn!(
                         workerset = pool.name,
                         worker_id = w.worker_id_str,
                         "declared model list differs from this set's pinned models; \
                          routing anyway on the declared list"
                     );
-                    crate::monitor::associate_models(model_router, pool.id, &pool.name, models);
+                    crate::router::service::associate_models(
+                        model_router,
+                        pool.id,
+                        &pool.name,
+                        models,
+                    );
                 }
-                crate::workers::ServedModelsVerdict::Accepted
-                | crate::workers::ServedModelsVerdict::Empty => {
-                    crate::monitor::associate_models(model_router, pool.id, &pool.name, models);
+                crate::fleet::workers::ServedModelsVerdict::Accepted
+                | crate::fleet::workers::ServedModelsVerdict::Empty => {
+                    crate::router::service::associate_models(
+                        model_router,
+                        pool.id,
+                        &pool.name,
+                        models,
+                    );
                 }
-                crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
+                crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                     // As above, but not routable: skip the worker rather than
                     // half-register it.
                     tracing::error!(
@@ -921,7 +940,7 @@ fn handle_added(
 /// The side effects `PoolManager` delegates: starting a pool's discovery, and
 /// dropping its workers' fleet-wide state when it retires.
 ///
-/// Here rather than in `pool_manager`, which can then be tested against a
+/// Here rather than in `pool`, which can then be tested against a
 /// stub.
 struct MainHooks {
     /// Process token. Pool and discovery tokens are its children.
@@ -941,7 +960,7 @@ struct MainHooks {
     discovery_tokens: DashMap<PoolId, CancellationToken>,
 }
 
-impl pool_manager::PoolHooks for MainHooks {
+impl pool::PoolHooks for MainHooks {
     fn on_create(&self, pool: &Arc<Pool>, spec: &pool::PoolSpec) -> anyhow::Result<()> {
         let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
             DiscoveryMode::Static => {

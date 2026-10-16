@@ -38,10 +38,10 @@ use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::metrics::MetricsRegistry;
-use crate::picker::{self, WorkerScore};
-use crate::policy::store::PolicyStore;
-use crate::pool::PoolRegistry;
+use crate::controller::policy::store::PolicyStore;
+use crate::fleet::pool::PoolRegistry;
+use crate::fleet::scrape::MetricsRegistry;
+use crate::router::picker::{self, WorkerScore};
 
 // ── limits ───────────────────────────────────────────────────────────────────
 
@@ -507,7 +507,7 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
     let policies: Vec<Value> = snap
         .policies()
         .map(|p| {
-            let status = crate::policy::status::desired_policy_status(p, None);
+            let status = crate::controller::policy::status::desired_policy_status(p, None);
             let warnings: Vec<_> = p.all_warnings().collect();
             json!({
                 "namespace": p.namespace,
@@ -915,7 +915,7 @@ fn model_attr_set(
     // `resolve_alias`'s ordering rule. When nothing is served, fall back to
     // the raw table so simulation works against a cold fleet.
     let map = st.pools.snapshot();
-    let upstream = crate::monitor::first_served_upstream(&refs, requested, |u| {
+    let upstream = crate::router::service::first_served_upstream(&refs, requested, |u| {
         map.iter().any(|p| {
             p.registry
                 .iter_snapshot()
@@ -923,7 +923,7 @@ fn model_attr_set(
                 .any(|(_, e)| e.current_models.iter().any(|m| m == u))
         })
     })
-    .or_else(|| crate::monitor::first_served_upstream(&refs, requested, |_| true))
+    .or_else(|| crate::router::service::first_served_upstream(&refs, requested, |_| true))
     .unwrap_or_else(|| requested.to_string());
 
     // Upstream first, then aliases sorted, as `lifecycle.rs` builds it.
@@ -960,7 +960,7 @@ fn predict(
     // none. Coefficients and block size differ per set. A synthesized worker
     // belongs to no set, so it borrows one, reported as `Borrowed`.
     let map = st.pools.snapshot();
-    let found: Result<(Option<String>, Arc<crate::pool::Pool>), &'static str> = match pool {
+    let found: Result<(Option<String>, Arc<crate::fleet::pool::Pool>), &'static str> = match pool {
         None => Err("no pool selected, so no predictor to run; ranked as 0.0 ms"),
         Some(resolved) => {
             let own = resolved
