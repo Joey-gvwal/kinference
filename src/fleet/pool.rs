@@ -31,7 +31,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use kinference_policy::{PoolId, PoolKey};
-use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::static_config::WorkersFile;
@@ -40,32 +39,6 @@ use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
 use crate::fleet::models::ModelIndex;
 use crate::fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
 use crate::fleet::workers::WorkerRegistry;
-
-/// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.
-///
-/// `kv_block_size` and the render URL are per-deployment facts, so they live on
-/// the worker set instead.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProfileConfig {
-    /// Referenced by `[[workerset]].profile`. Must be unique.
-    pub name: String,
-    /// Refit with `analysis/analyze-latency.py`.
-    #[serde(default)]
-    pub predictor: PredictorConfig,
-    #[serde(default)]
-    pub picker: PickerConfig,
-    #[serde(default)]
-    pub tokenize: ProfileTokenizeConfig,
-}
-
-/// `[profile.tokenize]`
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ProfileTokenizeConfig {
-    #[serde(default)]
-    pub mode: TokenizeMode,
-}
 
 /// A worker set with its profile resolved: everything needed to build a
 /// `pool::Pool`, whether declared in TOML or by an `InferenceWorkerSet`.

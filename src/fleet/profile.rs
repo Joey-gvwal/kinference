@@ -4,6 +4,32 @@
 
 use serde::Deserialize;
 
+/// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.
+///
+/// `kv_block_size` and the render URL are per-deployment facts, so they live on
+/// the worker set instead.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileConfig {
+    /// Referenced by `[[workerset]].profile`. Must be unique.
+    pub name: String,
+    /// Refit with `analysis/analyze-latency.py`.
+    #[serde(default)]
+    pub predictor: PredictorConfig,
+    #[serde(default)]
+    pub picker: PickerConfig,
+    #[serde(default)]
+    pub tokenize: ProfileTokenizeConfig,
+}
+
+/// `[profile.tokenize]`
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProfileTokenizeConfig {
+    #[serde(default)]
+    pub mode: TokenizeMode,
+}
+
 /// Latency-model coefficients consumed by
 /// `router::picker::predicted_wait_ms` / `compute_queue_cost`. Refit these
 /// from `latency.csv` via `analysis/analyze-latency.py`. Same values

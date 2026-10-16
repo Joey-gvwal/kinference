@@ -12,7 +12,8 @@ use crate::controller::policy::worker_sets::KubernetesConfig;
 use crate::fleet::discovery::static_config::WorkersFile;
 use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode};
 use crate::fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
-use crate::fleet::pool::{PoolSpec, ProfileConfig};
+use crate::fleet::pool::PoolSpec;
+use crate::fleet::profile::ProfileConfig;
 use crate::metrics::MetricsConfig;
 use crate::router::tokenize_client::TokenizeConfig;
 
