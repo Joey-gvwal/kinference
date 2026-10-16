@@ -33,7 +33,7 @@ pub struct Config {
     pub profiles: Vec<ProfileConfig>,
     /// The worker sets this instance manages. Workers within a set share model,
     /// engine and `kv_block_size`. Requests are routed by `model` through
-    /// `service::model_router`; when several sets serve one model, all are
+    /// the model index; when several sets serve one model, all are
     /// scored (see `service::best_group`). At least one is required unless
     /// `[kubernetes]` is enabled.
     #[serde(default, rename = "workerset")]

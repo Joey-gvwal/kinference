@@ -592,3 +592,24 @@ fn render_diff_across_turns() {
     diff_at(&r0, &r1, "c0t0 vs c0t1");
     diff_at(&r1, &r2, "c0t1 vs c0t2");
 }
+
+/// Only a render-mode pool skips warm-up; an unknown pool is warmed.
+#[test]
+fn warmup_skips_only_render_mode_pools() {
+    let process = tokio_util::sync::CancellationToken::new();
+    let mut spec = crate::fleet::pool::test_spec("a", 16);
+    for (mode, warm) in [
+        (TokenizeMode::Render, false),
+        (TokenizeMode::Local, true),
+        (TokenizeMode::Compare, true),
+    ] {
+        spec.tokenize_mode = mode;
+        let pool = Arc::new(Pool::from_spec(
+            kinference_policy::PoolId::next(),
+            &spec,
+            &process,
+        ));
+        assert_eq!(should_warm(Some(&pool)), warm, "{mode:?}");
+    }
+    assert!(should_warm(None));
+}

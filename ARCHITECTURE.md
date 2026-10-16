@@ -19,7 +19,7 @@ code goes. Change it in the same pull request as any move.
 
 Target: the fleet, the router and the controller become crates. The server
 crate keeps wiring, config assembly, the admin listener and the metrics
-exposition. The plan is BuoyantIO/llm-monitor#50.
+exposition. The plan is #32.
 
 ## Groups
 
@@ -52,18 +52,14 @@ Imports point down, never up or sideways:
 
 Today the tree breaks this rule in four places:
 
-- Five imports point up from the fleet into the router. `pool` and `scrape`
-  write the model index, which lives in `service`, and `scrape` warms up
-  the local tokenizer (BuoyantIO/llm-monitor#55). `pool` takes the picker
-  and tokenize config types from the router; no issue covers that yet.
+- Two imports point up from the fleet into the router. `pool` takes the
+  picker and tokenize config types from the router (#37).
 - The router imports the controller's policy store to read the snapshot.
-  BuoyantIO/llm-monitor#43 moves the snapshot holder into
-  `kinference-policy`.
-- Every group records into the one `metrics` struct at the top.
-  BuoyantIO/llm-monitor#56 gives each group its own families.
+  #49 moves the snapshot holder into `kinference-policy`.
+- Every group records into the one `metrics` struct at the top. #40 gives
+  each group its own families.
 - Two pairs inside the router import each other: `service` and
-  `observations` (BuoyantIO/llm-monitor#60), and `service` and
-  `tokenize_client` (BuoyantIO/llm-monitor#59).
+  `observations` (#45), and `service` and `tokenize_client` (#44).
 
 ## Module map
 
@@ -73,19 +69,20 @@ Today the tree breaks this rule in four places:
 | `fleet::eviction` | the channel that asks the coordinator to drop a worker |
 | `fleet::inflight` | per-endpoint picks not yet observed, and prefixes dispatched but not yet in the KV index |
 | `fleet::ingest` | the ZMQ KV-event listener per worker, replay, and block-size checks |
+| `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::rollup` | the task that sets the fleet gauges once a second |
-| `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, the registry of samples, and the tokenizer warm-up |
+| `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
-| `router::local_tokenize` | the in-process tokenizer registry: tokenizers and chat templates |
+| `router::local_tokenize` | the in-process tokenizer registry: tokenizers, chat templates, and the warm-up that follows the model index |
 | `router::mock` | the deterministic `Picker` used in mock mode |
 | `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
-| `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback, the model index |
+| `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
 | `router::tokenize` | HTTP `/render` helpers and `TokenizeMode` |
 | `router::tokenize_client` | `/render` with local fallback and compare mode, as methods on the service |
 | `controller::leader` | Lease-based leader election |

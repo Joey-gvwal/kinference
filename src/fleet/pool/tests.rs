@@ -163,38 +163,31 @@ impl PoolHooks for RecordingHooks {
     }
 }
 
-fn router()
--> Arc<std::sync::RwLock<std::collections::HashMap<String, std::collections::BTreeSet<PoolId>>>> {
-    Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()))
-}
-
 struct Harness {
     mgr: PoolManager,
     registry: Arc<PoolRegistry>,
     hooks: Arc<RecordingHooks>,
-    router: Arc<
-        std::sync::RwLock<std::collections::HashMap<String, std::collections::BTreeSet<PoolId>>>,
-    >,
+    models: Arc<ModelIndex>,
     process: CancellationToken,
 }
 
 fn harness(reap: ReapPolicy) -> Harness {
     let registry = PoolRegistry::new();
     let hooks = Arc::new(RecordingHooks::default());
-    let router = router();
+    let models = Arc::new(ModelIndex::new());
     let process = CancellationToken::new();
     let mgr = PoolManager::new(
         registry.clone(),
         hooks.clone(),
         process.clone(),
-        router.clone(),
+        models.clone(),
         reap,
     );
     Harness {
         mgr,
         registry,
         hooks,
-        router,
+        models,
         process,
     }
 }
@@ -433,7 +426,7 @@ async fn a_tuning_change_is_copy_on_write() {
 }
 
 /// Editing a Static set's declared model list reaches the already-registered
-/// workers, and the router.
+/// workers, and the model index.
 #[tokio::test]
 async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     let mut h = harness(eager());
@@ -447,7 +440,7 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
         crate::fleet::workers::WorkerEntry::from_config(&worker_cfg(1), 16),
     );
     pool.registry.set_served_models(1, &["old".to_string()]);
-    crate::router::service::associate_models(&h.router, pool.id, "a", &["old".to_string()]);
+    h.models.associate(pool.id, "a", &["old".to_string()]);
 
     let mut next = spec("a", 16);
     next.static_models = Some(vec!["new".to_string()]);
@@ -461,11 +454,10 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
         "the live worker must be re-seeded, not left on the old name"
     );
     assert_eq!(pool.registry.by_model_len("old"), 0);
-    // ...and the router agrees, so a request for it lands here.
-    let router = h.router.read().unwrap();
-    assert!(router.contains_key("new"));
+    // ...and the index agrees, so a request for it lands here.
+    assert_eq!(h.models.pools_for("new"), vec![pool.id]);
     assert!(
-        !router.contains_key("old"),
+        h.models.pools_for("old").is_empty(),
         "the stale claim must go, or requests route here for a model \
          nothing in this pool serves"
     );
@@ -492,12 +484,12 @@ async fn retiring_releases_the_model_claims() {
     let mut h = harness(eager());
     h.mgr.reconcile(vec![spec("a", 16)]);
     let id = h.mgr.live_pool(&PoolKey::local("a")).unwrap().id;
-    crate::router::service::associate_models(&h.router, id, "a", &["gemma".to_string()]);
-    assert!(h.router.read().unwrap().contains_key("gemma"));
+    h.models.associate(id, "a", &["gemma".to_string()]);
+    assert_eq!(h.models.pools_for("gemma"), vec![id]);
 
     h.mgr.reconcile(Vec::new());
     assert!(
-        !h.router.read().unwrap().contains_key("gemma"),
+        h.models.pools_for("gemma").is_empty(),
         "a retired pool's claim must not outlive it"
     );
 }

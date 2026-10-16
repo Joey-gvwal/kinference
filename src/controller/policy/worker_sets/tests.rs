@@ -501,7 +501,7 @@ fn watcher_with(
         registry.clone(),
         std::sync::Arc::new(NoopHooks),
         CancellationToken::new(),
-        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        std::sync::Arc::new(crate::fleet::models::ModelIndex::new()),
         crate::fleet::pool::ReapPolicy {
             linger: Duration::ZERO,
             backstop: Duration::from_secs(600),

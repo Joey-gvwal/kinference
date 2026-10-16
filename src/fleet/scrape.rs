@@ -1,5 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -375,14 +374,12 @@ impl MetricsRegistry {
 /// served models and the detected engine.
 ///
 /// Fire-and-forget: on failure, the periodic refresh catches up.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_one_shot_warmup(
     cfg: WorkerConfig,
     registry: Arc<MetricsRegistry>,
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
-    local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
     eviction_tx: crate::fleet::eviction::EvictionTx,
-    model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
+    index: Arc<crate::fleet::models::ModelIndex>,
     pool_id: PoolId,
     pool_name: String,
 ) {
@@ -426,12 +423,7 @@ pub fn spawn_one_shot_warmup(
                             "warmup: worker serves models not previously seen in this set; \
                              widening the set's model list"
                         );
-                        crate::router::service::associate_models(
-                            &model_router,
-                            pool_id,
-                            &pool_name,
-                            &names,
-                        );
+                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
                         tracing::info!(
@@ -440,21 +432,11 @@ pub fn spawn_one_shot_warmup(
                             "warmup: worker is missing models others in this set serve; \
                              routing to it only for what it has"
                         );
-                        crate::router::service::associate_models(
-                            &model_router,
-                            pool_id,
-                            &pool_name,
-                            &names,
-                        );
+                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::fleet::workers::ServedModelsVerdict::Accepted
                     | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                        crate::router::service::associate_models(
-                            &model_router,
-                            pool_id,
-                            &pool_name,
-                            &names,
-                        );
+                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                         tracing::warn!(
@@ -475,23 +457,6 @@ pub fn spawn_one_shot_warmup(
                 }
                 if let Some(eng) = detected_engine {
                     workers.set_engine(cfg.worker_id_num, eng);
-                }
-                // Background tokenizer warmup for every served model;
-                // `get_or_load` is idempotent.
-                if let Some(local_reg) = local_tokenizer.as_ref() {
-                    for name in &names {
-                        let reg = local_reg.clone();
-                        let model = name.clone();
-                        tokio::spawn(async move {
-                            if let Err(err) = reg.warmup(&model).await {
-                                tracing::warn!(
-                                    model,
-                                    error = %err,
-                                    "tokenizer warmup failed; first request will pay load cost or fall back to HTTP"
-                                );
-                            }
-                        });
-                    }
                 }
                 registry.models_by_worker.insert(
                     cfg.worker_id_num,
@@ -519,12 +484,11 @@ pub fn spawn_metrics_poller(
     cfg: WorkerConfig,
     poll_ms: u64,
     models_refresh_secs: u64,
-    local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
     registry: Arc<MetricsRegistry>,
     workers: Arc<crate::fleet::workers::WorkerRegistry>,
     eviction_tx: crate::fleet::eviction::EvictionTx,
     cancel: CancellationToken,
-    model_router: Arc<RwLock<HashMap<String, BTreeSet<PoolId>>>>,
+    index: Arc<crate::fleet::models::ModelIndex>,
     pool_id: PoolId,
     pool_name: String,
 ) {
@@ -570,10 +534,6 @@ pub fn spawn_metrics_poller(
         let refresh_every: u64 = ((models_refresh_secs * 1000) / poll_ms).max(1);
         let mut n: u64 = 0;
         let mut warned_about_models = false;
-        // Models already warmed, so a tokenizer that can't load isn't retried
-        // (and re-warned) on every refresh. Requests still load on demand.
-        let mut warmup_attempted: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
 
         tracing::info!(
             worker_id = cfg.worker_id_str,
@@ -607,12 +567,7 @@ pub fn spawn_metrics_poller(
                                     "poller: worker serves models not previously seen \
                                          in this set; widening the set's model list"
                                 );
-                                crate::router::service::associate_models(
-                                    &model_router,
-                                    pool_id,
-                                    &pool_name,
-                                    &names,
-                                );
+                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
                                 tracing::info!(
@@ -621,21 +576,11 @@ pub fn spawn_metrics_poller(
                                     "poller: worker is missing models others in this \
                                          set serve; routing to it only for what it has"
                                 );
-                                crate::router::service::associate_models(
-                                    &model_router,
-                                    pool_id,
-                                    &pool_name,
-                                    &names,
-                                );
+                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::fleet::workers::ServedModelsVerdict::Accepted
                             | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                                crate::router::service::associate_models(
-                                    &model_router,
-                                    pool_id,
-                                    &pool_name,
-                                    &names,
-                                );
+                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::fleet::workers::ServedModelsVerdict::Mismatch {
                                 expected,
@@ -659,27 +604,6 @@ pub fn spawn_metrics_poller(
                         }
                         if let Some(eng) = detected_engine {
                             workers.set_engine(cfg.worker_id_num, eng);
-                        }
-                        // Tokenizer warmup for newly seen models, e.g. a
-                        // hot-loaded LoRA adapter.
-                        if let Some(local_reg) = local_tokenizer.as_ref() {
-                            for name in &names {
-                                if !warmup_attempted.insert(name.clone()) {
-                                    continue; // already tried this model
-                                }
-                                let reg = local_reg.clone();
-                                let model = name.clone();
-                                tokio::spawn(async move {
-                                    if let Err(err) = reg.warmup(&model).await {
-                                        tracing::warn!(
-                                            model,
-                                            error = %err,
-                                            "tokenizer warmup failed; on-demand \
-                                             requests will fall back to HTTP /render"
-                                        );
-                                    }
-                                });
-                            }
                         }
                         // Single model: filter by its name. Otherwise no
                         // filter.

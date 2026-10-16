@@ -39,8 +39,13 @@ use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+use tokio_util::sync::CancellationToken;
 
-use crate::router::tokenize::TokenizeInput;
+use crate::fleet::models::ModelClaim;
+use crate::fleet::pool::{Pool, PoolRegistry};
+use crate::router::tokenize::{TokenizeInput, TokenizeMode};
 
 /// `[tokenize.local]`. See `src/router/local_tokenize.rs`.
 #[allow(dead_code)]
@@ -73,6 +78,56 @@ impl Default for LocalTokenizeConfig {
 
 fn default_warmup() -> bool {
     true
+}
+
+/// Load a tokenizer for each new model claim whose pool uses the local
+/// tokenizer, until `cancel`. Each load runs in its own task, so a slow Hub
+/// fetch does not hold up the stream.
+pub fn spawn_warmup(
+    registry: Arc<LocalTokenizerRegistry>,
+    pools: Arc<PoolRegistry>,
+    mut claims: broadcast::Receiver<ModelClaim>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            let claim = tokio::select! {
+                _ = cancel.cancelled() => return,
+                next = claims.recv() => match next {
+                    Ok(claim) => claim,
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::warn!(
+                            missed,
+                            "tokenizer warmup fell behind; skipped models load on first request"
+                        );
+                        continue;
+                    }
+                    Err(RecvError::Closed) => return,
+                },
+            };
+            if !should_warm(pools.snapshot().get(claim.pool)) {
+                continue;
+            }
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                if let Err(err) = registry.warmup(&claim.model).await {
+                    tracing::warn!(
+                        model = %claim.model,
+                        error = %err,
+                        "tokenizer warmup failed; first request will pay the load cost or fall \
+                         back to HTTP /render"
+                    );
+                }
+            });
+        }
+    });
+}
+
+/// A render-mode pool never uses the local tokenizer. A pool missing from the
+/// snapshot is warmed anyway: it may be published a beat after its first
+/// claim, and an extra load is harmless.
+fn should_warm(pool: Option<&Arc<Pool>>) -> bool {
+    pool.is_none_or(|p| !matches!(p.tokenize_mode, TokenizeMode::Render))
 }
 
 /// Cached, loaded artifacts for one model. Cheap to `Arc`-share.
@@ -125,8 +180,7 @@ impl LocalTokenizerRegistry {
         })
     }
 
-    /// Load `model_name`'s tokenizer into the cache. Called from the metrics
-    /// poller when `/v1/models` first reports a model, so requests find it
+    /// Load `model_name`'s tokenizer into the cache, so requests find it
     /// warm. The caller logs errors and moves on.
     pub async fn warmup(&self, model_name: &str) -> Result<()> {
         let _ = self.get_or_load(model_name).await?;

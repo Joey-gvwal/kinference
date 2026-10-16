@@ -1,10 +1,11 @@
 //! The fleet: pools, workers, discovery, eviction, the scrape of engine
-//! metrics, ZMQ ingest and in-flight state.
+//! metrics, ZMQ ingest, in-flight state and the model index.
 
 pub mod discovery;
 pub mod eviction;
 pub mod inflight;
 pub mod ingest;
+pub mod models;
 pub mod pool;
 pub mod rollup;
 pub mod scrape;
