@@ -1,5 +1,5 @@
 //! The router's own Prometheus families: the request path, labeled by
-//! `model` and `qos`, plus a `tenant` resolved per `[metrics] tenant_labels`.
+//! `model` and `qos`, plus a `tenant` resolved per `metrics.tenant_labels`.
 //! Registered in the registry the server lends.
 
 use std::collections::HashSet;
@@ -13,7 +13,7 @@ use kinference_fleet::metrics::{
     histogram, histogram_vec, int_counter, int_counter_vec, int_gauge,
 };
 
-/// `[metrics]`
+/// `metrics`: labelling of the metrics kinference publishes.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct MetricsConfig {
@@ -29,10 +29,10 @@ pub const DEFAULT_TENANT_LABEL: &str = "default";
 
 /// Which tenants get their own `tenant` label value:
 ///
-/// ```toml
-/// tenant_labels = "none"              # default; everything buckets under "default"
-/// tenant_labels = "all"               # every tenant gets its own label
-/// tenant_labels = ["acme", "globex"]  # these keep their identity; the rest bucket
+/// ```json
+/// "tenant_labels": "none"              // default; everything buckets under "default"
+/// "tenant_labels": "all"               // every tenant gets its own label
+/// "tenant_labels": ["acme", "globex"]  // these keep their identity; the rest bucket
 /// ```
 ///
 /// `[]` is equivalent to `"none"`.
@@ -184,7 +184,7 @@ impl PickOutcome {
 /// resolved through [`Self::tenant_label`].
 pub struct RouterMetrics {
     /// How to label the `tenant` dimension. Resolved once at construction from
-    /// `[metrics] tenant_labels`.
+    /// `metrics.tenant_labels`.
     tenants: TenantPolicy,
     /// `kinference_prompt_tokens_total{model,qos}`: prompt tokens, from ReportFinalToken.
     prompt_tokens: IntCounterVec,
@@ -311,7 +311,7 @@ fn length_histogram(registry: &Registry, name: &str, help: &str) -> HistogramVec
     )
 }
 
-/// The resolved form of `[metrics] tenant_labels`.
+/// The resolved form of `metrics.tenant_labels`.
 ///
 /// Like [`TenantLabels`], but with a `HashSet` allowlist, since
 /// `tenant_label` is on the hot path.
@@ -334,13 +334,13 @@ impl From<&TenantLabels> for TenantPolicy {
 }
 
 impl RouterMetrics {
-    /// Build the families from `[metrics]`, register them in `registry`, and
+    /// Build the families from `metrics`, register them in `registry`, and
     /// seed every closed label set at zero. Warns once if tenant labelling is
     /// unbounded.
     pub fn new(registry: &Registry, cfg: &MetricsConfig) -> Self {
         if matches!(cfg.tenant_labels, TenantLabels::All) {
             tracing::warn!(
-                "[metrics] tenant_labels = \"all\": every tenant id seen becomes its own \
+                "metrics.tenant_labels = \"all\": every tenant id seen becomes its own \
                  label value, which is UNBOUNDED — about 91 Prometheus series per \
                  (model, qos, tenant). A caller that sends a unique tenant per request \
                  will grow the registry without limit. Use an explicit allowlist to bound it."
@@ -1023,7 +1023,7 @@ impl RouterMetrics {
             .inc_by(cum);
     }
 
-    /// The label value for `tenant`, per `[metrics] tenant_labels`.
+    /// The label value for `tenant`, per `metrics.tenant_labels`.
     ///
     /// An empty tenant always resolves to [`DEFAULT_TENANT_LABEL`], unlike in
     /// policy, where `tenant: ""` is a distinct matchable value.

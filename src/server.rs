@@ -93,7 +93,7 @@ pub async fn run() -> Result<()> {
     let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
     let ingest_cfg = cfg.ingest;
 
-    // One `PoolSpec` per `[[workerset]]`, resolved against its profile.
+    // One `PoolSpec` per `workerset` entry, resolved against its profile.
     // Each pool owns its own KvIndexer, WorkerRegistry, InflightPrefixes,
     // InflightRegistry and pick lock.
     //
@@ -218,7 +218,7 @@ pub async fn run() -> Result<()> {
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "[kubernetes] is enabled but in-cluster credentials are \
+                    "kubernetes.enabled is set but in-cluster credentials are \
                      unavailable; InferenceWorkerSets will resolve but their pools \
                      cannot start discovery"
                 );
@@ -254,7 +254,7 @@ pub async fn run() -> Result<()> {
         },
     );
     // Written by the worker-set watch, read by the status writer. Empty
-    // with `[kubernetes]` off.
+    // with `kubernetes.enabled` off.
     let rejection_store = policy::worker_sets::RejectionStore::new();
     let mut pool_manager = pool::PoolManager::new(
         pool_registry.clone(),
@@ -268,8 +268,8 @@ pub async fn run() -> Result<()> {
             backstop: observation_ttl.max(std::time::Duration::from_secs(600)),
         },
     );
-    // TOML-declared sets are materialized now, CR-declared ones with the
-    // watch. Their keys can't collide: CR keys are namespaced, TOML keys
+    // Config-declared sets are materialized now, CR-declared ones with the
+    // watch. Their keys can't collide: CR keys are namespaced, config keys
     // never are.
     let report = pool_manager.reconcile(specs.clone());
     if !report.failed.is_empty() {
@@ -288,7 +288,7 @@ pub async fn run() -> Result<()> {
     let live_pools = pool_registry.snapshot();
 
     // The manager moves into one task, so it needs no lock. With
-    // `[kubernetes]` on, that task also watches `InferenceWorkerSet`s;
+    // `kubernetes.enabled`, that task also watches `InferenceWorkerSet`s;
     // otherwise it only reaps.
     if cfg.kubernetes.enabled {
         // Inferred, so it also works outside a cluster.
@@ -366,15 +366,15 @@ pub async fn run() -> Result<()> {
     let policy_bits = if cfg.policy.enabled {
         if !cfg.kubernetes.enabled {
             tracing::warn!(
-                "[policy] is enabled but [kubernetes] is not, so no pool has a \
+                "policy.enabled is set but kubernetes.enabled is not, so no pool has a \
                  namespaced identity for an InferenceWorkerSet to resolve to — every \
                  destination will report NoMatchingPool. Policy routes between worker \
-                 sets that the CRs themselves define; set [kubernetes] enabled = true."
+                 sets that the CRs themselves define; set kubernetes.enabled = true."
             );
         }
         let store = policy_store_cell
             .clone()
-            .expect("created whenever [policy] is enabled");
+            .expect("created whenever policy.enabled is set");
         // Shared: the service writes it from the feedback handlers and the
         // status writer publishes it.
         let provider_health =
@@ -582,7 +582,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// The pod's own namespace, from the service-account mount. Used when
-/// `[leader_election].namespace` is unset so a normal in-cluster deployment
+/// `leader_election.namespace` is unset so a normal in-cluster deployment
 /// needs no configuration at all.
 fn kube_namespace_hint() -> Option<String> {
     std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")

@@ -21,7 +21,7 @@ use crate::router::tokenize::{
 use kinference_fleet::profile::TokenizeMode;
 use kinference_fleet::workers::WorkerEntry;
 
-/// `[tokenize]`: tokenization settings shared by all pools. The mode is set
+/// `tokenize`: tokenization settings shared by all pools. The mode is set
 /// per profile.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]

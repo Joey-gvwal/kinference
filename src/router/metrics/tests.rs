@@ -27,7 +27,7 @@ impl Metrics {
     }
 }
 
-/// Tenant labelling off, the `[metrics]` default.
+/// Tenant labelling off, the `metrics` default.
 fn metrics() -> Metrics {
     with(TenantLabels::None)
 }

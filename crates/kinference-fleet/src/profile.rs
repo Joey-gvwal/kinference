@@ -1,16 +1,16 @@
-//! The `[[profile]]` tuning a pool carries: predictor coefficients, picker
+//! The profile tuning a pool carries: predictor coefficients, picker
 //! policy and the tokenize mode. Data and serde defaults only; the router
 //! holds the logic that reads them.
 
 use serde::Deserialize;
 
-/// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.
+/// A `profile` entry: a named bundle of routing tuning, shared across worker sets.
 ///
 /// `kv_block_size` and the render URL are per-deployment facts, so they live on
 /// the worker set instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileConfig {
-    /// Referenced by `[[workerset]].profile`. Must be unique.
+    /// Referenced by a workerset's `profile`. Must be unique.
     pub name: String,
     /// Refit with `analysis/analyze-latency.py`.
     #[serde(default)]
@@ -21,7 +21,7 @@ pub struct ProfileConfig {
     pub tokenize: ProfileTokenizeConfig,
 }
 
-/// `[profile.tokenize]`
+/// A profile's `tokenize`
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ProfileTokenizeConfig {
     #[serde(default)]

@@ -69,7 +69,7 @@ pub struct PendingObservation {
     /// The worker set this pick was routed to. A label for the CSV row and
     /// logs only; the release path uses `inflight`.
     pub workerset: String,
-    /// The `[[profile]]` whose coefficients produced this row's prediction.
+    /// The profile whose coefficients produced this row's prediction.
     pub profile: String,
     /// The two things the release path actually touches, carried directly.
     pub inflight: InflightHandles,
@@ -372,7 +372,7 @@ workerset,profile";
 ///                                   for cache replication
 /// ── Provenance (cols 50-51) ──
 ///   50: workerset                   which worker set served this pick
-///   51: profile                     which `[[profile]]`'s coefficients
+///   51: profile                     which profile's coefficients
 ///                                   produced the prediction in cols 5-12
 pub fn format_csv_row(
     record: &PendingObservation,

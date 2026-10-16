@@ -87,8 +87,8 @@ extension:
   qos: ""
 
 # The kinference config. The chart renders it to JSON (config.json in the
-# ConfigMap, read with --config). Keys are those of the TOML config file
-# (src/config.rs), with TOML sections written here as nested maps.
+# ConfigMap, read with --config). Keys are those of the config struct
+# (src/config.rs).
 #
 # Derived by the chart, so NOT set here:
 #   - listen / admin_listen: from service.grpcPort / service.adminPort.
@@ -168,7 +168,7 @@ config:
         mode: local
 
   # EndpointSlice-discovered worker sets, in addition to the ones
-  # [kubernetes] derives from InferenceWorkerSet CRs. None by default.
+  # `kubernetes` derives from InferenceWorkerSet CRs. None by default.
   workersets: {}
 
   policy:

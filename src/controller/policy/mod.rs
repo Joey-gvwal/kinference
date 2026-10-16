@@ -19,7 +19,7 @@ pub mod status;
 pub mod store;
 pub mod worker_sets;
 
-/// `[policy]`: routing policy from `kinference.buoyant.io` CRDs.
+/// `policy`: routing policy from `kinference.buoyant.io` CRDs.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PolicyConfig {
@@ -57,7 +57,7 @@ impl PolicyConfig {
     }
 }
 
-// Not derived, so `backend_bindings` defaults to true like an absent `[policy]`.
+// Not derived, so `backend_bindings` defaults to true like an absent `policy` section.
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {

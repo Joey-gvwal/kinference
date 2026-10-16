@@ -81,8 +81,8 @@ impl PolicyWatcher {
         let kube_cfg = kube::Config::infer().await.map_err(|e| {
             anyhow::anyhow!(
                 "failed to build a Kubernetes client for the policy watcher \
-                 ([policy] enabled = true): no in-cluster service-account token and no usable \
-                 kubeconfig. Set `[policy] enabled = false` to run without CRD policy. ({e})"
+                 (policy.enabled = true): no in-cluster service-account token and no usable \
+                 kubeconfig. Set `policy.enabled = false` to run without CRD policy. ({e})"
             )
         })?;
         let client = kube::Client::try_from(kube_cfg)?;

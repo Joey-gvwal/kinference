@@ -2,7 +2,7 @@ use super::*;
 
 const ME: &str = "cp-0";
 const OTHER: &str = "cp-1";
-/// Same as the `[leader_election]` default, so the boundary arithmetic in
+/// Same as the `leader_election` default, so the boundary arithmetic in
 /// these tests still describes the shipped behavior.
 const GRACE: Duration = Duration::from_secs(10);
 

@@ -79,7 +79,7 @@ fn same_named_sets_in_two_namespaces_stay_separate() {
     assert_eq!(b.discovery.namespace.as_deref(), Some("b"));
 }
 
-/// An unknown profile (fixed in the router's TOML) and a missing one (fixed
+/// An unknown profile (fixed in the router's config) and a missing one (fixed
 /// in the CR) get different reasons. The unknown case lists what is defined.
 #[test]
 fn an_unknown_profile_is_rejected_and_lists_the_defined_ones() {

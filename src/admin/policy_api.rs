@@ -234,7 +234,7 @@ fn snapshot_or_reason(st: &PolicyApiState) -> Result<Arc<PolicyIndex>, ApiError>
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
             "PolicyDisabled",
-            "`[policy] enabled = false`, so no InferencePolicy is watched. There is nothing to \
+            "`policy.enabled = false`, so no InferencePolicy is watched. There is nothing to \
              evaluate.",
         ));
     };

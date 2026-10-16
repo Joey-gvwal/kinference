@@ -81,14 +81,14 @@ Rows name a module by its group; in code the fleet's are under
 | `fleet::metrics` | `FleetMetrics`, the fleet's Prometheus families, and the helpers every group registers its families with |
 | `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
-| `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
+| `fleet::profile` | the profile tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
 | `router::local_tokenize` | the in-process tokenizer registry: tokenizers, chat templates, and the warm-up that follows the model index |
-| `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `[metrics]` config |
+| `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
 | `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |

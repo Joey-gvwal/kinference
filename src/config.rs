@@ -35,7 +35,7 @@ pub struct Config {
     /// engine and `kv_block_size`. Requests are routed by `model` through
     /// the model index; when several sets serve one model, all are
     /// scored (see `service::best_group`). At least one is required unless
-    /// `[kubernetes]` is enabled.
+    /// `kubernetes.enabled` is set.
     #[serde(default, rename = "workerset")]
     pub worker_sets: Vec<WorkerSetConfig>,
     /// Milliseconds between `/metrics` scrapes per worker. Defaults to 1000;
@@ -95,7 +95,7 @@ pub struct Config {
     #[serde(default)]
     pub metrics: MetricsConfig,
     /// Derive worker sets from `InferenceWorkerSet` CRs. Independent of
-    /// `[policy].enabled`, so CRD discovery doesn't require CRD routing rules.
+    /// `policy.enabled`, so CRD discovery doesn't require CRD routing rules.
     #[serde(default)]
     pub kubernetes: KubernetesConfig,
     #[serde(default)]
@@ -111,14 +111,14 @@ pub struct Config {
     pub observations_csv: Option<PathBuf>,
 }
 
-/// `[[workerset]]`: one declared worker set. The Kubernetes equivalent is an
+/// A `workerset` entry: one config-declared worker set. The Kubernetes equivalent is an
 /// `InferenceWorkerSet`; both reduce to a [`PoolSpec`].
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkerSetConfig {
     /// Must be unique.
     pub name: String,
-    /// The `[[profile]]` supplying this set's tuning. Required.
+    /// The profile supplying this set's tuning. Required.
     pub profile: String,
     /// KV-cache block size shared by every worker in the set. A worker
     /// reporting a different size is evicted.
@@ -200,7 +200,7 @@ impl Config {
         Ok(())
     }
 
-    /// Resolve every `[[workerset]]` against its `[[profile]]`. An unknown
+    /// Resolve every `workerset` entry against its profile. An unknown
     /// profile is an error listing the defined ones.
     pub fn pool_specs(&self) -> Result<Vec<PoolSpec>> {
         let by_name: std::collections::HashMap<&str, &ProfileConfig> =
@@ -242,7 +242,7 @@ impl Config {
     fn validate(&self) -> Result<()> {
         if self.worker_sets.is_empty() && !self.kubernetes.enabled {
             anyhow::bail!(
-                "at least one [[workerset]] is required (or set [kubernetes] enabled = true \
+                "at least one workerset is required (or set kubernetes.enabled = true \
                  to derive them from InferenceWorkerSet CRs)"
             );
         }
@@ -250,7 +250,7 @@ impl Config {
             // Every InferenceWorkerSet names a profile, so none could be
             // materialized.
             anyhow::bail!(
-                "[kubernetes] enabled = true but no [[profile]] is defined; every \
+                "kubernetes.enabled = true but no profile is defined; every \
                  InferenceWorkerSet names a profile, so none could be materialized"
             );
         }
@@ -258,7 +258,7 @@ impl Config {
         let mut seen_profiles = std::collections::HashSet::new();
         for p in &self.profiles {
             if p.name.trim().is_empty() {
-                anyhow::bail!("every [[profile]] must have a non-empty `name`");
+                anyhow::bail!("every profile must have a non-empty `name`");
             }
             if !seen_profiles.insert(p.name.clone()) {
                 anyhow::bail!("duplicate profile name: {}", p.name);

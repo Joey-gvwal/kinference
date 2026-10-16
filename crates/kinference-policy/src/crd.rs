@@ -59,7 +59,7 @@ pub struct InferenceWorkerSetSpec {
     /// The Service fronting these model servers. Same-namespace only, so no
     /// `ReferenceGrant` is involved.
     pub service_ref: ServiceRef,
-    /// Which `[[profile]]` in kinference's TOML supplies this set's predictor
+    /// Which profile in kinference's config supplies this set's predictor
     /// coefficients, picker policy, and tokenize mode.
     ///
     /// Required by the schema; see the module docs for why it is `Option`.

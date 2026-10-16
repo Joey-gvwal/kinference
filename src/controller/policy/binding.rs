@@ -25,7 +25,7 @@
 //! published until the Service watch has listed.
 //!
 //! The binding also lists an `Extension`
-//! (`[policy] backend_binding_extension`), which the gateway prepends to the
+//! (`policy.backend_binding_extension`), which the gateway prepends to the
 //! filter chain of every rule routing to the pool; it asks kinference which
 //! endpoint each request goes to.
 //!
@@ -355,7 +355,7 @@ impl BindingWriter {
                     "backend bindings: the BackendBinding CRD is not installed; \
                      not publishing any (install the gateway's \
                      gateway.linkerd.io CRDs, or set \
-                     `[policy] backend_bindings = false`)"
+                     `policy.backend_bindings = false`)"
                         .to_string(),
                 ]));
                 return Ok(());

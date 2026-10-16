@@ -9,7 +9,7 @@ use super::PoolKey;
 ///
 /// Every variant is an operator-fixable misconfiguration. They are distinct
 /// because the fix differs: an unknown profile means editing the router's
-/// TOML, a missing one means editing the CR.
+/// config, a missing one means editing the CR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectReason {
     /// `spec.profile` absent. Required by the schema, so this means the object

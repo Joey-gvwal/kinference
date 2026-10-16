@@ -51,7 +51,7 @@ pub type DiscoveryFactory = Arc<
         + Sync,
 >;
 
-/// `[workerset.discovery]`: where a pool's workers come from.
+/// A workerset's `discovery`: where a pool's workers come from.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct DiscoveryConfig {
     /// Namespace of the Service; `None` means all namespaces.
@@ -69,8 +69,8 @@ pub struct DiscoveryConfig {
     /// nor a `kinference.buoyant.io/*` annotation.
     #[serde(default)]
     pub defaults: DiscoveryDefaults,
-    /// Explicit ports from an `InferenceWorkerSet`. Always empty for TOML
-    /// worker sets.
+    /// Explicit ports from an `InferenceWorkerSet`. Always empty for
+    /// config-declared worker sets.
     #[serde(skip)]
     pub ports: PortRefs,
 }

@@ -5,7 +5,7 @@
 //! accordingly. A `Pick` with no pool is unaffected.
 //!
 //! A policy does not override `PredictorConfig` or `PickerConfig`, which come
-//! from the worker set's TOML `[[profile]]`. It governs the layer above the
+//! from the worker set's profile in kinference's config. It governs the layer above the
 //! picker: which candidates exist, which are dropped, and how survivors are
 //! ranked.
 //!
@@ -116,7 +116,7 @@ impl std::fmt::Display for PoolId {
 /// A worker set's stable identity, as opposed to the runtime-assigned `PoolId`.
 /// This is what reconciles match on.
 ///
-/// `namespace` is `None` for TOML worker sets. It is part of the key so
+/// `namespace` is `None` for config-declared worker sets. It is part of the key so
 /// same-named sets in different namespaces don't merge into one pool.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PoolKey {

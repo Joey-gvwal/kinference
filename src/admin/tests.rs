@@ -165,7 +165,7 @@ async fn body_of(resp: Response) -> (StatusCode, serde_json::Value) {
     (status, v)
 }
 
-/// `[policy] enabled = false` is reported as such, not as "no policies".
+/// `policy.enabled = false` is reported as such, not as "no policies".
 #[tokio::test]
 async fn context_says_disabled_rather_than_returning_an_empty_list() {
     let (status, body) = body_of(policy_api::context(State(api_state(None))).await).await;
