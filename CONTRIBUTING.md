@@ -53,3 +53,43 @@ for someone reading `git log`, not just for reviewers:
 - Leave out checklists and review chatter.
 
 To see one entry per merged PR, use `git log --first-parent main`.
+
+## Policy on Generative AI & LLM-Assisted Contributions ##
+
+### Ultimate Human Accountability ###
+
+The human author submitting a contribution remains entirely and solely
+accountable for its content, correctness, security, and runtime functionality.
+Utilizing an LLM or AI tool does not shift, diminish, or share accountability
+with the software tool, model provider, or AI platform.
+
+- Architectural & Logic Mastery: The human contributor must thoroughly
+understand and be able to explain the entirety of their submission.
+- Maintainer review focuses entirely on the safety, logic, and quality of the
+contribution, regardless of whether generative AI or LLMs were used to create
+it.
+- Tool-assisted submissions must still adhere to all contribution guidelines
+set above in this document.
+
+### Attribution and Co-Author Guidelines ###
+
+Attributing AI tools, models, or assistant platforms (for example, via
+`Co-authored-by:` commit message trailers or pull request descriptions) is
+**optional**.
+
+- **Optional Tool Attribution:** Contributors who wish to acknowledge AI tool
+usage may optionally include a commit trailer or PR footnote.
+- **No Legal Co-Authorship:** AI tools and LLMs cannot be designated as legal
+copyright holders or primary authors, as accountability rests exclusively with
+the human contributor.
+
+### Maintainer Authority and Enforcement ###
+
+Kinference maintainers reserve the right to:
+
+- Reject or close pull requests or issues that exhibit evidence of hallucinated
+content or lack of human oversight.
+- Require additional explanation, architectural rationale, or smaller
+surface-area iteration for complex AI-assisted contributions.
+- Block or restrict contributors who repeatedly submit unvalidated AI-generated
+pull requests.
