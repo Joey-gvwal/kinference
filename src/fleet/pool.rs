@@ -38,8 +38,8 @@ use crate::fleet::discovery::static_config::WorkersFile;
 use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
 use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
 use crate::fleet::models::ModelIndex;
+use crate::fleet::profile::{PickerConfig, PredictorConfig};
 use crate::fleet::workers::WorkerRegistry;
-use crate::router::picker::{PickerConfig, PredictorConfig};
 use crate::router::tokenize::TokenizeMode;
 
 /// `[[profile]]`: a named bundle of routing tuning, shared across worker sets.

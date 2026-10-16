@@ -1,6 +1,6 @@
 use super::*;
 use crate::fleet::pool::ProfileTokenizeConfig;
-use crate::router::picker::{PickerConfig, PredictorConfig};
+use crate::fleet::profile::{PickerConfig, PredictorConfig};
 use crate::router::tokenize::TokenizeMode;
 use kinference_policy::crd::{InferenceWorkerSetSpec, KvEvents, ServiceRef};
 
