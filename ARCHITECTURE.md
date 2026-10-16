@@ -27,9 +27,9 @@ A module belongs to one group. A group is a directory under `src`. Its
 `mod.rs` lists the modules and holds nothing else.
 
 - Fleet, `src/fleet`. Which workers exist and what state they are in.
-  Pools, the worker registry, discovery, eviction, the scrape of engine
-  metrics, the ZMQ ingest of KV-cache events, the in-flight state, and the
-  rollup of the fleet gauges.
+  Pools, the worker registry, discovery, the coordinator that adds and
+  evicts workers, the scrape of engine metrics, the ZMQ ingest of KV-cache
+  events, the in-flight state, and the rollup of the fleet gauges.
 - Router, `src/router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, and
   the mock.
@@ -63,6 +63,7 @@ Today the tree breaks this rule in three places:
 
 | Module | Owns |
 | --- | --- |
+| `fleet::coordinator` | the worker lifecycle: the loop that takes discovery and eviction events, add, evict and drop, and the pool hooks that start and stop a pool's discovery |
 | `fleet::discovery` | the `Discovery` trait, static workers, and the Kubernetes EndpointSlice watch |
 | `fleet::eviction` | the channel that asks the coordinator to drop a worker |
 | `fleet::inflight` | per-endpoint picks not yet observed, and prefixes dispatched but not yet in the KV index |
@@ -89,7 +90,7 @@ Today the tree breaks this rule in three places:
 | `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | our own Prometheus families and their registry |
-| `server` | `run`: config, wiring, shutdown, and the fleet coordinator |
+| `server` | `run`: config, wiring and shutdown |
 | `version` | the build version string |
 
 `src/bin/compute_hash.rs` is a developer tool, not a module of the crate.
