@@ -200,7 +200,7 @@ pub fn shared(ttl: Duration) -> Arc<PendingObservations> {
 pub struct RequestMeta {
     pub model: String,
     pub qos: Qos,
-    /// Tenant from the `Pick` request, raw; `crate::metrics` applies the
+    /// Tenant from the `Pick` request, raw; `crate::router::metrics` applies the
     /// allowlist. Empty buckets under the default label.
     pub tenant: String,
     /// Whether the request asked for a streaming response.

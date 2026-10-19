@@ -29,13 +29,14 @@ A module belongs to one group. A group is a directory under `src`. Its
 - Fleet, `src/fleet`. Which workers exist and what state they are in.
   Pools, the worker registry, discovery, the coordinator that adds and
   evicts workers, the scrape of engine metrics, the ZMQ ingest of KV-cache
-  events, the in-flight state, and the collector behind the fleet gauges.
+  events, the in-flight state, the collector behind the fleet gauges, and
+  the fleet's own metric families.
 - Router, `src/router`. The request path. The service, scoring, the
-  picker, the body store, the tokenizer, observations, the gRPC glue, and
-  the mock.
+  picker, the body store, the tokenizer, observations, the gRPC glue, the
+  mock, and the request-path metric families.
 - Controller, `src/controller`. The Kubernetes control plane. The CRD
   watch and its snapshot, the status and binding writers, the worker-set
-  reconcile, and leader election.
+  reconcile, leader election, and the control plane's metric families.
 - Operator surface, the top of `src`. Config, wiring, the admin
   listener, the Prometheus exposition, and the version string.
 
@@ -50,12 +51,10 @@ Imports point down, never up or sideways:
   router.
 - The operator surface imports all of the above.
 
-Today the tree breaks this rule in three places:
+Today the tree breaks this rule in two places:
 
 - The router imports the controller's policy store to read the snapshot.
   #49 moves the snapshot holder into `kinference-policy`.
-- Every group records into the one `metrics` struct at the top. #40 gives
-  each group its own families.
 - Two pairs inside the router import each other: `service` and
   `observations` (#45), and `service` and `tokenize_client` (#44).
 
@@ -69,6 +68,7 @@ Today the tree breaks this rule in three places:
 | `fleet::gauges` | the Prometheus collector for the fleet gauges: worker health and saturation computed at gather, the index size from a tree dump at most once every 10s |
 | `fleet::inflight` | per-endpoint picks not yet observed, and prefixes dispatched but not yet in the KV index |
 | `fleet::ingest` | the ZMQ KV-event listener per worker, replay, and block-size checks |
+| `fleet::metrics` | `FleetMetrics`, the fleet's Prometheus families, and the helpers every group registers its families with |
 | `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
@@ -77,6 +77,7 @@ Today the tree breaks this rule in three places:
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
 | `router::local_tokenize` | the in-process tokenizer registry: tokenizers, chat templates, and the warm-up that follows the model index |
+| `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `[metrics]` config |
 | `router::mock` | the deterministic `Picker` used in mock mode |
 | `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
@@ -86,10 +87,11 @@ Today the tree breaks this rule in three places:
 | `router::tokenize` | HTTP `/render` helpers |
 | `router::tokenize_client` | `/render` with local fallback and compare mode, as methods on the service |
 | `controller::leader` | Lease-based leader election |
+| `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
 | `controller::policy` | the CRD watch and snapshot, the status writer, the binding writer, the worker-set reconcile |
 | `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
-| `metrics` | our own Prometheus families and their registry |
+| `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
 | `server` | `run`: config, wiring and shutdown |
 | `version` | the build version string |
 
@@ -102,8 +104,9 @@ Today the tree breaks this rule in three places:
   The picker stays pure: it takes inputs that are already fetched.
 - A new RPC or proto field. `proto/kinference.proto`, then
   `router::grpc` maps it to a service call. No logic in `grpc`.
-- A new metric. Register it in `metrics`. Record it where the event
-  happens.
+- A new metric. Add it to the metrics struct of the group where the
+  event happens, through the helpers in `fleet::metrics`. Record it there.
+  The server only lends the registry and renders it.
 - A new config setting. The config struct of the subsystem that reads
   it, next to that code. Validate it in `config`. Give it a type, not a
   raw string. Read the environment only in `config`, at startup.

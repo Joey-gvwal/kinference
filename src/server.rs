@@ -11,15 +11,18 @@ use tonic::transport::Server;
 
 use crate::config::Config;
 use crate::controller::leader;
+use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use crate::fleet::discovery::{DiscoveryMode, kubernetes::KubeDiscovery};
+use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;
 use crate::fleet::scrape::MetricsRegistry;
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::router::body_store;
 use crate::router::local_tokenize;
+use crate::router::metrics::RouterMetrics;
 use crate::router::mock::MockKinferenceService;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
@@ -128,9 +131,12 @@ pub async fn run() -> Result<()> {
             .await
     } else {
         let metrics = Arc::new(MetricsRegistry::new());
-        // Prometheus registry, shared by the gRPC handlers and the admin
-        // listener's `/metrics`.
-        let prom = Arc::new(metrics::PromMetrics::with_config(&cfg.metrics));
+        // One Prometheus registry; each group registers its families, and
+        // the admin listener renders it on `/metrics`.
+        let registry = metrics::registry();
+        let router_prom = Arc::new(RouterMetrics::new(&registry, &cfg.metrics));
+        let fleet_prom = Arc::new(FleetMetrics::new(&registry));
+        let controller_prom = Arc::new(ControllerMetrics::new(&registry));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
         let ingest_cfg = cfg.ingest;
@@ -284,7 +290,7 @@ pub async fn run() -> Result<()> {
                 cancel: cancel.clone(),
                 kube_client,
                 metrics: metrics.clone(),
-                prom: prom.clone(),
+                prom: fleet_prom,
                 models: models.clone(),
             },
             WorkerTaskSettings {
@@ -339,7 +345,7 @@ pub async fn run() -> Result<()> {
                 cfg.profiles.clone(),
                 pool_manager,
                 rejection_store.clone(),
-                prom.clone(),
+                controller_prom.clone(),
             );
             let cancel = cancel.clone();
             tokio::spawn(async move { watcher.run(client, cancel).await });
@@ -370,14 +376,14 @@ pub async fn run() -> Result<()> {
             let dash_pools = pool_registry.clone();
             let dash_policy = policy_store_cell.clone();
             let dash_metrics = metrics.clone();
-            let dash_prom = prom.clone();
+            let dash_registry = registry.clone();
             let dash_cancel = cancel.clone();
             tokio::spawn(async move {
                 if let Err(err) = admin::serve(
                     dash_addr,
                     dash_pools,
                     dash_policy,
-                    dash_prom,
+                    dash_registry,
                     dash_metrics,
                     dash_cancel,
                 )
@@ -481,7 +487,7 @@ pub async fn run() -> Result<()> {
                 metrics.clone(),
                 provider_health.clone(),
                 leader_rx.clone(),
-                prom.clone(),
+                controller_prom.clone(),
                 cancel.clone(),
             )
             .await?;
@@ -525,7 +531,7 @@ pub async fn run() -> Result<()> {
             provider_health,
             body_idle_timeout,
             observation_sink,
-            prom.clone(),
+            router_prom,
         ));
 
         // Body-buffer reaper, separate from the observation sweep since the TTLs
@@ -533,7 +539,6 @@ pub async fn run() -> Result<()> {
         // window) and refreshes the occupancy gauges.
         {
             let service = service.clone();
-            let prom = prom.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -543,7 +548,7 @@ pub async fn run() -> Result<()> {
                         _ = interval.tick() => {
                             let (reaped, bytes) = service.sweep_expired_bodies();
                             if reaped > 0 {
-                                prom.record_bodies_reaped(reaped as u64);
+                                service.prom.record_bodies_reaped(reaped as u64);
                                 tracing::debug!(
                                     reaped,
                                     bytes,
@@ -551,7 +556,7 @@ pub async fn run() -> Result<()> {
                                 );
                             }
                             let (entries, in_use) = service.body_store.stats();
-                            prom.set_body_buffer(entries as u64, in_use);
+                            service.prom.set_body_buffer(entries as u64, in_use);
                         }
                     }
                 }

@@ -21,11 +21,11 @@ use crate::fleet::discovery::{
 };
 use crate::fleet::eviction::{self, EvictionReason};
 use crate::fleet::ingest::{self, IngestConfig};
+use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool::{Pool, PoolHooks, PoolSpec};
 use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::fleet::workers::{ServedModelsVerdict, WorkerEntry};
-use crate::metrics::PromMetrics;
 
 /// Shared handles, built once in `server`.
 pub struct Handles {
@@ -35,7 +35,7 @@ pub struct Handles {
     /// needs it or credentials were unavailable at startup.
     pub kube_client: Option<kube::Client>,
     pub metrics: Arc<MetricsRegistry>,
-    pub prom: Arc<PromMetrics>,
+    pub prom: Arc<FleetMetrics>,
     pub models: Arc<ModelIndex>,
 }
 
@@ -64,7 +64,7 @@ pub struct Coordinator {
     cancel: CancellationToken,
     kube_client: Option<kube::Client>,
     metrics: Arc<MetricsRegistry>,
-    prom: Arc<PromMetrics>,
+    prom: Arc<FleetMetrics>,
     models: Arc<ModelIndex>,
     settings: WorkerTaskSettings,
     /// Each pool runs its own discovery; a per-pool forwarder tags its

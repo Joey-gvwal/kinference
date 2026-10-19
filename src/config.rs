@@ -14,7 +14,7 @@ use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode};
 use crate::fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use crate::fleet::pool::PoolSpec;
 use crate::fleet::profile::ProfileConfig;
-use crate::metrics::MetricsConfig;
+use crate::router::metrics::MetricsConfig;
 use crate::router::tokenize_client::TokenizeConfig;
 
 #[allow(dead_code)]
@@ -94,7 +94,7 @@ pub struct Config {
     pub tokenize: TokenizeConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
-    /// Labelling of the metrics kinference *publishes* (`crate::metrics`). Not to
+    /// Labelling of the metrics kinference *publishes* (`crate::router::metrics`). Not to
     /// be confused with `metrics_poll_ms` and friends, which concern scraping
     /// the engines.
     #[serde(default)]

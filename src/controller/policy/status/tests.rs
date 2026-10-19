@@ -603,9 +603,17 @@ fn last_transition_time_moves_when_the_condition_flips() {
 /// A `StatusWriter` whose client is never used. Needs a runtime, since
 /// `kube::Client::try_from` spawns a tower buffer worker.
 fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
+    writer_with_leader_and_registry(leader).0
+}
+
+/// As [`writer_with_leader`], plus the registry its metrics render through.
+fn writer_with_leader_and_registry(
+    leader: bool,
+) -> ((StatusWriter, watch::Sender<bool>), prometheus::Registry) {
     let cfg = kube::Config::new("http://127.0.0.1:1".parse().unwrap());
     let client = kube::Client::try_from(cfg).expect("dummy client");
     let (tx, rx) = watch::channel(leader);
+    let registry = prometheus::Registry::new();
     let w = StatusWriter::new(
         client,
         crate::controller::policy::store::PolicyStore::new(),
@@ -614,9 +622,20 @@ fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
         Arc::new(MetricsRegistry::new()),
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         rx,
-        Arc::new(crate::metrics::PromMetrics::new()),
+        Arc::new(crate::controller::metrics::ControllerMetrics::new(
+            &registry,
+        )),
     );
-    (w, tx)
+    ((w, tx), registry)
+}
+
+fn render(registry: &prometheus::Registry) -> String {
+    use prometheus::Encoder as _;
+    let mut buf = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&registry.gather(), &mut buf)
+        .unwrap();
+    String::from_utf8(buf).unwrap()
 }
 
 /// A recreated object (new UID) misses the cache, even with identical status.
@@ -691,18 +710,18 @@ async fn promotion_drops_the_last_written_cache_so_status_is_re_asserted() {
 /// store is never listed, so no reconcile clears the gauge instead.
 #[tokio::test]
 async fn demotion_withdraws_the_policy_warning_counts() {
-    let (w, tx) = writer_with_leader(true);
+    let ((w, tx), registry) = writer_with_leader_and_registry(true);
     let prom = w.prom.clone();
     // Stand in for "we published these while we were leader".
     prom.set_policy_warnings(&[("infra/routing".into(), "UnknownBackend", 2)]);
-    assert!(prom.render().contains("kinference_policy_warnings{"));
+    assert!(render(&registry).contains("kinference_policy_warnings{"));
 
     let cancel = CancellationToken::new();
     let task = tokio::spawn(w.run(cancel.clone()));
     tx.send(false).expect("the writer holds the receiver");
 
     let cleared = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while prom.render().contains("kinference_policy_warnings") {
+        while render(&registry).contains("kinference_policy_warnings") {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
@@ -713,19 +732,6 @@ async fn demotion_withdraws_the_policy_warning_counts() {
         cleared.is_ok(),
         "a demoted replica must stop exporting policy warning counts"
     );
-}
-
-/// A follower's leader gauge is present at 0, not absent. `spawn` seeds it.
-#[test]
-fn leader_gauge_distinguishes_follower_from_absent() {
-    let prom = crate::metrics::PromMetrics::new();
-    prom.set_leader(false);
-    assert!(
-        prom.render().contains("kinference_leader "),
-        "gauge must be present at 0"
-    );
-    prom.set_leader(true);
-    assert!(prom.render().contains("kinference_leader 1"));
 }
 
 /// Emptying a status list must be expressible on the wire.

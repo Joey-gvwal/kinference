@@ -270,7 +270,7 @@ pub struct WorkerSetWatcher {
     /// The current generation's store. Rebuilt with the watch.
     store: Option<reflector::Store<InferenceWorkerSet>>,
     rejection_store: std::sync::Arc<RejectionStore>,
-    prom: std::sync::Arc<crate::metrics::PromMetrics>,
+    prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
 }
 
 impl WorkerSetWatcher {
@@ -281,7 +281,7 @@ impl WorkerSetWatcher {
         profiles: Vec<ProfileConfig>,
         manager: crate::fleet::pool::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,
-        prom: std::sync::Arc<crate::metrics::PromMetrics>,
+        prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
     ) -> Self {
         Self {
             namespace: kube_cfg.namespace.clone(),

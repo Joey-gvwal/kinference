@@ -993,24 +993,24 @@ use tower::ServiceExt;
 /// exposes, so a test can read `/metrics` the way a scraper does.
 fn admin_router(
     policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
-) -> (axum::Router, Arc<PromMetrics>) {
+) -> (axum::Router, prometheus::Registry) {
     app_with(policy, PoolRegistry::new())
 }
 
 fn app_with(
     policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     pools: Arc<PoolRegistry>,
-) -> (axum::Router, Arc<PromMetrics>) {
+) -> (axum::Router, prometheus::Registry) {
     let metrics = Arc::new(crate::fleet::scrape::MetricsRegistry::new());
-    let prom = Arc::new(PromMetrics::new());
+    let registry = metrics::registry();
     let state = AppState {
         pools: pools.clone(),
         policy: policy.clone(),
-        prom: prom.clone(),
-        gauges: FleetGauges::new(pools.clone(), metrics.clone(), prom.registry()),
+        registry: registry.clone(),
+        gauges: FleetGauges::new(pools.clone(), metrics.clone(), &registry),
         policy_api: policy_api::PolicyApiState::new(policy, pools, metrics),
     };
-    (router(state), prom)
+    (router(state), registry)
 }
 
 async fn call(

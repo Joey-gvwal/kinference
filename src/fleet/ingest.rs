@@ -3,7 +3,7 @@
 //! One [`spawn_worker_listener`] task per worker. Each task owns its sockets,
 //! parses vLLM's wire-format events through `dynamo_kv_router::zmq_wire`, and
 //! feeds them into the shared [`KvIndexer`] (radix tree) and our bookkeeping
-//! ([`InflightPrefixes`], [`PromMetrics`], [`WorkerRegistry`]) in
+//! ([`InflightPrefixes`], [`FleetMetrics`], [`WorkerRegistry`]) in
 //! [`apply_frame`].
 //!
 //! Modelled after dynamo's `standalone_indexer` listener
@@ -34,8 +34,8 @@ use tokio_util::sync::CancellationToken;
 use crate::fleet::discovery::WorkerConfig;
 use crate::fleet::eviction::{EvictionReason, EvictionRequest, EvictionTx};
 use crate::fleet::inflight::InflightPrefixes;
+use crate::fleet::metrics::{FleetMetrics, IngestEvent};
 use crate::fleet::workers::WorkerRegistry;
-use crate::metrics::{IngestEvent, PromMetrics};
 
 /// Per-recv DEALER timeout, keeping the replay loop responsive.
 const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;
@@ -84,7 +84,7 @@ pub fn spawn_worker_listener(
     ingest: IngestConfig,
     endpoint_key: String,
     indexer: Arc<KvIndexer>,
-    prom: Arc<PromMetrics>,
+    prom: Arc<FleetMetrics>,
     inflight_prefixes: Arc<InflightPrefixes>,
     workers: Arc<WorkerRegistry>,
     eviction_tx: EvictionTx,
@@ -286,7 +286,7 @@ async fn run_listener(
     ingest: &IngestConfig,
     endpoint_key: &str,
     indexer: Arc<KvIndexer>,
-    prom: Arc<PromMetrics>,
+    prom: Arc<FleetMetrics>,
     inflight_prefixes: Arc<InflightPrefixes>,
     workers: Arc<WorkerRegistry>,
     eviction_tx: EvictionTx,
@@ -450,7 +450,7 @@ async fn handle_observation(
     replay: Option<&mut ZmqSocket>,
     replay_wall_budget: Duration,
     indexer: &KvIndexer,
-    prom: &PromMetrics,
+    prom: &FleetMetrics,
     inflight_prefixes: &InflightPrefixes,
     endpoint_key: &str,
     worker_id_num: u64,
@@ -563,7 +563,7 @@ async fn replay_gap(
     replay_wall_budget: Duration,
     state: &mut ListenerState,
     indexer: &KvIndexer,
-    prom: &PromMetrics,
+    prom: &FleetMetrics,
     inflight_prefixes: &InflightPrefixes,
     endpoint_key: &str,
     worker_id_num: u64,
@@ -739,7 +739,7 @@ fn parse_seq_payload(msg: &[Vec<u8>]) -> Option<(u64, &[u8])> {
 async fn apply_frame(
     normalizer: &mut ZmqEventNormalizer,
     indexer: &KvIndexer,
-    prom: &PromMetrics,
+    prom: &FleetMetrics,
     inflight_prefixes: &InflightPrefixes,
     endpoint_key: &str,
     worker_id_num: u64,

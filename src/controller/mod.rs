@@ -2,4 +2,5 @@
 //! worker-set reconcile and leader election.
 
 pub mod leader;
+pub mod metrics;
 pub mod policy;

@@ -1,6 +1,6 @@
 use super::*;
 use crate::fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
-use crate::metrics::TenantLabels;
+use crate::router::metrics::TenantLabels;
 
 #[test]
 fn config_without_worker_sets_fails_validate() {
