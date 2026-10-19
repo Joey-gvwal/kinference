@@ -8,6 +8,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::RwLock;
 
 use kinference_policy::PoolId;
+
+use crate::fleet::sync::{read, write};
 use tokio::sync::broadcast;
 
 /// A (model, pool) pair the index did not hold before. A repeat claim sends
@@ -52,7 +54,7 @@ impl ModelIndex {
         // Fast path for the steady state, so concurrent picks aren't blocked by
         // the write lock.
         {
-            let map = self.claims.read().unwrap();
+            let map = read(&self.claims);
             if models
                 .iter()
                 .all(|m| map.get(m).is_some_and(|set| set.contains(&pool_id)))
@@ -62,7 +64,7 @@ impl ModelIndex {
         }
         let mut added = Vec::new();
         {
-            let mut map = self.claims.write().unwrap();
+            let mut map = write(&self.claims);
             for m in models {
                 if map.entry(m.clone()).or_default().insert(pool_id) {
                     let serving = map[m].len();
@@ -91,7 +93,7 @@ impl ModelIndex {
 
     /// Drop every claim held by `pool_id`, and forget models nobody serves.
     pub fn release(&self, pool_id: PoolId, pool_name: &str) {
-        let mut map = self.claims.write().unwrap();
+        let mut map = write(&self.claims);
         map.retain(|model, set| {
             if !set.remove(&pool_id) {
                 return true;
@@ -111,9 +113,7 @@ impl ModelIndex {
 
     /// Pools serving `model`, in id order. Empty when none has claimed it.
     pub fn pools_for(&self, model: &str) -> Vec<PoolId> {
-        self.claims
-            .read()
-            .unwrap()
+        read(&self.claims)
             .get(model)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default()
@@ -121,7 +121,7 @@ impl ModelIndex {
 
     /// Every model some pool serves.
     pub fn models(&self) -> Vec<String> {
-        self.claims.read().unwrap().keys().cloned().collect()
+        read(&self.claims).keys().cloned().collect()
     }
 }
 

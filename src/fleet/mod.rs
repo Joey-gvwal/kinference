@@ -13,4 +13,5 @@ pub mod models;
 pub mod pool;
 pub mod profile;
 pub mod scrape;
+mod sync;
 pub mod workers;

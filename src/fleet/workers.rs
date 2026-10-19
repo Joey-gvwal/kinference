@@ -36,6 +36,7 @@ pub enum ServedModelsVerdict {
 }
 
 use crate::fleet::discovery::WorkerConfig;
+use crate::fleet::sync::lock;
 
 /// Extract `host:port` from an engine HTTP base URL.
 /// `http://127.0.0.1:8000/` → `127.0.0.1:8000`. Returns `None` if the
@@ -162,14 +163,14 @@ impl WorkerRegistry {
         // Seed by_model from the hint until the first scrape.
         if entry.current_models.is_empty() {
             if let Some(hint) = entry.model_name_hint.as_deref() {
-                let mut by_model = self.by_model.lock().unwrap();
+                let mut by_model = lock(&self.by_model);
                 by_model
                     .entry(hint.to_string())
                     .or_default()
                     .insert(worker_id_num);
             }
         } else {
-            let mut by_model = self.by_model.lock().unwrap();
+            let mut by_model = lock(&self.by_model);
             for m in &entry.current_models {
                 by_model.entry(m.clone()).or_default().insert(worker_id_num);
             }
@@ -190,7 +191,7 @@ impl WorkerRegistry {
             return false;
         }
         {
-            let mut by_model = self.by_model.lock().unwrap();
+            let mut by_model = lock(&self.by_model);
             // Cheap: a fleet serves few distinct models.
             by_model.retain(|_model, set| {
                 set.remove(&worker_id_num);
@@ -198,7 +199,7 @@ impl WorkerRegistry {
             });
         }
         if self.by_num.is_empty() {
-            let mut canonical = self.canonical_models.lock().unwrap();
+            let mut canonical = lock(&self.canonical_models);
             *canonical = None;
         }
         true
@@ -226,7 +227,7 @@ impl WorkerRegistry {
         let new_set: BTreeSet<String> = new_models.iter().cloned().collect();
         // Only a genuine conflict returns early.
         let relation = {
-            let mut canonical = self.canonical_models.lock().unwrap();
+            let mut canonical = lock(&self.canonical_models);
             match canonical.as_ref() {
                 None => {
                     *canonical = Some(new_set.clone());
@@ -260,7 +261,7 @@ impl WorkerRegistry {
         if entry.current_models.is_empty()
             && let Some(hint) = entry.model_name_hint.as_deref()
         {
-            let mut by_model = self.by_model.lock().unwrap();
+            let mut by_model = lock(&self.by_model);
             if let Some(set) = by_model.get_mut(hint) {
                 set.remove(&worker_id_num);
                 if set.is_empty() {
@@ -277,7 +278,7 @@ impl WorkerRegistry {
         let to_add: Vec<String> = new.difference(&old).map(|s| (*s).clone()).collect();
 
         if !to_remove.is_empty() || !to_add.is_empty() {
-            let mut by_model = self.by_model.lock().unwrap();
+            let mut by_model = lock(&self.by_model);
             for m in &to_remove {
                 if let Some(set) = by_model.get_mut(m) {
                     set.remove(&worker_id_num);
@@ -299,11 +300,7 @@ impl WorkerRegistry {
     /// How many workers currently serve `model`.
     #[cfg(test)]
     pub fn by_model_len(&self, model: &str) -> usize {
-        self.by_model
-            .lock()
-            .unwrap()
-            .get(model)
-            .map_or(0, |s| s.len())
+        lock(&self.by_model).get(model).map_or(0, |s| s.len())
     }
 
     /// Re-apply a declared model list to every worker in this set, replacing
@@ -317,14 +314,14 @@ impl WorkerRegistry {
     /// `None` means back to endpoint discovery: drop the pin.
     pub fn reset_declared_models(&self, models: Option<&[String]>) -> usize {
         let Some(models) = models else {
-            *self.canonical_models.lock().unwrap() = None;
+            *lock(&self.canonical_models) = None;
             return 0;
         };
         let pinned: BTreeSet<String> = models.iter().cloned().collect();
         // Pin first, so a concurrent scrape is checked against the new list.
-        *self.canonical_models.lock().unwrap() = Some(pinned);
+        *lock(&self.canonical_models) = Some(pinned);
 
-        let mut by_model = self.by_model.lock().unwrap();
+        let mut by_model = lock(&self.by_model);
         let mut touched = 0;
         for mut entry in self.by_num.iter_mut() {
             let num = *entry.key();
@@ -395,7 +392,7 @@ impl WorkerRegistry {
 
     /// Does any worker serve `model_name`?
     pub fn has_model(&self, model_name: &str) -> bool {
-        let by_model = self.by_model.lock().unwrap();
+        let by_model = lock(&self.by_model);
         by_model
             .get(model_name)
             .map(|s| !s.is_empty())
@@ -408,7 +405,7 @@ impl WorkerRegistry {
     /// is unspecified (HashSet → Vec).
     pub fn workers_for_model(&self, model_name: &str) -> Vec<(u64, WorkerEntry)> {
         let nums: Vec<u64> = {
-            let by_model = self.by_model.lock().unwrap();
+            let by_model = lock(&self.by_model);
             match by_model.get(model_name) {
                 None => return Vec::new(),
                 Some(set) => set.iter().copied().collect(),
@@ -421,7 +418,7 @@ impl WorkerRegistry {
 
     /// Distinct model names this registry currently serves.
     pub fn known_models(&self) -> Vec<String> {
-        self.by_model.lock().unwrap().keys().cloned().collect()
+        lock(&self.by_model).keys().cloned().collect()
     }
 
     /// Snapshot of every `(worker_id_num, WorkerEntry)`, as owned clones.

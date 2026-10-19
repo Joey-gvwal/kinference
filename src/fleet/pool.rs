@@ -40,6 +40,7 @@ use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
 use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
+use crate::fleet::sync::{read, write};
 use crate::fleet::workers::WorkerRegistry;
 
 /// A worker set with its profile resolved: everything needed to build a
@@ -154,11 +155,11 @@ impl PoolRegistry {
     }
 
     pub fn snapshot(&self) -> Arc<PoolMap> {
-        self.current.read().expect("pool registry poisoned").clone()
+        read(&self.current).clone()
     }
 
     pub fn publish(&self, map: Arc<PoolMap>) {
-        *self.current.write().expect("pool registry poisoned") = map;
+        *write(&self.current) = map;
         // After the write, so a woken consumer reads the new set rather than
         // racing the one it was told about.
         self.generation.send_modify(|g| *g = g.wrapping_add(1));
