@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::fleet::error::Error;
 use crate::fleet::pool::WorkerContext;
 use crate::fleet::workers::Engine;
-use anyhow::{Context, Result};
 use dashmap::DashMap;
 
 // vLLM and SGLang prefix metric names with `<engine>:`, which
@@ -456,7 +456,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                 tracing::warn!(
                     worker_id = cfg.worker_id_str,
                     http_url,
-                    error = %err,
+                    error = &err as &dyn std::error::Error,
                     "warmup: /v1/models scrape failed; recurring poller will retry"
                 );
             }
@@ -611,7 +611,7 @@ pub fn spawn_metrics_poller(
                             tracing::warn!(
                                 worker_id = cfg.worker_id_str,
                                 http_url,
-                                error = %err,
+                                error = &err as &dyn std::error::Error,
                                 "/v1/models fetch failed; max_model_len + model_ids will stay at last good values (or empty)"
                             );
                             warned_about_models = true;
@@ -664,10 +664,9 @@ pub fn spawn_metrics_poller(
                     samples.by_worker.insert(cfg.worker_id_num, sample);
                 }
                 Err(err) => {
-                    // `{err:#}` prints the full cause chain on one line.
                     tracing::warn!(
                         worker_id = cfg.worker_id_str,
-                        error = %format_args!("{err:#}"),
+                        error = &err as &dyn std::error::Error,
                         "metrics scrape failed; keeping previous sample"
                     );
                 }
@@ -684,20 +683,27 @@ async fn scrape_once(
     worker_id_str: &str,
     first_scrape: bool,
     warned_about_label: &mut bool,
-) -> Result<MetricsSample> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+) -> Result<MetricsSample, Error> {
+    let http = |source| Error::Http {
+        url: url.to_string(),
+        source,
+    };
+    let resp = client.get(url).send().await.map_err(http)?;
     if !resp.status().is_success() {
-        anyhow::bail!("HTTP {}", resp.status());
+        return Err(Error::HttpStatus {
+            url: url.to_string(),
+            status: resp.status(),
+        });
     }
-    let body = resp.text().await.context("read body")?;
+    let body = resp.text().await.map_err(http)?;
     // prometheus-parse rejects colons in metric names.
     let body = body.replace("vllm:", "vllm_").replace("sglang:", "sglang_");
-    let scrape = prometheus_parse::Scrape::parse(body.lines().map(|l| Ok(l.to_owned())))
-        .context("parsing Prometheus body")?;
+    let scrape = prometheus_parse::Scrape::parse(body.lines().map(|l| Ok(l.to_owned()))).map_err(
+        |source| Error::MetricsParse {
+            url: url.to_string(),
+            source,
+        },
+    )?;
 
     if first_scrape {
         let mut names: Vec<&str> = scrape.samples.iter().map(|s| s.metric.as_str()).collect();
@@ -863,15 +869,18 @@ async fn scrape_once(
 async fn fetch_models(
     client: &reqwest::Client,
     http_url: &str,
-) -> Result<(Vec<ModelEntry>, Option<Engine>)> {
+) -> Result<(Vec<ModelEntry>, Option<Engine>), Error> {
     let url = format!("{}/v1/models", http_url.trim_end_matches('/'));
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+    let http = |source| Error::Http {
+        url: url.clone(),
+        source,
+    };
+    let resp = client.get(&url).send().await.map_err(http)?;
     if !resp.status().is_success() {
-        anyhow::bail!("HTTP {}", resp.status());
+        return Err(Error::HttpStatus {
+            url,
+            status: resp.status(),
+        });
     }
     #[derive(serde::Deserialize)]
     struct ModelsResponse {
@@ -884,7 +893,7 @@ async fn fetch_models(
         #[serde(default)]
         owned_by: Option<String>,
     }
-    let body: ModelsResponse = resp.json().await.context("decoding /v1/models response")?;
+    let body: ModelsResponse = resp.json().await.map_err(http)?;
     let detected_engine = body
         .data
         .iter()
