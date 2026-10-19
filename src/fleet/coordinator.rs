@@ -283,29 +283,15 @@ impl Coordinator {
                 .unwrap_or(self.settings.models_refresh_secs)
         };
         spawn_metrics_poller(
-            ctx.cfg.clone(),
+            ctx.clone(),
+            self.metrics.clone(),
             self.settings.poll_ms,
             refresh_secs,
-            self.metrics.clone(),
-            registry.clone(),
-            self.eviction_tx.clone(),
-            ctx.cancel.clone(),
-            ctx.models.clone(),
-            ctx.pool_id,
-            ctx.pool_name.clone(),
         );
 
         // An immediate /v1/models scrape, so the worker is routable without
         // waiting for the periodic tick.
-        spawn_one_shot_warmup(
-            ctx.cfg,
-            self.metrics.clone(),
-            ctx.registry,
-            ctx.eviction_tx,
-            ctx.models,
-            ctx.pool_id,
-            ctx.pool_name,
-        );
+        spawn_one_shot_warmup(ctx, self.metrics.clone());
     }
 
     /// Teardown for both discovery removals and evictions: cancel the

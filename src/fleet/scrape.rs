@@ -1,13 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::fleet::pool::WorkerContext;
+use crate::fleet::workers::Engine;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use kinference_policy::PoolId;
-use tokio_util::sync::CancellationToken;
-
-use crate::fleet::discovery::WorkerConfig;
-use crate::fleet::workers::Engine;
 
 // vLLM and SGLang prefix metric names with `<engine>:`, which
 // prometheus-parse 0.2.5 rejects. The scraped body is rewritten to `vllm_` /
@@ -366,15 +363,16 @@ impl MetricsRegistry {
 /// served models and the detected engine.
 ///
 /// Fire-and-forget: on failure, the periodic refresh catches up.
-pub fn spawn_one_shot_warmup(
-    cfg: WorkerConfig,
-    registry: Arc<MetricsRegistry>,
-    workers: Arc<crate::fleet::workers::WorkerRegistry>,
-    eviction_tx: crate::fleet::eviction::EvictionTx,
-    index: Arc<crate::fleet::models::ModelIndex>,
-    pool_id: PoolId,
-    pool_name: String,
-) {
+pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) {
+    let WorkerContext {
+        cfg,
+        registry: workers,
+        eviction_tx,
+        models: index,
+        pool_id,
+        pool_name,
+        ..
+    } = ctx;
     let Some(http_url) = cfg.http_url.clone() else {
         return; // can't warm up without /v1/models reachability
     };
@@ -450,7 +448,7 @@ pub fn spawn_one_shot_warmup(
                 if let Some(eng) = detected_engine {
                     workers.set_engine(cfg.worker_id_num, eng);
                 }
-                registry
+                samples
                     .models_by_worker
                     .insert(cfg.worker_id_num, ModelsInfo { models });
             }
@@ -466,19 +464,24 @@ pub fn spawn_one_shot_warmup(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Scrape the worker's `/metrics` every `poll_ms` into `samples`, and
+/// refresh its `/v1/models` every `models_refresh_secs`.
 pub fn spawn_metrics_poller(
-    cfg: WorkerConfig,
+    ctx: WorkerContext,
+    samples: Arc<MetricsRegistry>,
     poll_ms: u64,
     models_refresh_secs: u64,
-    registry: Arc<MetricsRegistry>,
-    workers: Arc<crate::fleet::workers::WorkerRegistry>,
-    eviction_tx: crate::fleet::eviction::EvictionTx,
-    cancel: CancellationToken,
-    index: Arc<crate::fleet::models::ModelIndex>,
-    pool_id: PoolId,
-    pool_name: String,
 ) {
+    let WorkerContext {
+        cfg,
+        registry: workers,
+        eviction_tx,
+        models: index,
+        pool_id,
+        pool_name,
+        cancel,
+        ..
+    } = ctx;
     let Some(metrics_url) = cfg.metrics_url.clone() else {
         tracing::info!(
             worker_id = cfg.worker_id_str,
@@ -599,7 +602,7 @@ pub fn spawn_metrics_poller(
                         } else {
                             String::new()
                         };
-                        registry
+                        samples
                             .models_by_worker
                             .insert(cfg.worker_id_num, ModelsInfo { models });
                     }
@@ -633,7 +636,7 @@ pub fn spawn_metrics_poller(
                     first_scrape = false;
                     // Record this scrape and read back the windowed values.
                     if let Some(now) = sample.scraped_at {
-                        let (qm, km) = registry.record_and_compute_means(
+                        let (qm, km) = samples.record_and_compute_means(
                             cfg.worker_id_num,
                             now,
                             sample.waiting,
@@ -641,7 +644,7 @@ pub fn spawn_metrics_poller(
                         );
                         sample.waiting_mean = qm;
                         sample.kv_cache_usage_mean = km;
-                        sample.completion_rate_per_sec = registry.record_and_compute_rate(
+                        sample.completion_rate_per_sec = samples.record_and_compute_rate(
                             cfg.worker_id_num,
                             now,
                             sample.completions_total,
@@ -650,7 +653,7 @@ pub fn spawn_metrics_poller(
                         // precedence over a gauge value, since it uses our
                         // window.
                         if sample.prefix_cache_queries_total > 0 {
-                            sample.prefix_cache_hit_rate = registry.record_and_compute_hit_rate(
+                            sample.prefix_cache_hit_rate = samples.record_and_compute_hit_rate(
                                 cfg.worker_id_num,
                                 now,
                                 sample.prefix_cache_hits_total,
@@ -658,7 +661,7 @@ pub fn spawn_metrics_poller(
                             );
                         }
                     }
-                    registry.by_worker.insert(cfg.worker_id_num, sample);
+                    samples.by_worker.insert(cfg.worker_id_num, sample);
                 }
                 Err(err) => {
                     // `{err:#}` prints the full cause chain on one line.
