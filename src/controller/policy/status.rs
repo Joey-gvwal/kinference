@@ -847,22 +847,33 @@ fn cache_key(kind: &'static str, ns: &str, name: &str, uid: Option<&str>) -> Cac
     )
 }
 
+/// The live state the status writer reads, built once in `server`.
+pub struct StatusHandles {
+    pub store: Arc<PolicyStore>,
+    pub pools: Arc<crate::fleet::pool::PoolRegistry>,
+    /// Worker sets that produced no pool, which appear in no `PolicyIndex`.
+    pub rejections: Arc<super::worker_sets::RejectionStore>,
+    pub metrics: Arc<MetricsRegistry>,
+    /// Caller-reported provider health, the only source for a provider's
+    /// status.
+    pub provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
+    /// Whether this replica may write. Always `true` when leader election is
+    /// disabled.
+    pub leader: watch::Receiver<bool>,
+    pub prom: Arc<crate::controller::metrics::ControllerMetrics>,
+}
+
 /// Patches status onto the CRDs, on a tick, only when something changed.
 pub struct StatusWriter {
     client: kube::Client,
     store: Arc<PolicyStore>,
     pools: Arc<crate::fleet::pool::PoolRegistry>,
-    /// Worker sets that produced no pool, which appear in no `PolicyIndex`.
     rejections: Arc<super::worker_sets::RejectionStore>,
     metrics: Arc<MetricsRegistry>,
-    /// Caller-reported provider health, the only source for a provider's
-    /// status.
     provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
     /// Last status we wrote, per [`cache_key`]. Both the loop-breaker and the
     /// source of stable `lastTransitionTime`s.
     last: Mutex<HashMap<CacheKey, serde_json::Value>>,
-    /// Whether this replica may write. Always `true` when leader election is
-    /// disabled.
     leader: watch::Receiver<bool>,
     prom: Arc<crate::controller::metrics::ControllerMetrics>,
     /// Policy warnings already logged, as `ns/name: warning`, so each is logged
@@ -871,17 +882,16 @@ pub struct StatusWriter {
 }
 
 impl StatusWriter {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        client: kube::Client,
-        store: Arc<PolicyStore>,
-        pools: Arc<crate::fleet::pool::PoolRegistry>,
-        rejections: Arc<super::worker_sets::RejectionStore>,
-        metrics: Arc<MetricsRegistry>,
-        provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-        leader: watch::Receiver<bool>,
-        prom: Arc<crate::controller::metrics::ControllerMetrics>,
-    ) -> Self {
+    pub fn new(client: kube::Client, handles: StatusHandles) -> Self {
+        let StatusHandles {
+            store,
+            pools,
+            rejections,
+            metrics,
+            provider_health,
+            leader,
+            prom,
+        } = handles;
         Self {
             client,
             store,
@@ -1206,36 +1216,15 @@ impl StatusWriter {
 
 /// Build the writer with its own client and spawn it.
 ///
-/// `leader` gates writing; with election disabled, pass a channel set to
-/// `true`.
-#[allow(clippy::too_many_arguments)]
-pub async fn spawn(
-    namespace_hint: Option<&str>,
-    store: Arc<PolicyStore>,
-    pools: Arc<crate::fleet::pool::PoolRegistry>,
-    rejections: Arc<super::worker_sets::RejectionStore>,
-    metrics: Arc<MetricsRegistry>,
-    provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-    leader: watch::Receiver<bool>,
-    prom: Arc<crate::controller::metrics::ControllerMetrics>,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    let _ = namespace_hint;
+/// `handles.leader` gates writing; with election disabled, pass a channel
+/// set to `true`.
+pub async fn spawn(handles: StatusHandles, cancel: CancellationToken) -> anyhow::Result<()> {
     // Honors kubeconfig, like `PolicyWatcher`.
     let cfg = kube::Config::infer().await?;
     let client = kube::Client::try_from(cfg)?;
     // Seed the gauge so a follower reports 0 before its first transition.
-    prom.set_leader(*leader.borrow());
-    let writer = StatusWriter::new(
-        client,
-        store,
-        pools,
-        rejections,
-        metrics,
-        provider_health,
-        leader,
-        prom,
-    );
+    handles.prom.set_leader(*handles.leader.borrow());
+    let writer = StatusWriter::new(client, handles);
     tokio::spawn(async move { writer.run(cancel).await });
     Ok(())
 }
