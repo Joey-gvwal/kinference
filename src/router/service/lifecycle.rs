@@ -585,6 +585,15 @@ impl KinferenceService {
                 );
                 s.matched_blocks = layered.round() as u32;
             }
+            let inputs = crate::router::picker::PickInputs {
+                scores: &scores,
+                predictor: predictor_cfg,
+                picker: picker_cfg,
+                inflight: &inflight_per_worker,
+                inflight_workload: &inflight_workload_per_worker,
+                kv_blocks: &kv_blocks_per_worker,
+                now: score_now,
+            };
 
             // The policy already chose, in step 2c.
             let forced_pick = forced_endpoint.as_deref().and_then(|ep| {
@@ -614,15 +623,7 @@ impl KinferenceService {
 
             let pick_result = match forced_pick {
                 Some(r) => r,
-                None => match crate::router::picker::pick_endpoint(
-                    &scores,
-                    predictor_cfg,
-                    picker_cfg,
-                    &inflight_per_worker,
-                    &inflight_workload_per_worker,
-                    &kv_blocks_per_worker,
-                    score_now,
-                ) {
+                None => match crate::router::picker::pick_endpoint(&inputs) {
                     Some(r) => r,
                     None => {
                         tracing::warn!(
@@ -646,15 +647,9 @@ impl KinferenceService {
                     "pick: score table for req={}\n{}",
                     req_label,
                     crate::router::picker::format_score_table(
-                        &scores,
-                        predictor_cfg,
-                        picker_cfg,
+                        &inputs,
                         expected_overlap_alpha,
                         Some(&chosen.endpoint),
-                        &inflight_per_worker,
-                        &kv_blocks_per_worker,
-                        &inflight_workload_per_worker,
-                        score_now,
                     )
                 );
             }

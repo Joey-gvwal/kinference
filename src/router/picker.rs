@@ -383,21 +383,33 @@ pub struct PickResult<'a> {
     pub replication_fired: bool,
 }
 
+/// Everything one pick scores over. The three slices are parallel to
+/// `scores`.
+#[derive(Clone, Copy)]
+pub struct PickInputs<'a> {
+    pub scores: &'a [WorkerScore],
+    pub predictor: &'a PredictorConfig,
+    pub picker: &'a PickerConfig,
+    /// Per-worker in-flight pick counts, used only as a tie-breaker within
+    /// the top-K pool; zeros when in-flight tracking is disabled.
+    pub inflight: &'a [u32],
+    pub inflight_workload: &'a [Vec<InflightSummary>],
+    /// The raw radix-tree match per worker, before in-flight credit.
+    pub kv_blocks: &'a [u32],
+    pub now: Instant,
+}
+
 /// Pick a worker, or `None` when `scores` is empty.
-///
-/// `inflight`, `inflight_workload` and `kv_blocks_per_worker` are parallel to
-/// `scores`. `inflight` (per-worker in-flight pick counts) is used only as a
-/// tie-breaker within the top-K pool; pass zeros when in-flight tracking is
-/// disabled.
-pub fn pick_endpoint<'a>(
-    scores: &'a [WorkerScore],
-    predictor: &PredictorConfig,
-    picker: &PickerConfig,
-    inflight: &[u32],
-    inflight_workload: &[Vec<InflightSummary>],
-    kv_blocks_per_worker: &[u32],
-    now: Instant,
-) -> Option<PickResult<'a>> {
+pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
+    let PickInputs {
+        scores,
+        predictor,
+        picker,
+        inflight,
+        inflight_workload,
+        kv_blocks,
+        now,
+    } = *inputs;
     if scores.is_empty() {
         return None;
     }
@@ -477,10 +489,7 @@ pub fn pick_endpoint<'a>(
         }
     };
 
-    let final_idx =
-        cache_replication_override(scores, picker, kv_blocks_per_worker, chosen_idx, &scored);
-    // A no-op: both are already used above.
-    let _ = (inflight_workload, now);
+    let final_idx = cache_replication_override(scores, picker, kv_blocks, chosen_idx, &scored);
 
     Some(PickResult {
         worker: &scores[final_idx],
@@ -609,18 +618,20 @@ fn cache_replication_override(
 ///
 /// `q_inflight` only breaks ties in `pick_endpoint`; it isn't part of
 /// `expect_ms`.
-#[allow(clippy::too_many_arguments)]
 pub fn format_score_table(
-    scores: &[WorkerScore],
-    predictor: &PredictorConfig,
-    picker: &PickerConfig,
+    inputs: &PickInputs<'_>,
     expected_overlap_alpha: f32,
     chosen_endpoint: Option<&str>,
-    inflight: &[u32],
-    kv_blocks: &[u32],
-    inflight_workload: &[Vec<InflightSummary>],
-    now: Instant,
 ) -> String {
+    let PickInputs {
+        scores,
+        predictor,
+        picker,
+        inflight,
+        inflight_workload,
+        kv_blocks,
+        now,
+    } = *inputs;
     if scores.is_empty() {
         return String::from("(no workers scored)");
     }

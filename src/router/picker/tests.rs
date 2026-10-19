@@ -32,6 +32,31 @@ fn zero_workload(workers: &[WorkerScore]) -> Vec<Vec<InflightSummary>> {
     vec![Vec::new(); workers.len()]
 }
 
+/// A no-match KV slice parallel to `workers`.
+fn zero_kv_blocks(workers: &[WorkerScore]) -> Vec<u32> {
+    vec![0; workers.len()]
+}
+
+/// The pick inputs over parallel slices a test built, as of now.
+fn inputs<'a>(
+    scores: &'a [WorkerScore],
+    predictor: &'a PredictorConfig,
+    picker: &'a PickerConfig,
+    inflight: &'a [u32],
+    inflight_workload: &'a [Vec<InflightSummary>],
+    kv_blocks: &'a [u32],
+) -> PickInputs<'a> {
+    PickInputs {
+        scores,
+        predictor,
+        picker,
+        inflight,
+        inflight_workload,
+        kv_blocks,
+        now: Instant::now(),
+    }
+}
+
 /// Build a single InflightSummary for use in tests. `dispatched_at`
 /// is `age_ms` before now. `total_at_dispatch` equals `uncached` (fully cold);
 /// see `summary_with_total`.
@@ -53,15 +78,11 @@ fn single_worker_wins_trivially() {
     let picker = PickerConfig::default();
     let workers = vec![make_worker("a:1", 0, 100, 0, 0.0, 0.0)];
     let inflight = zero_inflight(&workers);
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &vec![0; workers.len()],
-        Instant::now(),
-    )
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("a single worker is always pickable");
     assert_eq!(picked.worker.endpoint, "a:1");
 }
@@ -81,15 +102,11 @@ fn higher_overlap_wins() {
         make_worker("hot:1", 999, 1000, 0, 0.0, 0.0), // 1 uncached block
     ];
     let inflight = zero_inflight(&workers);
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &vec![0; workers.len()],
-        Instant::now(),
-    )
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty input picks");
     assert_eq!(picked.worker.endpoint, "hot:1");
 }
@@ -111,18 +128,14 @@ fn cold_tie_with_top_k_min_1_still_spreads() {
         make_worker("c:1", 0, 0, 0, 0.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     let mut seen = std::collections::HashSet::new();
     // 200 samples × 3-way uniform ≈ vanishingly small chance of one being missed.
     for _ in 0..200 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         seen.insert(picked.worker.endpoint.clone());
     }
@@ -150,16 +163,12 @@ fn inflight_breaks_predicted_wait_ties() {
         make_worker("empty:1", 0, 100, 0, 0.0, 0.0),  // inflight = 0
     ];
     let inflight = vec![5, 2, 0];
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     for _ in 0..50 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         assert_eq!(
             picked.worker.endpoint, "empty:1",
@@ -192,16 +201,12 @@ fn tie_tolerance_widens_pool_to_include_near_ties() {
     // :empty:1 has the fewest inflight picks. The other three
     // workers are busier.
     let inflight = vec![0, 1, 1, 2];
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     for _ in 0..50 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         assert_eq!(
             picked.worker.endpoint, "empty:1",
@@ -229,16 +234,12 @@ fn tie_tolerance_zero_keeps_strict_predicted_wait_ordering() {
         make_worker("warm:2", 1, 100, 0, 0.0, 0.0),
     ];
     let inflight = vec![0, 1, 1];
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     for _ in 0..50 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         assert_ne!(
             picked.worker.endpoint, "empty:1",
@@ -267,16 +268,12 @@ fn tie_tolerance_does_not_pull_in_meaningfully_worse_workers() {
         make_worker("fast:2", 0, 100, 0, 100.0, 0.0),
     ];
     let inflight = vec![0, 5, 5];
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     for _ in 0..50 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         assert_ne!(
             picked.worker.endpoint, "slow:1",
@@ -301,17 +298,13 @@ fn inflight_tie_within_a_pool_falls_through_to_random() {
         make_worker("c:1", 0, 0, 0, 0.0, 0.0),
     ];
     let inflight = vec![0, 0, 0];
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     let mut seen = std::collections::HashSet::new();
     for _ in 0..200 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         seen.insert(picked.worker.endpoint.clone());
     }
@@ -342,16 +335,12 @@ fn inflight_does_not_override_predicted_wait() {
     // slow has 0 inflight; fast has 10 inflight. Picker should
     // still pick fast because its predicted_ms is much better.
     let inflight = vec![0, 10];
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     for _ in 0..50 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         assert_eq!(
             picked.worker.endpoint, "fast:1",
@@ -376,16 +365,12 @@ fn pure_argmin_deterministic() {
         make_worker("free:1", 0, 100, 0, 100.0, 0.0),  // no queue, fast decode
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
     for _ in 0..50 {
-        let picked = pick_endpoint(
-            &workers,
-            &predictor,
-            &picker,
-            &inflight,
-            &zero_workload(&workers),
-            &vec![0; workers.len()],
-            Instant::now(),
-        )
+        let picked = pick_endpoint(&inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv,
+        ))
         .expect("non-empty input picks");
         assert_eq!(picked.worker.endpoint, "free:1");
     }
@@ -417,7 +402,7 @@ fn empty_input_returns_none() {
     let predictor = PredictorConfig::default();
     let picker = PickerConfig::default();
     let workers: Vec<WorkerScore> = vec![];
-    assert!(pick_endpoint(&workers, &predictor, &picker, &[], &[], &[], Instant::now()).is_none());
+    assert!(pick_endpoint(&inputs(&workers, &predictor, &picker, &[], &[], &[])).is_none());
 }
 
 #[test]
@@ -438,15 +423,11 @@ fn format_score_table_sorts_by_name_and_marks_chosen() {
     let kv_match = vec![0, 0];
     let workload: Vec<Vec<InflightSummary>> = vec![Vec::new(); 2];
     let table = format_score_table(
-        &workers,
-        &predictor,
-        &picker,
+        &inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv_match,
+        ),
         1.0,
         Some("zeta:1"),
-        &inflight,
-        &kv_match,
-        &workload,
-        Instant::now(),
     );
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
@@ -498,15 +479,11 @@ fn format_score_table_renders_q_wait_and_q_inflight() {
     let kv_match = vec![0];
     let workload: Vec<Vec<InflightSummary>> = vec![vec![summary(42, 100)]];
     let table = format_score_table(
-        &workers,
-        &predictor,
-        &picker,
+        &inputs(
+            &workers, &predictor, &picker, &inflight, &workload, &kv_match,
+        ),
         1.0,
         Some("a:1"),
-        &inflight,
-        &kv_match,
-        &workload,
-        Instant::now(),
     );
     assert!(
         table.contains("q_wait"),
@@ -715,17 +692,7 @@ fn predicted_wait_ms_q_running_term_disappears_past_falloff() {
 fn format_score_table_empty() {
     let predictor = PredictorConfig::default();
     let picker = PickerConfig::default();
-    let table = format_score_table(
-        &[],
-        &predictor,
-        &picker,
-        1.0,
-        None,
-        &[],
-        &[],
-        &[],
-        Instant::now(),
-    );
+    let table = format_score_table(&inputs(&[], &predictor, &picker, &[], &[], &[]), 1.0, None);
     assert_eq!(table, "(no workers scored)");
 }
 
@@ -1186,16 +1153,11 @@ fn replication_disabled_by_threshold_zero() {
         make_worker("cold:2", 0, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     let kv = vec![80_u32, 0, 0];
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     // Should pick warm:1 (cheapest) and *not* swap.
     assert_eq!(picked.worker.endpoint, "warm:1");
@@ -1212,16 +1174,11 @@ fn replication_skipped_when_best_is_cold() {
         make_worker("w:3", 0, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     let kv = vec![0_u32, 0, 0];
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     // No replication; pick is just the normal one. All are tied;
     // any one is fine.
@@ -1239,16 +1196,11 @@ fn replication_skipped_when_already_at_target() {
         make_worker("cold:1", 0, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     let kv = vec![80_u32, 80, 0];
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     // One of the warm workers; not the cold one.
     assert!(
@@ -1270,16 +1222,11 @@ fn replication_fires_within_threshold() {
         make_worker("cold:2", 0, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     let kv = vec![80_u32, 0, 0];
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     // Replication redirected us to a cold worker.
     assert!(
@@ -1302,16 +1249,11 @@ fn replication_skipped_above_threshold() {
         make_worker("cold:2", 0, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     let kv = vec![80_u32, 0, 0];
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     assert_eq!(
         picked.worker.endpoint, "warm:1",
@@ -1336,16 +1278,11 @@ fn replication_skips_about_to_be_warm_candidates() {
         make_worker("cold:2", 0, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     let kv = vec![80_u32, 0, 0]; // cold:1 raw kv = 0 (not committed)
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     // warm:1 (predicted 200ms) wins normally. Replication:
     // - warm_count = 1 (just warm:1; cold:1 has raw kv=0)
@@ -1374,17 +1311,12 @@ fn replication_picks_cheapest_candidate() {
         make_worker("cold:2", 10, 100, 0, 1.0, 0.0),
     ];
     let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
     // raw kv_blocks: warm:1 committed (80), others below threshold.
     let kv = vec![80_u32, 30, 10];
-    let picked = pick_endpoint(
-        &workers,
-        &predictor,
-        &picker,
-        &inflight,
-        &zero_workload(&workers),
-        &kv,
-        Instant::now(),
-    )
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
     .expect("non-empty");
     // Candidates: cold:1 (700ms predicted) and cold:2 (900ms).
     // cold:1 is cheaper → replication picks it.
@@ -1408,15 +1340,14 @@ fn replication_threshold_pct_is_scale_invariant() {
             make_worker("cold:2", 0, total, 0, 1.0, 0.0),
         ];
         let kv = vec![warm_matched, 0, 0];
-        pick_endpoint(
+        pick_endpoint(&inputs(
             &workers,
             predictor,
             picker,
             &zero_inflight(&workers),
             &zero_workload(&workers),
             &kv,
-            Instant::now(),
-        )
+        ))
         .expect("non-empty")
         .worker
         .endpoint
