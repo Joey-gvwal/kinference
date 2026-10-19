@@ -10,23 +10,27 @@ code goes. Change it in the same pull request as any move.
 
 ## Crates
 
-- `kinference`, this crate. The server. Every group below lives here as a
-  directory today.
+- `kinference`, this crate. The server. The router and the controller
+  live here as directories today.
 - `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types and
   pure policy logic. No client and no runtime.
+- `kinference-fleet`, in `crates/kinference-fleet`. Which workers exist
+  and what state they are in. Imports `kinference-policy` only; no `kube`,
+  no `anyhow`.
 - `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
   only.
 
-Target: the fleet, the router and the controller become crates. The server
-crate keeps wiring, config assembly, the admin listener and the metrics
+Target: the router and the controller become crates too. The server crate
+keeps wiring, config assembly, the admin listener and the metrics
 exposition. The plan is #32.
 
 ## Groups
 
-A module belongs to one group. A group is a directory under `src`. Its
-`mod.rs` lists the modules and holds nothing else.
+A module belongs to one group. A group is a directory under `src`, or a
+crate under `crates` once it has moved. Its `mod.rs` or `lib.rs` lists the
+modules and holds nothing else beyond re-exports.
 
-- Fleet, `src/fleet`. Which workers exist and what state they are in.
+- Fleet, `crates/kinference-fleet`. Which workers exist and what state they are in.
   Pools, the worker registry, the discovery trait and static discovery,
   the coordinator that adds and evicts workers, the scrape of engine
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
@@ -61,6 +65,9 @@ Today the tree breaks this rule in two places:
   `observations` (#45), and `service` and `tokenize_client` (#44).
 
 ## Module map
+
+Rows name a module by its group; in code the fleet's are under
+`kinference_fleet::`.
 
 | Module | Owns |
 | --- | --- |
