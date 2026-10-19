@@ -82,18 +82,15 @@ impl KinferenceService {
         let tokens: Vec<u32> = match token_source {
             TokenSource::Direct(t) => t,
             TokenSource::NeedsTokenize(tok_input) => {
-                match self
-                    .render_with_fallback(
-                        pool.tokenize_mode,
-                        pool.tokenize_render_url.as_deref(),
-                        &workers,
-                        model,
-                        tok_input,
-                        raw_body.as_deref(),
-                        req_id,
-                    )
-                    .await
-                {
+                let tok_req = crate::router::tokenize_client::TokenizeRequest {
+                    render_url: pool.tokenize_render_url.as_deref(),
+                    workers: &workers,
+                    model,
+                    input: tok_input,
+                    raw_body: raw_body.as_deref(),
+                    req_id,
+                };
+                match self.render_with_fallback(pool.tokenize_mode, tok_req).await {
                     crate::router::tokenize_client::TokenizeOutcome::Ok(tokens) => tokens,
                     crate::router::tokenize_client::TokenizeOutcome::Unavailable {
                         reason,

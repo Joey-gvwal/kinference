@@ -480,14 +480,15 @@ pub async fn run() -> Result<()> {
             // A conforming gateway won't program a route until the pool reports
             // Accepted=True, so nothing routes until this runs.
             policy::status::spawn(
-                cfg.policy.namespace.as_deref(),
-                store.clone(),
-                pool_registry.clone(),
-                rejection_store.clone(),
-                metrics.clone(),
-                provider_health.clone(),
-                leader_rx.clone(),
-                controller_prom.clone(),
+                policy::status::StatusHandles {
+                    store: store.clone(),
+                    pools: pool_registry.clone(),
+                    rejections: rejection_store.clone(),
+                    metrics: metrics.clone(),
+                    provider_health: provider_health.clone(),
+                    leader: leader_rx.clone(),
+                    prom: controller_prom.clone(),
+                },
                 cancel.clone(),
             )
             .await?;

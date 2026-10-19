@@ -614,18 +614,18 @@ fn writer_with_leader_and_registry(
     let client = kube::Client::try_from(cfg).expect("dummy client");
     let (tx, rx) = watch::channel(leader);
     let registry = prometheus::Registry::new();
-    let w = StatusWriter::new(
-        client,
-        crate::controller::policy::store::PolicyStore::new(),
-        crate::fleet::pool::PoolRegistry::new(),
-        crate::controller::policy::worker_sets::RejectionStore::new(),
-        Arc::new(MetricsRegistry::new()),
-        Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
-        rx,
-        Arc::new(crate::controller::metrics::ControllerMetrics::new(
+    let handles = StatusHandles {
+        store: crate::controller::policy::store::PolicyStore::new(),
+        pools: crate::fleet::pool::PoolRegistry::new(),
+        rejections: crate::controller::policy::worker_sets::RejectionStore::new(),
+        metrics: Arc::new(MetricsRegistry::new()),
+        provider_health: Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
+        leader: rx,
+        prom: Arc::new(crate::controller::metrics::ControllerMetrics::new(
             &registry,
         )),
-    );
+    };
+    let w = StatusWriter::new(client, handles);
     ((w, tx), registry)
 }
 

@@ -70,7 +70,7 @@ Today the tree breaks this rule in two places:
 | `fleet::ingest` | the ZMQ KV-event listener per worker, replay, and block-size checks |
 | `fleet::metrics` | `FleetMetrics`, the fleet's Prometheus families, and the helpers every group registers its families with |
 | `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
-| `fleet::pool` | `Pool`, the runtime instance of one worker set; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
+| `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
