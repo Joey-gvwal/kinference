@@ -6,15 +6,24 @@ use prometheus::{
     Registry, core::Collector,
 };
 
+/// Unwrap a family's construction. Names and label sets are static
+/// literals, so a failure is a typo that every test building the family
+/// catches.
+pub(crate) fn family<C>(built: prometheus::Result<C>) -> C {
+    built.expect("metric names and label sets are static literals")
+}
+
 /// Build a family and register a clone of it, so the returned handle and the
 /// registry share storage.
 fn register<C: Collector + Clone + 'static>(
     registry: &Registry,
-    family: prometheus::Result<C>,
+    built: prometheus::Result<C>,
 ) -> C {
-    family
-        .and_then(|f| registry.register(Box::new(f.clone())).map(|()| f))
-        .expect("metric names are static literals, registered once per registry")
+    let f = family(built);
+    registry
+        .register(Box::new(f.clone()))
+        .expect("each family is registered once per registry");
+    f
 }
 
 pub fn int_counter(registry: &Registry, name: &str, help: &str) -> IntCounter {

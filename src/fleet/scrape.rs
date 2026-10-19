@@ -222,16 +222,19 @@ impl MetricsRegistry {
         // Evict anything older than the window (always keep at least one
         // sample so an idle worker doesn't end up with an empty deque).
         while hist.samples.len() > 1
-            && now.saturating_duration_since(hist.samples.front().unwrap().0)
-                > COMPLETION_RATE_WINDOW
+            && hist
+                .samples
+                .front()
+                .is_some_and(|s| now.saturating_duration_since(s.0) > COMPLETION_RATE_WINDOW)
         {
             hist.samples.pop_front();
         }
         if hist.samples.len() < 2 {
             return 0.0;
         }
-        let (t0, c0) = *hist.samples.front().unwrap();
-        let (t1, c1) = *hist.samples.back().unwrap();
+        let (Some(&(t0, c0)), Some(&(t1, c1))) = (hist.samples.front(), hist.samples.back()) else {
+            return 0.0;
+        };
         let dt = t1.saturating_duration_since(t0).as_secs_f64();
         if dt <= 0.0 {
             return 0.0;
@@ -255,16 +258,20 @@ impl MetricsRegistry {
         let hist = entry.value_mut();
         hist.samples.push_back((now, hits, queries));
         while hist.samples.len() > 1
-            && now.saturating_duration_since(hist.samples.front().unwrap().0)
-                > COMPLETION_RATE_WINDOW
+            && hist
+                .samples
+                .front()
+                .is_some_and(|s| now.saturating_duration_since(s.0) > COMPLETION_RATE_WINDOW)
         {
             hist.samples.pop_front();
         }
         if hist.samples.len() < 2 {
             return 0.0;
         }
-        let (_, h0, q0) = *hist.samples.front().unwrap();
-        let (_, h1, q1) = *hist.samples.back().unwrap();
+        let (Some(&(_, h0, q0)), Some(&(_, h1, q1))) = (hist.samples.front(), hist.samples.back())
+        else {
+            return 0.0;
+        };
         let dh = h1.saturating_sub(h0);
         let dq = q1.saturating_sub(q0);
         if dq == 0 {
@@ -293,8 +300,10 @@ impl MetricsRegistry {
         let hist = entry.value_mut();
         hist.samples.push_back((now, waiting, kv_cache_usage));
         while hist.samples.len() > 1
-            && now.saturating_duration_since(hist.samples.front().unwrap().0)
-                > COMPLETION_RATE_WINDOW
+            && hist
+                .samples
+                .front()
+                .is_some_and(|s| now.saturating_duration_since(s.0) > COMPLETION_RATE_WINDOW)
         {
             hist.samples.pop_front();
         }
