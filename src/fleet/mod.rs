@@ -3,6 +3,7 @@
 
 pub mod coordinator;
 pub mod discovery;
+pub mod error;
 pub mod eviction;
 pub mod gauges;
 pub mod inflight;

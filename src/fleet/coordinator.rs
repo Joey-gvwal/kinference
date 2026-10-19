@@ -19,6 +19,7 @@ use crate::fleet::discovery::{
     Discovery, DiscoveryFactory, DiscoveryMode, WorkerChange, WorkerConfig,
     static_config::StaticDiscovery,
 };
+use crate::fleet::error::Error;
 use crate::fleet::eviction::{self, EvictionReason};
 use crate::fleet::ingest::{self, IngestConfig};
 use crate::fleet::metrics::FleetMetrics;
@@ -363,19 +364,17 @@ impl Coordinator {
 }
 
 impl PoolHooks for Coordinator {
-    fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> anyhow::Result<()> {
+    fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> Result<(), Error> {
         let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
             DiscoveryMode::Static => {
                 let workers = spec.load_static_workers()?;
                 Arc::new(StaticDiscovery::new(workers))
             }
             DiscoveryMode::Kubernetes => {
-                let build = self.kubernetes.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "worker set needs Kubernetes discovery but no in-cluster \
-                         client was built at startup"
-                    )
-                })?;
+                let build = self
+                    .kubernetes
+                    .as_ref()
+                    .ok_or(Error::KubeDiscoveryUnavailable)?;
                 build(spec.discovery.clone())
             }
         };

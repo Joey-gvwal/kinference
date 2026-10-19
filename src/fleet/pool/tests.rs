@@ -152,9 +152,9 @@ struct RecordingHooks {
 }
 
 impl PoolHooks for RecordingHooks {
-    fn on_create(&self, pool: &Arc<Pool>, _spec: &PoolSpec) -> anyhow::Result<()> {
+    fn on_create(&self, pool: &Arc<Pool>, _spec: &PoolSpec) -> Result<(), Error> {
         if self.fail_on.lock().unwrap().as_deref() == Some(pool.name.as_str()) {
-            anyhow::bail!("discovery refused to start");
+            return Err(Error::KubeDiscoveryUnavailable);
         }
         self.created.lock().unwrap().push(pool.name.clone());
         Ok(())

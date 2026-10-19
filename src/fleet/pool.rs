@@ -28,13 +28,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use kinference_policy::{PoolId, PoolKey};
 use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::static_config::WorkersFile;
 use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::fleet::error::Error;
 use crate::fleet::eviction::EvictionTx;
 use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
 use crate::fleet::metrics::FleetMetrics;
@@ -70,7 +70,7 @@ pub struct PoolSpec {
 impl PoolSpec {
     /// Load this set's static workers; empty unless in static mode with a
     /// `workers_file`.
-    pub fn load_static_workers(&self) -> Result<Vec<WorkerConfig>> {
+    pub fn load_static_workers(&self) -> Result<Vec<WorkerConfig>, Error> {
         match (&self.discovery.mode, &self.discovery.workers_file) {
             (DiscoveryMode::Static, Some(p)) => WorkersFile::load(p),
             _ => Ok(Vec::new()),
@@ -329,7 +329,7 @@ pub trait PoolHooks: Send + Sync {
     /// channel.
     ///
     /// On `Err` the pool is not published.
-    fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> anyhow::Result<()>;
+    fn on_create(&self, pool: &Arc<Pool>, spec: &PoolSpec) -> Result<(), Error>;
 
     /// Drop every fleet-wide trace of this pool's workers: metrics samples,
     /// per-worker tasks.
@@ -595,7 +595,7 @@ impl PoolManager {
         if let Err(err) = self.hooks.on_create(&pool, &spec) {
             tracing::error!(
                 workerset = %spec.key,
-                error = %err,
+                error = &err as &dyn std::error::Error,
                 "failed to start this worker set's discovery; not publishing it"
             );
             if resurrected {
