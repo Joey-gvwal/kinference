@@ -20,7 +20,7 @@ use kube::api::{Api, ObjectMeta, PostParams};
 use serde::Deserialize;
 use tokio::sync::watch;
 
-/// `[leader_election]`: elect a single CRD status writer across replicas.
+/// `leader_election`: elect a single CRD status writer across replicas.
 ///
 /// Only status writing is gated; every replica still routes. Two writers that
 /// disagree would overwrite each other's status forever.
@@ -84,7 +84,7 @@ fn default_lease_retry_secs() -> u64 {
     2
 }
 
-/// Timings and identity for one elector, from `[leader_election]`.
+/// Timings and identity for one elector, from `leader_election`.
 ///
 /// `renew_grace < lease_duration` is an invariant, enforced by
 /// `Config::validate_leader_election`: at or above it the holder is always

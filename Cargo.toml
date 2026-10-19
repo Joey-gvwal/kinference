@@ -23,13 +23,11 @@ getrandom = "0.2"
 dynamo-kv-router = { git = "https://github.com/ai-dynamo/dynamo", rev = "12207ba2cb397e40e260d39bce3f65c6fc799a49", default-features = false }
 tokio = "1"
 tokio-util = "0.7"
-toml = "0.8"
 zmq = "0.10"
 reqwest = { version = "0.12", default-features = false }
 dashmap = "6"
 prometheus-parse = "0.2"
 prometheus = { version = "0.13", default-features = false }
-async-trait = "0.1"
 
 [workspace.lints.clippy]
 # Service-facing functions return `tonic::Status` (and `(Status, RejectReason)`)
@@ -59,7 +57,7 @@ tokio-util.workspace = true
 # pulled in directly for clarity.
 tokio-stream = "0.1"
 serde.workspace = true
-toml.workspace = true
+zmq = "0.10"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
@@ -71,8 +69,7 @@ dashmap.workspace = true
 # /metrics endpoint. The scrape side, `prometheus-parse`, is the fleet's.
 prometheus.workspace = true
 axum = "0.7"
-async-trait.workspace = true
-# K8s discovery (`discovery.mode = "kubernetes"`) and the kinference.buoyant.io CRD
+# K8s discovery and the kinference.buoyant.io CRD
 # watch/status writer. Two client-construction policies live in the tree
 # deliberately: `Config::incluster_env()` in `controller::discovery` (kubeconfig
 # is refused there because pod IPs are unroutable from outside the cluster) and

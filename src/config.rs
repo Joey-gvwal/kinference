@@ -11,8 +11,7 @@ use crate::controller::policy::PolicyConfig;
 use crate::controller::policy::worker_sets::KubernetesConfig;
 use crate::router::metrics::MetricsConfig;
 use crate::router::tokenize_client::TokenizeConfig;
-use kinference_fleet::discovery::static_config::WorkersFile;
-use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryMode};
+use kinference_fleet::discovery::DiscoveryConfig;
 use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
@@ -36,7 +35,7 @@ pub struct Config {
     /// engine and `kv_block_size`. Requests are routed by `model` through
     /// the model index; when several sets serve one model, all are
     /// scored (see `service::best_group`). At least one is required unless
-    /// `[kubernetes]` is enabled.
+    /// `kubernetes.enabled` is set.
     #[serde(default, rename = "workerset")]
     pub worker_sets: Vec<WorkerSetConfig>,
     /// Milliseconds between `/metrics` scrapes per worker. Defaults to 1000;
@@ -83,13 +82,9 @@ pub struct Config {
     #[serde(default)]
     pub body_idle_timeout_secs: Option<u64>,
     /// HTTP bind address for the admin listener: `/readyz`, `/metrics` and `/api`.
-    /// Unset disables them. Ignored in mock mode.
+    /// Unset disables them.
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
-    /// Answer with synthetic, deterministic scores: no KV ingest, no scrapes,
-    /// no tokenization. The gRPC surface is unchanged.
-    #[serde(default)]
-    pub mock_mode: bool,
     #[serde(default)]
     pub tokenize: TokenizeConfig,
     #[serde(default)]
@@ -100,7 +95,7 @@ pub struct Config {
     #[serde(default)]
     pub metrics: MetricsConfig,
     /// Derive worker sets from `InferenceWorkerSet` CRs. Independent of
-    /// `[policy].enabled`, so CRD discovery doesn't require CRD routing rules.
+    /// `policy.enabled`, so CRD discovery doesn't require CRD routing rules.
     #[serde(default)]
     pub kubernetes: KubernetesConfig,
     #[serde(default)]
@@ -116,14 +111,14 @@ pub struct Config {
     pub observations_csv: Option<PathBuf>,
 }
 
-/// `[[workerset]]`: one declared worker set. The Kubernetes equivalent is an
+/// A `workerset` entry: one config-declared worker set. The Kubernetes equivalent is an
 /// `InferenceWorkerSet`; both reduce to a [`PoolSpec`].
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkerSetConfig {
     /// Must be unique.
     pub name: String,
-    /// The `[[profile]]` supplying this set's tuning. Required.
+    /// The profile supplying this set's tuning. Required.
     pub profile: String,
     /// KV-cache block size shared by every worker in the set. A worker
     /// reporting a different size is evicted.
@@ -140,39 +135,14 @@ pub struct WorkerSetConfig {
 }
 
 impl Config {
-    /// Load the config file at `path`: JSON when the extension is `.json`,
-    /// TOML otherwise.
-    ///
-    /// JSON exists for the Helm chart, which renders structured values with
-    /// `toJson`. It cannot render TOML: Helm reads every number in
-    /// `values.yaml` as a float64, `toToml` writes `1000` as `1000.0`, and an
-    /// integer field rejects a float. `toJson` writes `1000`. Both formats go
-    /// through the same serde structs, so they accept exactly the same keys.
+    /// Load the JSON config file at `path`, as the Helm chart renders it with
+    /// `toJson`.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let is_json = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
-        let mut cfg: Self = if is_json {
-            serde_json::from_str(&text)
-                .with_context(|| format!("parsing config JSON from {}", path.display()))?
-        } else {
-            toml::from_str(&text)
-                .with_context(|| format!("parsing config TOML from {}", path.display()))?
-        };
-        // Resolve relative `workers_file`s against the config file's directory
-        // rather than the CWD.
-        if let Some(base) = path.parent() {
-            for ws in &mut cfg.worker_sets {
-                if let Some(wf) = ws.discovery.workers_file.as_ref()
-                    && wf.is_relative()
-                {
-                    ws.discovery.workers_file = Some(base.join(wf));
-                }
-            }
-        }
+        let mut cfg: Self = serde_json::from_str(&text)
+            .with_context(|| format!("parsing config from {}", path.display()))?;
         cfg.validate()?;
         cfg.read_env();
         Ok(cfg)
@@ -230,7 +200,7 @@ impl Config {
         Ok(())
     }
 
-    /// Resolve every `[[workerset]]` against its `[[profile]]`. An unknown
+    /// Resolve every `workerset` entry against its profile. An unknown
     /// profile is an error listing the defined ones.
     pub fn pool_specs(&self) -> Result<Vec<PoolSpec>> {
         let by_name: std::collections::HashMap<&str, &ProfileConfig> =
@@ -268,12 +238,11 @@ impl Config {
             .collect()
     }
 
-    /// Validate cross-set invariants. Static workers files are loaded here
-    /// because worker IDs must be unique across all sets, not just within one.
+    /// Validate cross-set invariants.
     fn validate(&self) -> Result<()> {
         if self.worker_sets.is_empty() && !self.kubernetes.enabled {
             anyhow::bail!(
-                "at least one [[workerset]] is required (or set [kubernetes] enabled = true \
+                "at least one workerset is required (or set kubernetes.enabled = true \
                  to derive them from InferenceWorkerSet CRs)"
             );
         }
@@ -281,7 +250,7 @@ impl Config {
             // Every InferenceWorkerSet names a profile, so none could be
             // materialized.
             anyhow::bail!(
-                "[kubernetes] enabled = true but no [[profile]] is defined; every \
+                "kubernetes.enabled = true but no profile is defined; every \
                  InferenceWorkerSet names a profile, so none could be materialized"
             );
         }
@@ -289,7 +258,7 @@ impl Config {
         let mut seen_profiles = std::collections::HashSet::new();
         for p in &self.profiles {
             if p.name.trim().is_empty() {
-                anyhow::bail!("every [[profile]] must have a non-empty `name`");
+                anyhow::bail!("every profile must have a non-empty `name`");
             }
             if !seen_profiles.insert(p.name.clone()) {
                 anyhow::bail!("duplicate profile name: {}", p.name);
@@ -297,8 +266,6 @@ impl Config {
         }
         let specs = self.pool_specs()?;
         let mut seen_set_names = std::collections::HashSet::new();
-        let mut seen_num = std::collections::HashSet::new();
-        let mut seen_str = std::collections::HashSet::new();
         for spec in &specs {
             if spec.name.trim().is_empty() {
                 anyhow::bail!("every workerset must have a non-empty `name`");
@@ -309,61 +276,17 @@ impl Config {
             if spec.kv_block_size == 0 {
                 anyhow::bail!("workerset {}: kv_block_size must be > 0", spec.name);
             }
-            match spec.discovery.mode {
-                DiscoveryMode::Static => {
-                    let Some(wf) = spec.discovery.workers_file.as_ref() else {
-                        anyhow::bail!(
-                            "workerset {}: discovery.mode = \"static\" requires \
-                             discovery.workers_file",
-                            spec.name
-                        );
-                    };
-                    let workers = WorkersFile::load(wf).with_context(|| {
-                        format!("workerset {}: loading workers_file", spec.name)
-                    })?;
-                    for w in &workers {
-                        if !seen_num.insert(w.worker_id_num) {
-                            anyhow::bail!(
-                                "workerset {}: worker_id_num {} is not unique across \
-                                 worker sets (IDs key the fleet-wide metrics \
-                                 registry)",
-                                spec.name,
-                                w.worker_id_num
-                            );
-                        }
-                        if !seen_str.insert(w.worker_id_str.clone()) {
-                            anyhow::bail!(
-                                "workerset {}: worker_id_str {} is not unique across \
-                                 worker sets",
-                                spec.name,
-                                w.worker_id_str
-                            );
-                        }
-                        if !self.mock_mode && w.zmq_endpoint.is_none() {
-                            anyhow::bail!(
-                                "workerset {}: worker {}: zmq_endpoint is required when \
-                                 mock_mode is false",
-                                spec.name,
-                                w.worker_id_str
-                            );
-                        }
-                    }
-                }
-                DiscoveryMode::Kubernetes => {
-                    if spec
-                        .discovery
-                        .service_name
-                        .as_deref()
-                        .unwrap_or("")
-                        .is_empty()
-                    {
-                        anyhow::bail!(
-                            "workerset {}: discovery.mode = \"kubernetes\" requires \
-                             discovery.service_name",
-                            spec.name
-                        );
-                    }
-                }
+            if spec
+                .discovery
+                .service_name
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+            {
+                anyhow::bail!(
+                    "workerset {}: discovery.service_name is required",
+                    spec.name
+                );
             }
         }
         Ok(())

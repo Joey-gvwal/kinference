@@ -1,26 +1,21 @@
 //! Worker discovery layer.
 //!
-//! A `Discovery` is the source of truth for which workers in one worker set
-//! are live. It emits `WorkerChange::{Added, Removed}` events;
+//! A discovery task is the source of truth for which workers in one worker
+//! set are live. It emits `WorkerChange::{Added, Removed}` events;
 //! `fleet::coordinator` registers or unregisters each worker and spawns or
 //! cancels its per-worker tasks.
 //!
-//! Two implementations:
-//! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
-//!   set's `workers_file`, then waits on `cancel`.
-//! - `controller::discovery::KubeDiscovery` watches a Service's
-//!   EndpointSlices and emits `Added`/`Removed` as endpoints become or stop
-//!   being Ready. The server builds it through a [`DiscoveryFactory`], so
-//!   the fleet never holds a Kubernetes client.
+//! The one implementation, `controller::discovery::KubeDiscovery`, watches a
+//! Service's EndpointSlices. The server builds its task through a
+//! [`DiscoveryFactory`], so the fleet never holds a Kubernetes client.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-pub mod static_config;
 
 /// One discovery event, consumed by `fleet::coordinator`.
 // `Added(WorkerConfig)` dwarfs `Removed(u64)`, but discovery events are rare,
@@ -36,47 +31,34 @@ pub enum WorkerChange {
     Removed(u64),
 }
 
-/// A source of worker-membership events. Implementations run as a single
-/// task driven by `tokio::spawn(discovery.run(...))`.
+/// One pool's discovery task: sends `WorkerChange`s on `tx` until `cancel`
+/// fires.
 ///
 /// Contract:
-/// - `run` MUST send an `Added` for each worker it knows about at startup
-///   and any time a previously-removed worker reappears.
-/// - `run` MUST send `Removed(worker_id_num)` exactly once per worker that
-///   leaves the set. Duplicate `Removed` for an unknown worker is
-///   tolerated (the coordinator drops them).
-/// - `run` MUST exit cleanly when `cancel.cancelled()` fires.
-/// - `run` MAY drop events if the channel is full. The coordinator channel
-///   holds 64.
-#[async_trait]
-pub trait Discovery: Send + Sync + 'static {
-    async fn run(
-        self: std::sync::Arc<Self>,
-        tx: mpsc::Sender<WorkerChange>,
-        cancel: CancellationToken,
-    );
-}
+/// - Sends an `Added` for each worker it knows about at startup and any time
+///   a previously-removed worker reappears.
+/// - Sends `Removed(worker_id_num)` exactly once per worker that leaves the
+///   set. A duplicate `Removed` for an unknown worker is tolerated.
+/// - Exits cleanly when `cancel` fires.
+/// - May drop events if the channel is full. The coordinator channel holds 64.
+pub type DiscoveryTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Builds one pool's Kubernetes discovery from its config. The server binds
-/// the in-cluster client once; the fleet never sees `kube`.
-pub type DiscoveryFactory = Arc<dyn Fn(DiscoveryConfig) -> Arc<dyn Discovery> + Send + Sync>;
+/// Builds one pool's discovery task from its config. The server binds the
+/// in-cluster client once; the fleet never sees `kube`.
+pub type DiscoveryFactory = Arc<
+    dyn Fn(DiscoveryConfig, mpsc::Sender<WorkerChange>, CancellationToken) -> DiscoveryTask
+        + Send
+        + Sync,
+>;
 
-/// `[workerset.discovery]`: where a pool's workers come from.
+/// A workerset's `discovery`: where a pool's workers come from.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct DiscoveryConfig {
-    #[serde(default)]
-    pub mode: DiscoveryMode,
-    /// TOML file with a `[[workers]]` array of `WorkerConfig`. Required in
-    /// static mode. Relative paths resolve against the config file's directory.
-    #[serde(default)]
-    pub workers_file: Option<std::path::PathBuf>,
-    /// Namespace of the Service; `None` means all namespaces. Kubernetes mode
-    /// only.
+    /// Namespace of the Service; `None` means all namespaces.
     #[serde(default)]
     pub namespace: Option<String>,
     /// Service fronting the workers. Each Ready endpoint in its EndpointSlices
-    /// becomes a worker, dialed by pod IP, so any Service type works. Required
-    /// in Kubernetes mode.
+    /// becomes a worker, dialed by pod IP, so any Service type works. Required.
     #[serde(default)]
     pub service_name: Option<String>,
     /// `namespace/name` of the owning `InferenceWorkerSet`, for logs only,
@@ -87,8 +69,8 @@ pub struct DiscoveryConfig {
     /// nor a `kinference.buoyant.io/*` annotation.
     #[serde(default)]
     pub defaults: DiscoveryDefaults,
-    /// Explicit ports from an `InferenceWorkerSet`. Always empty for TOML
-    /// worker sets.
+    /// Explicit ports from an `InferenceWorkerSet`. Always empty for
+    /// config-declared worker sets.
     #[serde(skip)]
     pub ports: PortRefs,
 }
@@ -152,55 +134,33 @@ fn default_zmq_port() -> u16 {
     5557
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DiscoveryMode {
-    /// Workers listed in `discovery.workers_file`.
-    #[default]
-    Static,
-    /// Workers from the EndpointSlices of `discovery.service_name`.
-    Kubernetes,
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkerConfig {
     pub worker_id_str: String,
     pub worker_id_num: u64,
-    /// ZMQ PUB endpoint for KV-cache events. Required unless `mock_mode`.
-    #[serde(default)]
+    /// ZMQ PUB endpoint for KV-cache events. `None` when the set declares no
+    /// KV events.
     pub zmq_endpoint: Option<String>,
     /// DEALER endpoint for replaying event history from seq=0 at startup.
-    #[serde(default)]
     pub replay_endpoint: Option<String>,
     /// The engine's Prometheus `/metrics` URL.
-    #[serde(default)]
     pub metrics_url: Option<String>,
     /// Base URL (no path) of the engine's OpenAI-compatible API, used for
     /// scrapes and tokenization, and as the fallback for `endpoint`.
-    #[serde(default)]
     pub http_url: Option<String>,
     /// Routable `ip:port` returned to clients (`WorkerScore.endpoint` and
     /// `x-gateway-destination-endpoint`). Takes precedence over `http_url`'s
     /// `host:port`; needed when `http_url` uses a hostname, since the gateways
     /// don't resolve names here.
-    #[serde(default)]
     pub endpoint: Option<String>,
     pub model_name: String,
 
-    // Placement metadata, emitted by aws-harness's gen-monitor-config.sh. Not
-    // used yet.
-    #[serde(default)]
+    // Placement metadata. Not used yet.
     pub pod_name: Option<String>,
-    #[serde(default)]
     pub namespace: Option<String>,
-    #[serde(default)]
     pub node_name: Option<String>,
-    #[serde(default)]
     pub node_ip: Option<String>,
-    #[serde(default)]
     pub pod_ip: Option<String>,
-    #[serde(default)]
     pub availability_zone: Option<String>,
-    #[serde(default)]
     pub instance_type: Option<String>,
 }

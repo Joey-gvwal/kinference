@@ -344,7 +344,7 @@ pub struct KinferenceService {
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
     /// See [`crate::router::body_store`].
     pub(crate) body_store: Arc<crate::router::body_store::BodyStore>,
-    /// CRD-sourced routing policy, when `[policy] enabled = true`. When `None`,
+    /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
     pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     /// What the caller has reported back about off-cluster destinations.

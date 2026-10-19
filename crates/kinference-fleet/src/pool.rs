@@ -1,7 +1,7 @@
 //! A `Pool` is the runtime state of exactly one worker set: what a scoring
 //! decision consults and commits into.
 //!
-//! A worker set is declared as an `InferenceWorkerSet` or in TOML, both
+//! A worker set is declared as an `InferenceWorkerSet` or in the config, both
 //! resolve to a `PoolSpec`, and a `Pool` is built from that: a radix tree at
 //! one block size, the worker registry that populates it, the inflight
 //! bookkeeping that must stay consistent with both, and the lock that
@@ -32,8 +32,7 @@ use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use kinference_policy::{PoolId, PoolKey};
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::static_config::WorkersFile;
-use crate::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::discovery::{DiscoveryConfig, WorkerConfig};
 use crate::error::Error;
 use crate::eviction::EvictionTx;
 use crate::inflight::{InflightPrefixes, InflightRegistry};
@@ -44,7 +43,7 @@ use crate::sync::{read, write};
 use crate::workers::WorkerRegistry;
 
 /// A worker set with its profile resolved: everything needed to build a
-/// `pool::Pool`, whether declared in TOML or by an `InferenceWorkerSet`.
+/// `pool::Pool`, whether declared in the config or by an `InferenceWorkerSet`.
 ///
 /// Reconciles compare specs with `PartialEq` to decide whether a pool needs
 /// updating, and to decide whether a retired pool can be resurrected.
@@ -66,17 +65,6 @@ pub struct PoolSpec {
     /// A fixed model list (`spec.modelDiscovery.mode: Static`); `/v1/models`
     /// is not polled. Lets engines that don't serve `/v1/models` be routable.
     pub static_models: Option<Vec<String>>,
-}
-
-impl PoolSpec {
-    /// Load this set's static workers; empty unless in static mode with a
-    /// `workers_file`.
-    pub fn load_static_workers(&self) -> Result<Vec<WorkerConfig>, Error> {
-        match (&self.discovery.mode, &self.discovery.workers_file) {
-            (DiscoveryMode::Static, Some(p)) => WorkersFile::load(p),
-            _ => Ok(Vec::new()),
-        }
-    }
 }
 
 /// An immutable view of the fleet's pools.
@@ -178,10 +166,10 @@ pub struct Pool {
     /// The declaration this pool came from, stable across restarts and matched
     /// on by reconciles. See [`PoolKey`].
     pub key: PoolKey,
-    /// Operator-facing name (from `[[workerset]].name`, or the
+    /// Operator-facing name (from the `workerset` entry's `name`, or the
     /// `InferenceWorkerSet`'s). Unique across the fleet.
     pub name: String,
-    /// The `[[profile]]` this pool's tuning came from, carried into the
+    /// The profile this pool's tuning came from, carried into the
     /// observation CSV.
     pub profile: String,
     /// KV-cache hash block size for every worker in this pool.
@@ -325,7 +313,7 @@ pub struct WorkerContext {
 /// (discovery, the coordinator channel). Implemented by
 /// `fleet::coordinator::Coordinator`.
 pub trait PoolHooks: Send + Sync {
-    /// Start everything that feeds a new pool: its `Discovery` task and the
+    /// Start everything that feeds a new pool: its discovery task and the
     /// forwarder that tags its `WorkerChange`s onto the shared coordinator
     /// channel.
     ///
@@ -683,7 +671,7 @@ pub fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool> {
     ))
 }
 
-/// A minimal static spec shared by tests that need a `Pool`.
+/// A minimal spec shared by tests that need a `Pool`.
 #[cfg(any(test, feature = "test-util"))]
 pub fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
     PoolSpec {

@@ -48,7 +48,7 @@ use kinference_fleet::models::ModelClaim;
 use kinference_fleet::pool::{Pool, PoolRegistry};
 use kinference_fleet::profile::TokenizeMode;
 
-/// `[tokenize.local]`. See `src/router/local_tokenize.rs`.
+/// `tokenize.local`. See `src/router/local_tokenize.rs`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalTokenizeConfig {

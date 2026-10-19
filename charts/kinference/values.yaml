@@ -87,8 +87,8 @@ extension:
   qos: ""
 
 # The kinference config. The chart renders it to JSON (config.json in the
-# ConfigMap, read with --config). Keys are those of the TOML config file
-# (src/config.rs), with TOML sections written here as nested maps.
+# ConfigMap, read with --config). Keys are those of the config struct
+# (src/config.rs).
 #
 # Derived by the chart, so NOT set here:
 #   - listen / admin_listen: from service.grpcPort / service.adminPort.
@@ -167,8 +167,8 @@ config:
       tokenize:
         mode: local
 
-  # Static or EndpointSlice-discovered worker sets, in addition to the ones
-  # [kubernetes] derives from InferenceWorkerSet CRs. None by default.
+  # EndpointSlice-discovered worker sets, in addition to the ones
+  # `kubernetes` derives from InferenceWorkerSet CRs. None by default.
   workersets: {}
 
   policy:
@@ -187,15 +187,3 @@ config:
       http_port: 8000
       zmq_port: 5557
       replay_port: 5558
-
-# An alternative to `config`: a complete kinference TOML config, the same
-# file kinference reads when run outside Kubernetes. Use it to share one
-# config file across deployments, or to keep its comments and layout, e.g.
-# --set-file configFile=my.toml. When set, it is used verbatim and `config`
-# is ignored.
-#
-# Nothing is derived into it, so keep its listen/admin_listen ports,
-# namespaces and extension name in line with the values above yourself. The
-# policy ClusterRole pair is always created in this mode, since the chart
-# cannot see whether policy is on.
-configFile: ""

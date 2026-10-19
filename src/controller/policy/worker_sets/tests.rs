@@ -50,7 +50,6 @@ fn a_complete_set_resolves_against_its_profile() {
     assert_eq!(spec.profile, "h100");
     assert_eq!(spec.kv_block_size, 16);
     assert_eq!(spec.tokenize_mode, TokenizeMode::Local);
-    assert_eq!(spec.discovery.mode, DiscoveryMode::Kubernetes);
     assert_eq!(spec.discovery.service_name.as_deref(), Some("vllm"));
     assert_eq!(
         spec.discovery.namespace.as_deref(),
@@ -80,7 +79,7 @@ fn same_named_sets_in_two_namespaces_stay_separate() {
     assert_eq!(b.discovery.namespace.as_deref(), Some("b"));
 }
 
-/// An unknown profile (fixed in the router's TOML) and a missing one (fixed
+/// An unknown profile (fixed in the router's config) and a missing one (fixed
 /// in the CR) get different reasons. The unknown case lists what is defined.
 #[test]
 fn an_unknown_profile_is_rejected_and_lists_the_defined_ones() {

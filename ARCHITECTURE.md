@@ -31,14 +31,14 @@ crate under `crates` once it has moved. Its `mod.rs` or `lib.rs` lists the
 modules and holds nothing else beyond re-exports.
 
 - Fleet, `crates/kinference-fleet`. Which workers exist and what state they are in.
-  Pools, the worker registry, the discovery trait and static discovery,
+  Pools, the worker registry, the discovery factory and its config,
   the coordinator that adds and evicts workers, the scrape of engine
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
   collector behind the fleet gauges, the fleet's own metric families, and
   its error type.
 - Router, `src/router`. The request path. The service, scoring, the
-  picker, the body store, the tokenizer, observations, the gRPC glue, the
-  mock, and the request-path metric families.
+  picker, the body store, the tokenizer, observations, the gRPC glue, and
+  the request-path metric families.
 - Controller, `src/controller`. The Kubernetes control plane. The CRD
   watch and its snapshot, the status and binding writers, the worker-set
   reconcile, leader election, EndpointSlice discovery, and the control
@@ -72,7 +72,7 @@ Rows name a module by its group; in code the fleet's are under
 | Module | Owns |
 | --- | --- |
 | `fleet::coordinator` | the worker lifecycle: the loop that takes discovery and eviction events, add, evict and drop, and the pool hooks that start and stop a pool's discovery |
-| `fleet::discovery` | the `Discovery` trait, its config types, static workers, and the factory the server supplies for Kubernetes discovery |
+| `fleet::discovery` | the discovery config types, `WorkerChange`, and the factory the server supplies for Kubernetes discovery |
 | `fleet::error` | `Error`, the fleet's error type |
 | `fleet::eviction` | the channel that asks the coordinator to drop a worker |
 | `fleet::gauges` | the Prometheus collector for the fleet gauges: worker health and saturation computed at gather, the index size from a tree dump at most once every 10s |
@@ -81,15 +81,14 @@ Rows name a module by its group; in code the fleet's are under
 | `fleet::metrics` | `FleetMetrics`, the fleet's Prometheus families, and the helpers every group registers its families with |
 | `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
-| `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
+| `fleet::profile` | the profile tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
 | `router::local_tokenize` | the in-process tokenizer registry: tokenizers, chat templates, and the warm-up that follows the model index |
-| `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `[metrics]` config |
-| `router::mock` | the deterministic `Picker` used in mock mode |
+| `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
 | `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |

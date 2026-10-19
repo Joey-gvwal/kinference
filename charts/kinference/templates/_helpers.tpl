@@ -38,10 +38,8 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
 {{/*
-The rendered kinference config.
-JSON, not TOML: Helm reads every number in values.yaml as a float64, and
-`toToml` writes `1000` as `1000.0`, which an integer field rejects. `toJson`
-writes `1000`. kinference picks the parser from the file extension.
+The rendered kinference config, as JSON: Helm reads every number in
+values.yaml as a float64, and `toJson` still writes `1000` as `1000`.
 */}}
 {{- define "kinference.config" -}}
 {{- $cfg := deepCopy (.Values.config | default dict) -}}
@@ -90,28 +88,9 @@ drops it. */ -}}
 {{- toPrettyJson $cfg -}}
 {{- end -}}
 
-{{/*
-Whether CRD-driven routing policy is on, which gates its RBAC. With configFile
-the chart cannot see inside the TOML, so it grants the policy role.
-*/}}
+{{/* Whether CRD-driven routing policy is on, which gates its RBAC. */}}
 {{- define "kinference.policyEnabled" -}}
-{{- if .Values.configFile -}}
+{{- if dig "policy" "enabled" false (.Values.config | default dict) -}}
 true
-{{- else if dig "policy" "enabled" false (.Values.config | default dict) -}}
-true
-{{- end -}}
-{{- end -}}
-
-{{/* The config file's name in the ConfigMap, which also picks its parser. */}}
-{{- define "kinference.configFileName" -}}
-{{- if .Values.configFile -}}config.toml{{- else -}}config.json{{- end -}}
-{{- end -}}
-
-{{/* The config file's contents. */}}
-{{- define "kinference.configContents" -}}
-{{- if .Values.configFile -}}
-{{- .Values.configFile -}}
-{{- else -}}
-{{- include "kinference.config" . -}}
 {{- end -}}
 {{- end -}}

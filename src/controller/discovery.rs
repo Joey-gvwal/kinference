@@ -22,10 +22,8 @@
 //! has been emitted as `Added`).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use futures::TryStreamExt;
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
 use kube::Api;
@@ -36,7 +34,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use kinference_fleet::discovery::{
-    Discovery, DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
+    DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
 };
 
 /// The K8s standard label that the EndpointSlice controller stamps on
@@ -44,7 +42,7 @@ use kinference_fleet::discovery::{
 /// https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/.
 const SVC_NAME_LABEL: &str = "kubernetes.io/service-name";
 
-/// FNV-1a 64-bit hash. Same algorithm as `src/router/mock.rs::fnv1a`.
+/// FNV-1a 64-bit hash.
 fn fnv1a_u64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in bytes {
@@ -71,16 +69,15 @@ impl KubeDiscovery {
              KubeDiscovery only works when the monitor runs as a pod inside the \
              cluster it should watch (~/.kube/config is intentionally NOT honored — \
              discovered pod IPs would not be reachable from outside the cluster \
-             network). If you're running locally, use discovery.mode = \"static\" \
-             with [[workers]].",
+             network).",
         )?;
         kube::Client::try_from(kube_cfg)
             .context("failed to build Kubernetes client from in-cluster config")
     }
 
     /// Bind a config to an already-acquired client. Synchronous and infallible:
-    /// `service_name` is validated at config load and, in Kubernetes mode, by
-    /// the desired-set resolution.
+    /// `service_name` is validated at config load or by the desired-set
+    /// resolution.
     pub fn from_client(cfg: DiscoveryConfig, client: kube::Client) -> Self {
         debug_assert!(
             !cfg.service_name.as_deref().unwrap_or("").is_empty(),
@@ -88,11 +85,10 @@ impl KubeDiscovery {
         );
         Self { cfg, client }
     }
-}
 
-#[async_trait]
-impl Discovery for KubeDiscovery {
-    async fn run(self: Arc<Self>, tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
+    /// Emit worker-membership events until `cancel` fires, under the contract
+    /// of `kinference_fleet::discovery::DiscoveryTask`.
+    pub async fn run(self, tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
         let slices: Api<EndpointSlice> = match self.cfg.namespace.as_deref() {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),

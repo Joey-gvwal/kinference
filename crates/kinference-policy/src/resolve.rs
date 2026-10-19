@@ -37,7 +37,7 @@ pub enum UnresolvedReason {
     /// was just created and the reconcile hasn't run yet.
     NoMatchingPool,
     /// It names a routing profile the router does not define, which is fixed in
-    /// the router's TOML rather than the CR.
+    /// the router's config rather than the CR.
     UnknownProfile,
     /// Its `kvBlockSize` is missing or not a usable block size.
     InvalidKvBlockSize,

@@ -206,15 +206,13 @@ fn spec(name: &str, block_size: u32) -> PoolSpec {
 }
 
 fn worker_cfg(num: u64) -> crate::discovery::WorkerConfig {
-    toml::from_str(&format!(
-        r#"
-worker_id_str = "w-{num}"
-worker_id_num = {num}
-model_name = "old"
-http_url = "http://10.0.0.{num}:8000"
-"#
-    ))
-    .expect("valid worker config")
+    crate::discovery::WorkerConfig {
+        worker_id_str: format!("w-{num}"),
+        worker_id_num: num,
+        model_name: "old".into(),
+        http_url: Some(format!("http://10.0.0.{num}:8000")),
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
