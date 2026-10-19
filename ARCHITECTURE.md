@@ -29,7 +29,7 @@ A module belongs to one group. A group is a directory under `src`. Its
 - Fleet, `src/fleet`. Which workers exist and what state they are in.
   Pools, the worker registry, discovery, the coordinator that adds and
   evicts workers, the scrape of engine metrics, the ZMQ ingest of KV-cache
-  events, the in-flight state, and the rollup of the fleet gauges.
+  events, the in-flight state, and the collector behind the fleet gauges.
 - Router, `src/router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, and
   the mock.
@@ -66,12 +66,12 @@ Today the tree breaks this rule in three places:
 | `fleet::coordinator` | the worker lifecycle: the loop that takes discovery and eviction events, add, evict and drop, and the pool hooks that start and stop a pool's discovery |
 | `fleet::discovery` | the `Discovery` trait, static workers, and the Kubernetes EndpointSlice watch |
 | `fleet::eviction` | the channel that asks the coordinator to drop a worker |
+| `fleet::gauges` | the Prometheus collector for the fleet gauges: worker health and saturation computed at gather, the index size from a tree dump at most once every 10s |
 | `fleet::inflight` | per-endpoint picks not yet observed, and prefixes dispatched but not yet in the KV index |
 | `fleet::ingest` | the ZMQ KV-event listener per worker, replay, and block-size checks |
 | `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
-| `fleet::rollup` | the task that sets the fleet gauges once a second |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
