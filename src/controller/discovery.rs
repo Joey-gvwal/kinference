@@ -22,10 +22,8 @@
 //! has been emitted as `Added`).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use futures::TryStreamExt;
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
 use kube::Api;
@@ -36,7 +34,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use kinference_fleet::discovery::{
-    Discovery, DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
+    DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
 };
 
 /// The K8s standard label that the EndpointSlice controller stamps on
@@ -87,11 +85,10 @@ impl KubeDiscovery {
         );
         Self { cfg, client }
     }
-}
 
-#[async_trait]
-impl Discovery for KubeDiscovery {
-    async fn run(self: Arc<Self>, tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
+    /// Emit worker-membership events until `cancel` fires, under the contract
+    /// of `kinference_fleet::discovery::DiscoveryTask`.
+    pub async fn run(self, tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
         let slices: Api<EndpointSlice> = match self.cfg.namespace.as_deref() {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),

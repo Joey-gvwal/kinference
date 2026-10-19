@@ -26,7 +26,6 @@ dashmap.workspace = true
 # side, for the fleet's own families.
 prometheus-parse.workspace = true
 prometheus.workspace = true
-async-trait.workspace = true
 
 [dev-dependencies]
 # `tokio::time::pause` and `advance`, for the gauges' dump-interval tests.

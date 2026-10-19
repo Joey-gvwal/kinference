@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::discovery::DiscoveryTask;
 use crate::pool::{test_pool, test_spec};
 use crate::scrape::MetricsSample;
 
@@ -10,16 +11,6 @@ struct Harness {
     process: CancellationToken,
 }
 
-/// A discovery that announces nothing and waits for cancellation.
-struct Idle;
-
-#[async_trait::async_trait]
-impl Discovery for Idle {
-    async fn run(self: Arc<Self>, _tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
-        cancel.cancelled().await;
-    }
-}
-
 fn harness() -> Harness {
     let metrics = Arc::new(MetricsRegistry::new());
     let models = Arc::new(ModelIndex::new());
@@ -27,7 +18,10 @@ fn harness() -> Harness {
     let (coordinator, _inbox) = Coordinator::new(
         Handles {
             cancel: process.clone(),
-            kubernetes: Some(Arc::new(|_| Arc::new(Idle) as Arc<dyn Discovery>)),
+            // Announces nothing and waits for cancellation.
+            kubernetes: Some(Arc::new(|_, _, cancel: CancellationToken| {
+                Box::pin(async move { cancel.cancelled().await }) as DiscoveryTask
+            })),
             metrics: metrics.clone(),
             prom: Arc::new(FleetMetrics::new(&prometheus::Registry::new())),
             models: models.clone(),

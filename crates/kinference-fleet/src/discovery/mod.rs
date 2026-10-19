@@ -1,18 +1,18 @@
 //! Worker discovery layer.
 //!
-//! A `Discovery` is the source of truth for which workers in one worker set
-//! are live. It emits `WorkerChange::{Added, Removed}` events;
+//! A discovery task is the source of truth for which workers in one worker
+//! set are live. It emits `WorkerChange::{Added, Removed}` events;
 //! `fleet::coordinator` registers or unregisters each worker and spawns or
 //! cancels its per-worker tasks.
 //!
-//! One implementation, `controller::discovery::KubeDiscovery`, watches a
-//! Service's EndpointSlices and emits `Added`/`Removed` as endpoints become
-//! or stop being Ready. The server builds it through a [`DiscoveryFactory`],
-//! so the fleet never holds a Kubernetes client.
+//! The one implementation, `controller::discovery::KubeDiscovery`, watches a
+//! Service's EndpointSlices. The server builds its task through a
+//! [`DiscoveryFactory`], so the fleet never holds a Kubernetes client.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -31,30 +31,25 @@ pub enum WorkerChange {
     Removed(u64),
 }
 
-/// A source of worker-membership events. Implementations run as a single
-/// task driven by `tokio::spawn(discovery.run(...))`.
+/// One pool's discovery task: sends `WorkerChange`s on `tx` until `cancel`
+/// fires.
 ///
 /// Contract:
-/// - `run` MUST send an `Added` for each worker it knows about at startup
-///   and any time a previously-removed worker reappears.
-/// - `run` MUST send `Removed(worker_id_num)` exactly once per worker that
-///   leaves the set. Duplicate `Removed` for an unknown worker is
-///   tolerated (the coordinator drops them).
-/// - `run` MUST exit cleanly when `cancel.cancelled()` fires.
-/// - `run` MAY drop events if the channel is full. The coordinator channel
-///   holds 64.
-#[async_trait]
-pub trait Discovery: Send + Sync + 'static {
-    async fn run(
-        self: std::sync::Arc<Self>,
-        tx: mpsc::Sender<WorkerChange>,
-        cancel: CancellationToken,
-    );
-}
+/// - Sends an `Added` for each worker it knows about at startup and any time
+///   a previously-removed worker reappears.
+/// - Sends `Removed(worker_id_num)` exactly once per worker that leaves the
+///   set. A duplicate `Removed` for an unknown worker is tolerated.
+/// - Exits cleanly when `cancel` fires.
+/// - May drop events if the channel is full. The coordinator channel holds 64.
+pub type DiscoveryTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Builds one pool's Kubernetes discovery from its config. The server binds
-/// the in-cluster client once; the fleet never sees `kube`.
-pub type DiscoveryFactory = Arc<dyn Fn(DiscoveryConfig) -> Arc<dyn Discovery> + Send + Sync>;
+/// Builds one pool's discovery task from its config. The server binds the
+/// in-cluster client once; the fleet never sees `kube`.
+pub type DiscoveryFactory = Arc<
+    dyn Fn(DiscoveryConfig, mpsc::Sender<WorkerChange>, CancellationToken) -> DiscoveryTask
+        + Send
+        + Sync,
+>;
 
 /// `[workerset.discovery]`: where a pool's workers come from.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]

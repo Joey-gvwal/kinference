@@ -15,7 +15,7 @@ use kinference_policy::PoolId;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{Discovery, DiscoveryFactory, WorkerChange, WorkerConfig};
+use crate::discovery::{DiscoveryFactory, WorkerChange, WorkerConfig};
 use crate::error::Error;
 use crate::eviction::{self, EvictionReason};
 use crate::ingest::{self, IngestConfig};
@@ -366,16 +366,12 @@ impl PoolHooks for Coordinator {
             .kubernetes
             .as_ref()
             .ok_or(Error::KubeDiscoveryUnavailable)?;
-        let discovery: Arc<dyn Discovery> = build(spec.discovery.clone());
 
         let token = self.cancel.child_token();
         self.discovery_tokens.insert(pool.id, token.clone());
 
         let (pool_tx, mut pool_rx) = mpsc::channel::<WorkerChange>(64);
-        {
-            let token = token.clone();
-            tokio::spawn(async move { discovery.run(pool_tx, token).await });
-        }
+        tokio::spawn(build(spec.discovery.clone(), pool_tx, token.clone()));
         // Forwarder: tag this pool's WorkerChange events with the pool.
         {
             let coord_tx = self.coord_tx.clone();

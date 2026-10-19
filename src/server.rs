@@ -22,7 +22,7 @@ use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use kinference_fleet::discovery::{Discovery, DiscoveryFactory};
+use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
 use kinference_fleet::metrics::FleetMetrics;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool;
@@ -229,8 +229,9 @@ pub async fn run() -> Result<()> {
         None
     };
     let kubernetes: Option<DiscoveryFactory> = kube_client.map(|client| {
-        Arc::new(move |cfg| {
-            Arc::new(KubeDiscovery::from_client(cfg, client.clone())) as Arc<dyn Discovery>
+        Arc::new(move |cfg, tx, cancel| {
+            Box::pin(KubeDiscovery::from_client(cfg, client.clone()).run(tx, cancel))
+                as DiscoveryTask
         }) as DiscoveryFactory
     });
 

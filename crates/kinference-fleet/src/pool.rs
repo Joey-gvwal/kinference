@@ -313,7 +313,7 @@ pub struct WorkerContext {
 /// (discovery, the coordinator channel). Implemented by
 /// `fleet::coordinator::Coordinator`.
 pub trait PoolHooks: Send + Sync {
-    /// Start everything that feeds a new pool: its `Discovery` task and the
+    /// Start everything that feeds a new pool: its discovery task and the
     /// forwarder that tags its `WorkerChange`s onto the shared coordinator
     /// channel.
     ///
