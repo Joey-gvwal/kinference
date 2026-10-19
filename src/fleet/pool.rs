@@ -35,7 +35,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::static_config::WorkersFile;
 use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::fleet::eviction::EvictionTx;
 use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
+use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
 use crate::fleet::workers::WorkerRegistry;
@@ -290,6 +292,32 @@ impl Pool {
             cancel: self.cancel.clone(),
         }
     }
+}
+
+/// What one worker's tasks (the ingest listener, the metrics poller, the
+/// warm-up) need from the worker, its pool and the coordinator. Built once
+/// per worker by the coordinator and cloned into each task.
+///
+/// Holds the pool's handles rather than the `Pool` itself: the reaper takes a
+/// retired pool as idle once nothing else holds it, and a per-worker task
+/// may outlive retirement by a few seconds.
+#[derive(Clone)]
+pub struct WorkerContext {
+    pub cfg: WorkerConfig,
+    /// The worker's `score_addr`, the key the pick path and the ingest
+    /// listener share for inflight prefixes.
+    pub endpoint_key: String,
+    pub pool_id: PoolId,
+    pub pool_name: String,
+    pub block_size: u32,
+    pub registry: Arc<WorkerRegistry>,
+    pub indexer: Arc<KvIndexer>,
+    pub inflight_prefixes: Arc<InflightPrefixes>,
+    pub prom: Arc<FleetMetrics>,
+    pub models: Arc<ModelIndex>,
+    pub eviction_tx: EvictionTx,
+    /// The per-worker token; cancelled when the worker is removed or evicted.
+    pub cancel: CancellationToken,
 }
 
 /// Side effects that belong to subsystems the manager doesn't depend on

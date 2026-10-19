@@ -18,7 +18,6 @@
 //! [`dynamo_kv_router::recovery::CursorState`]. The ZMQ socket helpers are
 //! reimplemented here because dynamo's are `pub(super)`.
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -29,13 +28,11 @@ use dynamo_kv_router::zmq_wire::{
     KvCacheSpecKind, RawKvEvent, ZmqEventNormalizer, decode_event_batch,
 };
 use tokio::io::unix::AsyncFd;
-use tokio_util::sync::CancellationToken;
 
-use crate::fleet::discovery::WorkerConfig;
 use crate::fleet::eviction::{EvictionReason, EvictionRequest, EvictionTx};
 use crate::fleet::inflight::InflightPrefixes;
 use crate::fleet::metrics::{FleetMetrics, IngestEvent};
-use crate::fleet::workers::WorkerRegistry;
+use crate::fleet::pool::WorkerContext;
 
 /// Per-recv DEALER timeout, keeping the replay loop responsive.
 const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;
@@ -74,22 +71,11 @@ impl Default for IngestConfig {
     }
 }
 
-/// Spawn the ingest listener for a single worker. `endpoint_key` is the
-/// worker's `score_addr`, the key into [`InflightPrefixes`]. `eviction_tx`
-/// lets the listener request eviction on a block_size mismatch.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_worker_listener(
-    cfg: WorkerConfig,
-    block_size: u32,
-    ingest: IngestConfig,
-    endpoint_key: String,
-    indexer: Arc<KvIndexer>,
-    prom: Arc<FleetMetrics>,
-    inflight_prefixes: Arc<InflightPrefixes>,
-    workers: Arc<WorkerRegistry>,
-    eviction_tx: EvictionTx,
-    cancel: CancellationToken,
-) {
+/// Spawn the ingest listener for a single worker. The listener feeds the
+/// pool's `KvIndexer` and inflight prefixes through `ctx`, and requests
+/// eviction on a block_size mismatch.
+pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
+    let cfg = &ctx.cfg;
     if ingest.disabled {
         tracing::warn!(
             worker_id = cfg.worker_id_str,
@@ -97,16 +83,7 @@ pub fn spawn_worker_listener(
              Marking worker ready immediately; radix tree will stay empty \
              and cache-affinity routing will be no-op for this run."
         );
-        workers.set_initial_sync_complete(cfg.worker_id_num);
-        // This branch holds no references.
-        let _ = (
-            indexer,
-            prom,
-            inflight_prefixes,
-            endpoint_key,
-            block_size,
-            cancel,
-        );
+        ctx.registry.set_initial_sync_complete(cfg.worker_id_num);
         return;
     }
 
@@ -119,45 +96,24 @@ pub fn spawn_worker_listener(
             "no KV-event socket declared for this worker; routing on load metrics \
              alone (no prefix-cache signal from it)"
         );
-        workers.set_initial_sync_complete(cfg.worker_id_num);
-        let _ = (
-            indexer,
-            prom,
-            inflight_prefixes,
-            endpoint_key,
-            block_size,
-            cancel,
-        );
+        ctx.registry.set_initial_sync_complete(cfg.worker_id_num);
         return;
     }
 
     tokio::spawn(async move {
         loop {
-            if cancel.is_cancelled() {
+            if ctx.cancel.is_cancelled() {
                 return;
             }
-            if let Err(err) = run_listener(
-                &cfg,
-                block_size,
-                &ingest,
-                &endpoint_key,
-                indexer.clone(),
-                prom.clone(),
-                inflight_prefixes.clone(),
-                workers.clone(),
-                eviction_tx.clone(),
-                cancel.clone(),
-            )
-            .await
-            {
+            if let Err(err) = run_listener(&ctx, &ingest).await {
                 tracing::warn!(
-                    worker_id = cfg.worker_id_str,
-                    endpoint = ?cfg.zmq_endpoint,
+                    worker_id = ctx.cfg.worker_id_str,
+                    endpoint = ?ctx.cfg.zmq_endpoint,
                     error = %err,
                     "Listener errored; reconnecting in 1s"
                 );
                 tokio::select! {
-                    _ = cancel.cancelled() => return,
+                    _ = ctx.cancel.cancelled() => return,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
             }
@@ -279,19 +235,11 @@ impl ReplayProgress {
 /// Run a single listener until it errors or `cancel` fires. All gap recovery
 /// happens inside the SUB-recv branch, synchronously, before the triggering
 /// frame is applied.
-#[allow(clippy::too_many_arguments)]
-async fn run_listener(
-    cfg: &WorkerConfig,
-    block_size: u32,
-    ingest: &IngestConfig,
-    endpoint_key: &str,
-    indexer: Arc<KvIndexer>,
-    prom: Arc<FleetMetrics>,
-    inflight_prefixes: Arc<InflightPrefixes>,
-    workers: Arc<WorkerRegistry>,
-    eviction_tx: EvictionTx,
-    cancel: CancellationToken,
-) -> Result<()> {
+async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<()> {
+    let cfg = &ctx.cfg;
+    let block_size = ctx.block_size;
+    let workers = &ctx.registry;
+    let cancel = &ctx.cancel;
     let worker_id_num = cfg.worker_id_num;
     let worker_id_str = cfg.worker_id_str.clone();
     let replay_wall_budget = ingest.replay_timeout;
@@ -422,13 +370,13 @@ async fn run_listener(
                     payload,
                     replay.as_mut(),
                     replay_wall_budget,
-                    &indexer,
-                    &prom,
-                    &inflight_prefixes,
-                    endpoint_key,
+                    &ctx.indexer,
+                    &ctx.prom,
+                    &ctx.inflight_prefixes,
+                    &ctx.endpoint_key,
                     worker_id_num,
                     &worker_id_str,
-                    &eviction_tx,
+                    &ctx.eviction_tx,
                 )
                 .await;
                 if evicted {

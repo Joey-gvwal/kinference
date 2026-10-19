@@ -23,7 +23,7 @@ use crate::fleet::eviction::{self, EvictionReason};
 use crate::fleet::ingest::{self, IngestConfig};
 use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
-use crate::fleet::pool::{Pool, PoolHooks, PoolSpec};
+use crate::fleet::pool::{Pool, PoolHooks, PoolSpec, WorkerContext};
 use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::fleet::workers::{ServedModelsVerdict, WorkerEntry};
 
@@ -256,20 +256,24 @@ impl Coordinator {
             registry.set_initial_sync_complete(w.worker_id_num);
         }
 
+        let ctx = WorkerContext {
+            cfg: w,
+            endpoint_key,
+            pool_id: pool.id,
+            pool_name: pool.name.clone(),
+            block_size,
+            registry: registry.clone(),
+            indexer: pool.indexer.clone(),
+            inflight_prefixes: pool.inflight_prefixes.clone(),
+            prom: self.prom.clone(),
+            models: self.models.clone(),
+            eviction_tx: self.eviction_tx.clone(),
+            cancel: worker_token,
+        };
+
         // The metrics poller and warmup update model routing after a
         // /v1/models scrape.
-        ingest::spawn_worker_listener(
-            w.clone(),
-            block_size,
-            self.settings.ingest,
-            endpoint_key,
-            pool.indexer.clone(),
-            self.prom.clone(),
-            pool.inflight_prefixes.clone(),
-            registry.clone(),
-            self.eviction_tx.clone(),
-            worker_token.clone(),
-        );
+        ingest::spawn_worker_listener(ctx.clone(), self.settings.ingest);
         // With a declared model list, push the models refresh out of the
         // way; the poller still scrapes load metrics.
         let refresh_secs = if pool.static_models.is_some() {
@@ -279,28 +283,28 @@ impl Coordinator {
                 .unwrap_or(self.settings.models_refresh_secs)
         };
         spawn_metrics_poller(
-            w.clone(),
+            ctx.cfg.clone(),
             self.settings.poll_ms,
             refresh_secs,
             self.metrics.clone(),
             registry.clone(),
             self.eviction_tx.clone(),
-            worker_token,
-            self.models.clone(),
-            pool.id,
-            pool.name.clone(),
+            ctx.cancel.clone(),
+            ctx.models.clone(),
+            ctx.pool_id,
+            ctx.pool_name.clone(),
         );
 
         // An immediate /v1/models scrape, so the worker is routable without
         // waiting for the periodic tick.
         spawn_one_shot_warmup(
-            w,
+            ctx.cfg,
             self.metrics.clone(),
-            registry.clone(),
-            self.eviction_tx.clone(),
-            self.models.clone(),
-            pool.id,
-            pool.name.clone(),
+            ctx.registry,
+            ctx.eviction_tx,
+            ctx.models,
+            ctx.pool_id,
+            ctx.pool_name,
         );
     }
 
