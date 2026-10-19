@@ -2,9 +2,9 @@
 //!
 //! One [`spawn_worker_listener`] task per worker. Each task owns its sockets,
 //! parses vLLM's wire-format events through `dynamo_kv_router::zmq_wire`, and
-//! feeds them into the shared [`KvIndexer`] (radix tree) and our bookkeeping
-//! ([`InflightPrefixes`], [`FleetMetrics`], [`WorkerRegistry`]) in
-//! [`apply_frame`].
+//! feeds them into the pool's `KvIndexer` (radix tree) and our bookkeeping
+//! (`InflightPrefixes`, `FleetMetrics`, `WorkerRegistry`), all reached
+//! through the [`WorkerContext`], in [`apply_frame`].
 //!
 //! Modelled after dynamo's `standalone_indexer` listener
 //! (`lib/kv-router/src/standalone_indexer/listener.rs`): the SUB socket and
@@ -21,7 +21,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
-use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface};
+use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{KvCacheEventData, WorkerWithDpRank};
 use dynamo_kv_router::recovery::{CursorObservation, CursorState};
 use dynamo_kv_router::zmq_wire::{
@@ -30,8 +30,7 @@ use dynamo_kv_router::zmq_wire::{
 use tokio::io::unix::AsyncFd;
 
 use crate::fleet::eviction::{EvictionReason, EvictionRequest, EvictionTx};
-use crate::fleet::inflight::InflightPrefixes;
-use crate::fleet::metrics::{FleetMetrics, IngestEvent};
+use crate::fleet::metrics::IngestEvent;
 use crate::fleet::pool::WorkerContext;
 
 /// Per-recv DEALER timeout, keeping the replay loop responsive.
@@ -365,18 +364,12 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<()> 
                     workers.note_kv_events_observed(worker_id_num);
                 }
                 let evicted = handle_observation(
+                    ctx,
                     &mut state,
                     seq,
                     payload,
                     replay.as_mut(),
                     replay_wall_budget,
-                    &ctx.indexer,
-                    &ctx.prom,
-                    &ctx.inflight_prefixes,
-                    &ctx.endpoint_key,
-                    worker_id_num,
-                    &worker_id_str,
-                    &ctx.eviction_tx,
                 )
                 .await;
                 if evicted {
@@ -390,21 +383,15 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<()> 
 
 /// Apply a single live SUB frame, recovering any sequence gap first. Mirrors
 /// dynamo's `ListenerLoop::handle_message` / `handle_gap`.
-#[allow(clippy::too_many_arguments)]
 async fn handle_observation(
+    ctx: &WorkerContext,
     state: &mut ListenerState,
     seq: u64,
     payload: &[u8],
     replay: Option<&mut ZmqSocket>,
     replay_wall_budget: Duration,
-    indexer: &KvIndexer,
-    prom: &FleetMetrics,
-    inflight_prefixes: &InflightPrefixes,
-    endpoint_key: &str,
-    worker_id_num: u64,
-    worker_id_str: &str,
-    eviction_tx: &EvictionTx,
 ) -> bool {
+    let worker_id_str = &ctx.cfg.worker_id_str;
     match state.cursor.observe(seq) {
         CursorObservation::Initial { got } if got > 0 => {
             // First frame, at a non-zero seq: drain `[0, got)` first.
@@ -415,21 +402,7 @@ async fn handle_observation(
                 "initial drain: catching up to live seq"
             );
             if let Some(dealer) = replay {
-                replay_gap(
-                    0,
-                    got,
-                    dealer,
-                    replay_wall_budget,
-                    state,
-                    indexer,
-                    prom,
-                    inflight_prefixes,
-                    endpoint_key,
-                    worker_id_num,
-                    worker_id_str,
-                    eviction_tx,
-                )
-                .await;
+                replay_gap(ctx, state, dealer, 0, got, replay_wall_budget).await;
             }
         }
         CursorObservation::Gap { expected, got } => {
@@ -441,21 +414,7 @@ async fn handle_observation(
                 "gap in event stream; inline replay"
             );
             if let Some(dealer) = replay {
-                replay_gap(
-                    expected,
-                    got,
-                    dealer,
-                    replay_wall_budget,
-                    state,
-                    indexer,
-                    prom,
-                    inflight_prefixes,
-                    endpoint_key,
-                    worker_id_num,
-                    worker_id_str,
-                    eviction_tx,
-                )
-                .await;
+                replay_gap(ctx, state, dealer, expected, got, replay_wall_budget).await;
             }
         }
         CursorObservation::Stale { got, last_applied } => {
@@ -475,20 +434,7 @@ async fn handle_observation(
         }
     }
 
-    let evicted = apply_frame(
-        &mut state.normalizer,
-        indexer,
-        prom,
-        inflight_prefixes,
-        endpoint_key,
-        worker_id_num,
-        worker_id_str,
-        &mut state.block_size_guard,
-        eviction_tx,
-        seq,
-        payload,
-    )
-    .await;
+    let evicted = apply_frame(ctx, state, seq, payload).await;
     if evicted {
         return true;
     }
@@ -503,21 +449,15 @@ async fn handle_observation(
 /// publisher tails forever and never sends the sentinel.
 ///
 /// Ported from dynamo's `ListenerLoop::replay_gap`.
-#[allow(clippy::too_many_arguments)]
 async fn replay_gap(
+    ctx: &WorkerContext,
+    state: &mut ListenerState,
+    dealer: &mut ZmqSocket,
     start_seq: u64,
     end_seq: u64,
-    dealer: &mut ZmqSocket,
     replay_wall_budget: Duration,
-    state: &mut ListenerState,
-    indexer: &KvIndexer,
-    prom: &FleetMetrics,
-    inflight_prefixes: &InflightPrefixes,
-    endpoint_key: &str,
-    worker_id_num: u64,
-    worker_id_str: &str,
-    eviction_tx: &EvictionTx,
 ) {
+    let worker_id_str = &ctx.cfg.worker_id_str;
     // Request: [empty_delim, start_seq_be_u64]. The publisher's
     // ROUTER prepends our identity and replies with batches of
     // [identity_or_delim, seq_be_u64, payload]. An empty payload
@@ -602,20 +542,7 @@ async fn replay_gap(
             }
         }
 
-        let evicted = apply_frame(
-            &mut state.normalizer,
-            indexer,
-            prom,
-            inflight_prefixes,
-            endpoint_key,
-            worker_id_num,
-            worker_id_str,
-            &mut state.block_size_guard,
-            eviction_tx,
-            seq,
-            payload,
-        )
-        .await;
+        let evicted = apply_frame(ctx, state, seq, payload).await;
         if evicted {
             // Block-size mismatch: eviction sent, stop replaying.
             return;
@@ -683,20 +610,14 @@ fn parse_seq_payload(msg: &[Vec<u8>]) -> Option<(u64, &[u8])> {
 ///
 /// Returns `true` when this listener should stop because a
 /// block_size mismatch was detected and eviction has been signaled.
-#[allow(clippy::too_many_arguments)]
 async fn apply_frame(
-    normalizer: &mut ZmqEventNormalizer,
-    indexer: &KvIndexer,
-    prom: &FleetMetrics,
-    inflight_prefixes: &InflightPrefixes,
-    endpoint_key: &str,
-    worker_id_num: u64,
-    worker_id_str: &str,
-    block_size_guard: &mut BlockSizeGuard,
-    eviction_tx: &EvictionTx,
+    ctx: &WorkerContext,
+    state: &mut ListenerState,
     seq: u64,
     payload: &[u8],
 ) -> bool {
+    let worker_id_num = ctx.cfg.worker_id_num;
+    let worker_id_str = &ctx.cfg.worker_id_str;
     let batch = match decode_event_batch(payload) {
         Ok(b) => b,
         Err(err) => {
@@ -714,11 +635,16 @@ async fn apply_frame(
         .map_or(0u32, |rank| rank.cast_unsigned());
 
     for raw_event in batch.events {
-        if block_size_guard.observe(&raw_event, worker_id_num, worker_id_str, eviction_tx) {
+        if state.block_size_guard.observe(
+            &raw_event,
+            worker_id_num,
+            worker_id_str,
+            &ctx.eviction_tx,
+        ) {
             // Mismatch: eviction sent; the rest of the batch is suspect.
             return true;
         }
-        let Some(placement_event) = normalizer.normalize(
+        let Some(placement_event) = state.normalizer.normalize(
             raw_event,
             seq,
             WorkerWithDpRank::new(worker_id_num, effective_dp_rank),
@@ -741,14 +667,15 @@ async fn apply_frame(
                 // `compute_block_hash_for_seq` in `score_workers`, which uses
                 // the same XXH3.
                 let stored_hashes: Vec<u64> = d.blocks.iter().map(|b| b.tokens_hash.0).collect();
-                inflight_prefixes.on_stored(endpoint_key, &stored_hashes);
+                ctx.inflight_prefixes
+                    .on_stored(&ctx.endpoint_key, &stored_hashes);
                 (IngestEvent::Stored, d.blocks.len() as u64)
             }
             KvCacheEventData::Removed(d) => (IngestEvent::Removed, d.block_hashes.len() as u64),
             KvCacheEventData::Cleared => (IngestEvent::Cleared, 0),
         };
-        prom.record_index_event(ev_kind, n_blocks);
-        indexer.apply_event(router_event).await;
+        ctx.prom.record_index_event(ev_kind, n_blocks);
+        ctx.indexer.apply_event(router_event).await;
     }
     false
 }
