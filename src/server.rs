@@ -22,6 +22,7 @@ use crate::fleet::scrape::MetricsRegistry;
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::router::body_store;
 use crate::router::local_tokenize;
+use crate::router::metrics::RouterMetrics;
 use crate::router::mock::MockKinferenceService;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
@@ -132,7 +133,8 @@ pub async fn run() -> Result<()> {
         let metrics = Arc::new(MetricsRegistry::new());
         // Prometheus registry, shared by the gRPC handlers and the admin
         // listener's `/metrics`.
-        let prom = Arc::new(metrics::PromMetrics::with_config(&cfg.metrics));
+        let prom = Arc::new(metrics::PromMetrics::new());
+        let router_prom = Arc::new(RouterMetrics::new(prom.registry(), &cfg.metrics));
         let fleet_prom = Arc::new(FleetMetrics::new(prom.registry()));
         let controller_prom = Arc::new(ControllerMetrics::new(prom.registry()));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
@@ -529,7 +531,7 @@ pub async fn run() -> Result<()> {
             provider_health,
             body_idle_timeout,
             observation_sink,
-            prom.clone(),
+            router_prom,
         ));
 
         // Body-buffer reaper, separate from the observation sweep since the TTLs
@@ -537,7 +539,6 @@ pub async fn run() -> Result<()> {
         // window) and refreshes the occupancy gauges.
         {
             let service = service.clone();
-            let prom = prom.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -547,7 +548,7 @@ pub async fn run() -> Result<()> {
                         _ = interval.tick() => {
                             let (reaped, bytes) = service.sweep_expired_bodies();
                             if reaped > 0 {
-                                prom.record_bodies_reaped(reaped as u64);
+                                service.prom.record_bodies_reaped(reaped as u64);
                                 tracing::debug!(
                                     reaped,
                                     bytes,
@@ -555,7 +556,7 @@ pub async fn run() -> Result<()> {
                                 );
                             }
                             let (entries, in_use) = service.body_store.stats();
-                            prom.set_body_buffer(entries as u64, in_use);
+                            service.prom.set_body_buffer(entries as u64, in_use);
                         }
                     }
                 }

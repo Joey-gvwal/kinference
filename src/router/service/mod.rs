@@ -357,7 +357,7 @@ pub struct KinferenceService {
     /// upload.
     pub(crate) body_idle_timeout: std::time::Duration,
     /// The metrics kinference publishes on its own `/metrics`.
-    pub(crate) prom: Arc<crate::metrics::PromMetrics>,
+    pub(crate) prom: Arc<crate::router::metrics::RouterMetrics>,
 }
 
 impl KinferenceService {
@@ -375,7 +375,7 @@ impl KinferenceService {
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         body_idle_timeout: std::time::Duration,
         observation_sink: Arc<ObservationSink>,
-        prom: Arc<crate::metrics::PromMetrics>,
+        prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
         Self {
             pools,
@@ -607,7 +607,7 @@ fn best_group(
     req_label: &str,
     // `Option` so tests can omit it. Predictions are recorded here, where
     // they are computed per endpoint.
-    prom: Option<&crate::metrics::PromMetrics>,
+    prom: Option<&crate::router::metrics::RouterMetrics>,
 ) -> Option<ScoredGroup> {
     let now = Instant::now();
     let multi = groups.len() > 1;

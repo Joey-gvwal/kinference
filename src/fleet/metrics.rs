@@ -2,7 +2,8 @@
 //! server lends, plus the helpers every group registers its families with.
 
 use prometheus::{
-    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, core::Collector,
+    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, core::Collector,
 };
 
 /// Build a family and register a clone of it, so the returned handle and the
@@ -35,6 +36,26 @@ pub fn int_gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
 
 pub fn int_gauge_vec(registry: &Registry, name: &str, help: &str, labels: &[&str]) -> IntGaugeVec {
     register(registry, IntGaugeVec::new(Opts::new(name, help), labels))
+}
+
+pub fn histogram(registry: &Registry, name: &str, help: &str, buckets: Vec<f64>) -> Histogram {
+    register(
+        registry,
+        Histogram::with_opts(HistogramOpts::new(name, help).buckets(buckets)),
+    )
+}
+
+pub fn histogram_vec(
+    registry: &Registry,
+    name: &str,
+    help: &str,
+    buckets: Vec<f64>,
+    labels: &[&str],
+) -> HistogramVec {
+    register(
+        registry,
+        HistogramVec::new(HistogramOpts::new(name, help).buckets(buckets), labels),
+    )
 }
 
 /// `kinference_index_events_total{kind}`. Source: [`IngestEvent::as_label`].

@@ -1,4 +1,13 @@
 use super::*;
+
+fn render(registry: &prometheus::Registry) -> String {
+    use prometheus::Encoder as _;
+    let mut buf = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&registry.gather(), &mut buf)
+        .unwrap();
+    String::from_utf8(buf).unwrap()
+}
 use kinference_policy::PoolId;
 
 use crate::fleet::pool::test_pool;
@@ -412,7 +421,8 @@ fn policy_fleet(
     Arc<crate::controller::policy::store::PolicyStore>,
     Vec<Arc<Pool>>,
 ) {
-    policy_fleet_with(sets, &[], spec)
+    let (svc, store, live, _) = policy_fleet_with(sets, &[], spec);
+    (svc, store, live)
 }
 
 /// [`policy_fleet`], with an InferenceProvider per `(name, models[])` among the
@@ -425,7 +435,9 @@ fn policy_fleet_with(
     KinferenceService,
     Arc<crate::controller::policy::store::PolicyStore>,
     Vec<Arc<Pool>>,
+    prometheus::Registry,
 ) {
+    let registry_prom = prometheus::Registry::new();
     let metrics = Arc::new(MetricsRegistry::new());
     let registry = crate::fleet::pool::PoolRegistry::new();
     let (mut live, mut worker_sets, mut dests) = (Vec::new(), Vec::new(), Vec::new());
@@ -514,9 +526,12 @@ fn policy_fleet_with(
         Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         ttl,
         Arc::new(ObservationSink::open(None)),
-        Arc::new(crate::metrics::PromMetrics::new()),
+        Arc::new(crate::router::metrics::RouterMetrics::new(
+            &registry_prom,
+            &Default::default(),
+        )),
     );
-    (svc, store, live)
+    (svc, store, live, registry_prom)
 }
 
 /// The scored group a pick starts with: `model` on `pool`, one score per
@@ -643,8 +658,8 @@ fn outcome_name(o: &PickAndRecordOutcome) -> String {
 /// `cloud`, whose row names it `vendor/qwen`, after two picks for tenant
 /// `acme`: response 1 interactive, which is unmatched and stays local, and
 /// response 2 batch, which a rule sends to the provider.
-async fn local_and_cloud_picks() -> KinferenceService {
-    let (svc, _store, live) = policy_fleet_with(
+async fn local_and_cloud_picks() -> (KinferenceService, prometheus::Registry) {
+    let (svc, _store, live, registry) = policy_fleet_with(
         &[("qwen-ws", "qwen", &["10.0.0.1:8000"])],
         &[(
             "cloud",
@@ -685,14 +700,14 @@ async fn local_and_cloud_picks() -> KinferenceService {
         "{}",
         outcome_name(&cloud)
     );
-    svc
+    (svc, registry)
 }
 
 /// Every pick that routes is counted by tenant and destination.
 #[tokio::test]
 async fn a_pick_is_counted_by_tenant_and_destination() {
-    let svc = local_and_cloud_picks().await;
-    let out = svc.prom.render();
+    let (_svc, registry) = local_and_cloud_picks().await;
+    let out = render(&registry);
     for line in [
         r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#,
         r#"kinference_routed_requests_total{destination="cloud",tenant="default",type="Provider"} 1"#,
@@ -708,7 +723,7 @@ async fn a_pick_is_counted_by_tenant_and_destination() {
 async fn token_metrics_name_the_model_each_body_was_sent_with() {
     use crate::router::proto::picker_server::Picker;
 
-    let svc = local_and_cloud_picks().await;
+    let (svc, registry) = local_and_cloud_picks().await;
     for (response_id, prompt_tokens) in [(1, 10), (2, 7)] {
         svc.report_final_token(tonic::Request::new(
             crate::router::proto::ReportFinalTokenRequest {
@@ -722,7 +737,7 @@ async fn token_metrics_name_the_model_each_body_was_sent_with() {
         .await
         .expect("report accepted");
     }
-    let out = svc.prom.render();
+    let out = render(&registry);
     for line in [
         r#"kinference_prompt_tokens_total{model="qwen",qos="interactive",tenant="default"} 10"#,
         r#"kinference_prompt_tokens_total{model="vendor/qwen",qos="batch",tenant="default"} 7"#,

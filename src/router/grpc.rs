@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::metrics::PickOutcome;
+use crate::router::metrics::PickOutcome;
 use crate::router::service::{KinferenceService, PickAndRecordOutcome, Qos};
 
 use crate::router::proto;
