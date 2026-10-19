@@ -51,6 +51,20 @@ pub(crate) enum TokenizeOutcome {
     Unavailable { reason: String, attempts: usize },
 }
 
+/// One request to tokenize, against the model's worker pool.
+pub(crate) struct TokenizeRequest<'a> {
+    /// A dedicated `/render` URL; `None` rotates across `workers`.
+    pub render_url: Option<&'a str>,
+    pub workers: &'a [(u64, WorkerEntry)],
+    pub model: &'a str,
+    pub input: TokenizeInput,
+    /// The client's body, forwarded verbatim to `/render` when present;
+    /// local tokenization uses `input`.
+    pub raw_body: Option<&'a [u8]>,
+    /// For log context only.
+    pub req_id: Option<&'a str>,
+}
+
 impl KinferenceService {
     /// Try to tokenize against the model's worker pool.
     ///
@@ -58,38 +72,19 @@ impl KinferenceService {
     /// [`TOKENIZE_FALLBACK_MAX_ATTEMPTS`], within [`TOKENIZE_TOTAL_DEADLINE`].
     /// Workers serving one model share its tokenizer, so any of them
     /// returns the same tokens.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn render_with_fallback(
         &self,
         mode: TokenizeMode,
-        render_url: Option<&str>,
-        workers: &[(u64, WorkerEntry)],
-        model: &str,
-        input: TokenizeInput,
-        raw_body: Option<&[u8]>,
-        req_id: Option<&str>,
+        req: TokenizeRequest<'_>,
     ) -> TokenizeOutcome {
         let started = Instant::now();
 
         // Latency and unavailability are recorded here, once, for every
-        // mode. `raw_body` is only used for `/render`; local tokenization
-        // uses the structured input. Without a raw body, `/render` gets a
-        // synthesized one.
+        // mode. Without a raw body, `/render` gets a synthesized one.
         let outcome = match mode {
-            TokenizeMode::Render => {
-                self.render_via_http(render_url, workers, model, &input, raw_body, req_id)
-                    .await
-            }
-            TokenizeMode::Local => {
-                self.tokenize_local_then_http(render_url, workers, model, &input, raw_body, req_id)
-                    .await
-            }
-            TokenizeMode::Compare => {
-                self.tokenize_via_http_with_compare(
-                    render_url, workers, model, &input, raw_body, req_id,
-                )
-                .await
-            }
+            TokenizeMode::Render => self.render_via_http(&req).await,
+            TokenizeMode::Local => self.tokenize_local_then_http(&req).await,
+            TokenizeMode::Compare => self.tokenize_via_http_with_compare(&req).await,
         };
 
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -105,15 +100,15 @@ impl KinferenceService {
 
     /// `/render` with retries across workers. Forwards `raw_body` verbatim
     /// when present, otherwise a body built from `input`.
-    async fn render_via_http(
-        &self,
-        render_url: Option<&str>,
-        workers: &[(u64, WorkerEntry)],
-        model: &str,
-        input: &TokenizeInput,
-        raw_body: Option<&[u8]>,
-        req_id: Option<&str>,
-    ) -> TokenizeOutcome {
+    async fn render_via_http(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
+        let &TokenizeRequest {
+            render_url,
+            workers,
+            model,
+            ref input,
+            raw_body,
+            req_id,
+        } = req;
         // A configured `render_url` (typically a Service) replaces the
         // per-worker rotation, keeping warm connections to one host. It fails
         // fast rather than falling back to individual workers.
@@ -234,15 +229,13 @@ impl KinferenceService {
     /// `Local` mode: in-process tokenization, falling back to `/render` on
     /// any local failure (unknown model, missing chat template, render or
     /// encode error).
-    async fn tokenize_local_then_http(
-        &self,
-        render_url: Option<&str>,
-        workers: &[(u64, WorkerEntry)],
-        model: &str,
-        input: &TokenizeInput,
-        raw_body: Option<&[u8]>,
-        req_id: Option<&str>,
-    ) -> TokenizeOutcome {
+    async fn tokenize_local_then_http(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
+        let &TokenizeRequest {
+            model,
+            ref input,
+            req_id,
+            ..
+        } = req;
         let local_reg = match self.local_tokenizer.as_ref() {
             Some(r) => r,
             None => {
@@ -251,9 +244,7 @@ impl KinferenceService {
                     "tokenize_mode = Local but local_tokenizer registry is None; \
                      falling through to HTTP /render. This is a wiring bug — check main.rs."
                 );
-                return self
-                    .render_via_http(render_url, workers, model, input, raw_body, req_id)
-                    .await;
+                return self.render_via_http(req).await;
             }
         };
 
@@ -291,9 +282,7 @@ impl KinferenceService {
                         "local tokenize failed; falling back to HTTP /render"
                     );
                 }
-                let outcome = self
-                    .render_via_http(render_url, workers, model, input, raw_body, req_id)
-                    .await;
+                let outcome = self.render_via_http(req).await;
                 // A double failure is counted by `render_with_fallback`.
                 if matches!(outcome, TokenizeOutcome::Ok(_)) {
                     self.prom.record_tokenize_path("http_fallback");
@@ -305,18 +294,8 @@ impl KinferenceService {
 
     /// `Compare` mode: `/render` is returned; the local result is only
     /// compared against it, for the divergence counters.
-    async fn tokenize_via_http_with_compare(
-        &self,
-        render_url: Option<&str>,
-        workers: &[(u64, WorkerEntry)],
-        model: &str,
-        input: &TokenizeInput,
-        raw_body: Option<&[u8]>,
-        req_id: Option<&str>,
-    ) -> TokenizeOutcome {
-        let outcome = self
-            .render_via_http(render_url, workers, model, input, raw_body, req_id)
-            .await;
+    async fn tokenize_via_http_with_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
+        let outcome = self.render_via_http(req).await;
         if let (Some(local_reg), TokenizeOutcome::Ok(http_tokens)) =
             (self.local_tokenizer.as_ref(), &outcome)
         {
@@ -324,8 +303,8 @@ impl KinferenceService {
             // pick latency.
             let local_reg = local_reg.clone();
             let prom = self.prom.clone();
-            let model_owned = model.to_string();
-            let input_owned = input.clone();
+            let model_owned = req.model.to_string();
+            let input_owned = req.input.clone();
             let http_tokens_owned: Vec<u32> = http_tokens.clone();
             tokio::spawn(async move {
                 Self::compare_local_tokenize_inner(
