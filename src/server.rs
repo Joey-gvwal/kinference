@@ -10,11 +10,12 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
+use crate::controller::discovery::KubeDiscovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use crate::fleet::discovery::{DiscoveryMode, kubernetes::KubeDiscovery};
+use crate::fleet::discovery::{Discovery, DiscoveryFactory, DiscoveryMode};
 use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;
@@ -281,6 +282,11 @@ pub async fn run() -> Result<()> {
         } else {
             None
         };
+        let kubernetes: Option<DiscoveryFactory> = kube_client.map(|client| {
+            Arc::new(move |cfg| {
+                Arc::new(KubeDiscovery::from_client(cfg, client.clone())) as Arc<dyn Discovery>
+            }) as DiscoveryFactory
+        });
 
         // Pools can be built now. `PoolManager` owns the live set and
         // publishes it to the registry; the coordinator starts each pool's
@@ -288,7 +294,7 @@ pub async fn run() -> Result<()> {
         let (coordinator, inbox) = Coordinator::new(
             Handles {
                 cancel: cancel.clone(),
-                kube_client,
+                kubernetes,
                 metrics: metrics.clone(),
                 prom: fleet_prom,
                 models: models.clone(),

@@ -8,15 +8,18 @@
 //! Two implementations:
 //! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
 //!   set's `workers_file`, then waits on `cancel`.
-//! - [`kubernetes::KubeDiscovery`] watches a Service's EndpointSlices and
-//!   emits `Added`/`Removed` as endpoints become or stop being Ready.
+//! - `controller::discovery::KubeDiscovery` watches a Service's
+//!   EndpointSlices and emits `Added`/`Removed` as endpoints become or stop
+//!   being Ready. The server builds it through a [`DiscoveryFactory`], so
+//!   the fleet never holds a Kubernetes client.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub mod kubernetes;
 pub mod static_config;
 
 /// One discovery event, consumed by `fleet::coordinator`.
@@ -53,6 +56,10 @@ pub trait Discovery: Send + Sync + 'static {
         cancel: CancellationToken,
     );
 }
+
+/// Builds one pool's Kubernetes discovery from its config. The server binds
+/// the in-cluster client once; the fleet never sees `kube`.
+pub type DiscoveryFactory = Arc<dyn Fn(DiscoveryConfig) -> Arc<dyn Discovery> + Send + Sync>;
 
 /// `[workerset.discovery]`: where a pool's workers come from.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]

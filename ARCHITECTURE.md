@@ -27,16 +27,18 @@ A module belongs to one group. A group is a directory under `src`. Its
 `mod.rs` lists the modules and holds nothing else.
 
 - Fleet, `src/fleet`. Which workers exist and what state they are in.
-  Pools, the worker registry, discovery, the coordinator that adds and
-  evicts workers, the scrape of engine metrics, the ZMQ ingest of KV-cache
-  events, the in-flight state, the collector behind the fleet gauges, and
-  the fleet's own metric families.
+  Pools, the worker registry, the discovery trait and static discovery,
+  the coordinator that adds and evicts workers, the scrape of engine
+  metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
+  collector behind the fleet gauges, the fleet's own metric families, and
+  its error type.
 - Router, `src/router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, the
   mock, and the request-path metric families.
 - Controller, `src/controller`. The Kubernetes control plane. The CRD
   watch and its snapshot, the status and binding writers, the worker-set
-  reconcile, leader election, and the control plane's metric families.
+  reconcile, leader election, EndpointSlice discovery, and the control
+  plane's metric families.
 - Operator surface, the top of `src`. Config, wiring, the admin
   listener, the Prometheus exposition, and the version string.
 
@@ -63,7 +65,8 @@ Today the tree breaks this rule in two places:
 | Module | Owns |
 | --- | --- |
 | `fleet::coordinator` | the worker lifecycle: the loop that takes discovery and eviction events, add, evict and drop, and the pool hooks that start and stop a pool's discovery |
-| `fleet::discovery` | the `Discovery` trait, static workers, and the Kubernetes EndpointSlice watch |
+| `fleet::discovery` | the `Discovery` trait, its config types, static workers, and the factory the server supplies for Kubernetes discovery |
+| `fleet::error` | `Error`, the fleet's error type |
 | `fleet::eviction` | the channel that asks the coordinator to drop a worker |
 | `fleet::gauges` | the Prometheus collector for the fleet gauges: worker health and saturation computed at gather, the index size from a tree dump at most once every 10s |
 | `fleet::inflight` | per-endpoint picks not yet observed, and prefixes dispatched but not yet in the KV index |
@@ -73,6 +76,7 @@ Today the tree breaks this rule in two places:
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::profile` | the `[[profile]]` tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
+| `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
@@ -86,6 +90,7 @@ Today the tree breaks this rule in two places:
 | `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
 | `router::tokenize` | HTTP `/render` helpers |
 | `router::tokenize_client` | `/render` with local fallback and compare mode, as methods on the service |
+| `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
 | `controller::policy` | the CRD watch and snapshot, the status writer, the binding writer, the worker-set reconcile |

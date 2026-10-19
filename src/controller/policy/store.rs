@@ -2,7 +2,7 @@
 //!
 //! Six reflectors feed [`resolve`]: `InferencePool`, `InferencePolicy`,
 //! `InferenceWorkerSet`, `InferenceProvider`, and (read-only) `HTTPRoute` and
-//! `ReferenceGrant`. As in [`crate::fleet::discovery::kubernetes`], watch events are
+//! `ReferenceGrant`. As in [`crate::controller::discovery`], watch events are
 //! bare wakeups and all state is re-derived from the stores on each one.
 //!
 //! A seventh reflector, on core `Service`, is not an input to [`resolve`] and
@@ -67,7 +67,7 @@ pub struct PolicyWatcher {
 impl PolicyWatcher {
     /// Build a watcher.
     ///
-    /// Unlike [`crate::fleet::discovery::kubernetes::KubeDiscovery`], this honors
+    /// Unlike [`crate::controller::discovery::KubeDiscovery`], this honors
     /// `~/.kube/config` when there is no service-account token. Discovery
     /// can't, since the pod IPs it returns are unreachable from outside the
     /// cluster; policy only reads and writes CRDs, so it can run against a

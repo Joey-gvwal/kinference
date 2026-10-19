@@ -18,6 +18,7 @@ use prometheus::proto::MetricFamily;
 use prometheus::{GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
 use tokio::time::Instant;
 
+use crate::fleet::metrics::family;
 use crate::fleet::pool::PoolRegistry;
 use crate::fleet::scrape::MetricsRegistry;
 
@@ -58,7 +59,7 @@ impl FleetGauges {
         scrape: Arc<MetricsRegistry>,
         registry: &Registry,
     ) -> Self {
-        let workers = IntGaugeVec::new(
+        let workers = family(IntGaugeVec::new(
             Opts::new(
                 "kinference_workers",
                 "Workers by reachability: ok, or unresponsive when its /metrics \
@@ -66,9 +67,8 @@ impl FleetGauges {
                  routable — it is scored on its last known sample",
             ),
             &["state"],
-        )
-        .expect("workers gauge opts are valid");
-        let workers_by_model = IntGaugeVec::new(
+        ));
+        let workers_by_model = family(IntGaugeVec::new(
             Opts::new(
                 "kinference_workers_by_model",
                 "Worker reachability by served model and state. A worker serving \
@@ -76,9 +76,8 @@ impl FleetGauges {
                  can exceed the fleet — use kinference_workers for the total",
             ),
             &["model", "state"],
-        )
-        .expect("workers_by_model gauge opts are valid");
-        let queued_prompts_mean = GaugeVec::new(
+        ));
+        let queued_prompts_mean = family(GaugeVec::new(
             Opts::new(
                 "kinference_worker_queued_prompts_mean30s",
                 "Mean queued prompts per worker over a 30s window — the exact \
@@ -87,9 +86,8 @@ impl FleetGauges {
                  out of thirty reads about 0.3. Plot it to pick a threshold",
             ),
             &["worker", "model"],
-        )
-        .expect("worker_queued_prompts_mean gauge opts are valid");
-        let kv_cache_usage_mean = GaugeVec::new(
+        ));
+        let kv_cache_usage_mean = family(GaugeVec::new(
             Opts::new(
                 "kinference_worker_kv_cache_usage_mean30s",
                 "Mean KV-cache utilization per worker (0..1) over the same 30s \
@@ -98,23 +96,20 @@ impl FleetGauges {
                  can read low at high pressure",
             ),
             &["worker", "model"],
-        )
-        .expect("worker_kv_cache_usage_mean gauge opts are valid");
-        let index_blocks = IntGauge::new(
+        ));
+        let index_blocks = family(IntGauge::new(
             "kinference_index_blocks",
             "Blocks currently in the prefix radix tree, summed across pools. \
              Measured by a tree dump at most once every 10s, since the dump is \
              O(tree)",
-        )
-        .expect("index_blocks gauge opts are valid");
-        let index_workers = IntGauge::new(
+        ));
+        let index_workers = family(IntGauge::new(
             "kinference_index_workers",
             "Workers appearing in the prefix radix tree, summed across pools. \
              Compare against the configured worker count: a worker missing here \
              can never win a cache-affinity pick, so it silently gets no prefix \
              credit. Same refresh as kinference_index_blocks",
-        )
-        .expect("index_workers gauge opts are valid");
+        ));
         let gauges = Self {
             pools,
             scrape,

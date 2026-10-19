@@ -20,7 +20,6 @@
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow};
 use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{KvCacheEventData, WorkerWithDpRank};
 use dynamo_kv_router::recovery::{CursorObservation, CursorState};
@@ -29,6 +28,7 @@ use dynamo_kv_router::zmq_wire::{
 };
 use tokio::io::unix::AsyncFd;
 
+use crate::fleet::error::Error;
 use crate::fleet::eviction::{EvictionReason, EvictionRequest, EvictionTx};
 use crate::fleet::metrics::IngestEvent;
 use crate::fleet::pool::WorkerContext;
@@ -108,7 +108,7 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
                 tracing::warn!(
                     worker_id = ctx.cfg.worker_id_str,
                     endpoint = ?ctx.cfg.zmq_endpoint,
-                    error = %err,
+                    error = &err as &dyn std::error::Error,
                     "Listener errored; reconnecting in 1s"
                 );
                 tokio::select! {
@@ -234,7 +234,7 @@ impl ReplayProgress {
 /// Run a single listener until it errors or `cancel` fires. All gap recovery
 /// happens inside the SUB-recv branch, synchronously, before the triggering
 /// frame is applied.
-async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<()> {
+async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), Error> {
     let cfg = &ctx.cfg;
     let block_size = ctx.block_size;
     let workers = &ctx.registry;
@@ -243,10 +243,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<()> 
     let worker_id_str = cfg.worker_id_str.clone();
     let replay_wall_budget = ingest.replay_timeout;
 
-    let live_endpoint = cfg
-        .zmq_endpoint
-        .clone()
-        .context("worker has no zmq_endpoint configured (ingest should only run in real mode)")?;
+    let live_endpoint = cfg.zmq_endpoint.clone().ok_or(Error::NoZmqEndpoint)?;
     let replay_endpoint = cfg.replay_endpoint.clone();
 
     let mut sub = ZmqSocket::sub(&live_endpoint, &worker_id_str)?;
@@ -468,7 +465,7 @@ async fn replay_gap(
             worker_id = worker_id_str,
             start_seq,
             end_seq,
-            error = %err,
+            error = &err as &dyn std::error::Error,
             "replay request send failed; abandoning this gap"
         );
         return;
@@ -496,7 +493,7 @@ async fn replay_gap(
                     start_seq,
                     end_seq,
                     replayed = progress.replayed,
-                    error = %err,
+                    error = &err as &dyn std::error::Error,
                     "replay recv error; abandoning this gap"
                 );
                 break;
@@ -961,49 +958,60 @@ impl AsRawFd for SocketWrapper {
     }
 }
 
+/// `map_err` adapters that name the failed call.
+fn zmq(op: &'static str) -> impl Fn(zmq::Error) -> Error {
+    move |source| Error::Zmq { op, source }
+}
+
+fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
+    move |source| Error::Io { op, source }
+}
+
 impl ZmqSocket {
-    fn sub(endpoint: &str, worker_id: &str) -> Result<Self> {
+    fn sub(endpoint: &str, worker_id: &str) -> Result<Self, Error> {
         let ctx = zmq::Context::new();
-        let socket = ctx.socket(zmq::SUB).context("creating SUB socket")?;
+        let socket = ctx.socket(zmq::SUB).map_err(zmq("creating SUB socket"))?;
         socket
             .set_subscribe(b"")
-            .context("SUB set_subscribe(empty)")?;
+            .map_err(zmq("SUB set_subscribe(empty)"))?;
         socket
             .set_rcvtimeo(ZMQ_SUB_RCVTIMEO_MS)
-            .context("SUB set_rcvtimeo")?;
+            .map_err(zmq("SUB set_rcvtimeo"))?;
         socket
             .set_rcvhwm(ZMQ_SUB_RCVHWM)
-            .context("SUB set_rcvhwm")?;
+            .map_err(zmq("SUB set_rcvhwm"))?;
         apply_socket_robustness(&socket, worker_id, "SUB");
-        socket.connect(endpoint).context("SUB connect")?;
+        socket.connect(endpoint).map_err(zmq("SUB connect"))?;
         Self::wrap(socket)
     }
 
-    fn dealer(endpoint: &str, worker_id: &str) -> Result<Self> {
+    fn dealer(endpoint: &str, worker_id: &str) -> Result<Self, Error> {
         let ctx = zmq::Context::new();
-        let socket = ctx.socket(zmq::DEALER).context("creating DEALER socket")?;
+        let socket = ctx
+            .socket(zmq::DEALER)
+            .map_err(zmq("creating DEALER socket"))?;
         socket
             .set_sndtimeo(ZMQ_DEALER_SNDTIMEO_MS)
-            .context("DEALER set_sndtimeo")?;
+            .map_err(zmq("DEALER set_sndtimeo"))?;
         socket
             .set_rcvtimeo(REPLAY_DEALER_RCVTIMEO_MS)
-            .context("DEALER set_rcvtimeo")?;
+            .map_err(zmq("DEALER set_rcvtimeo"))?;
         socket
             .set_linger(ZMQ_LINGER_MS)
-            .context("DEALER set_linger")?;
+            .map_err(zmq("DEALER set_linger"))?;
         apply_socket_robustness(&socket, worker_id, "DEALER");
-        socket.connect(endpoint).context("DEALER connect")?;
+        socket.connect(endpoint).map_err(zmq("DEALER connect"))?;
         Self::wrap(socket)
     }
 
-    fn wrap(socket: zmq::Socket) -> Result<Self> {
-        let fd = socket.get_fd().context("socket get_fd")?;
+    fn wrap(socket: zmq::Socket) -> Result<Self, Error> {
+        let fd = socket.get_fd().map_err(zmq("socket get_fd"))?;
         let wrapper = SocketWrapper { socket, fd };
-        let inner = AsyncFd::new(wrapper).context("AsyncFd::new")?;
+        let inner = AsyncFd::new(wrapper).map_err(io("AsyncFd::new"))?;
         Ok(Self { inner })
     }
 
-    async fn recv_multipart(&mut self) -> Result<Vec<Vec<u8>>> {
+    async fn recv_multipart(&mut self) -> Result<Vec<Vec<u8>>, Error> {
         loop {
             // ZMQ's fd is edge-triggered. The traces distinguish three ways
             // a listener can go quiet:
@@ -1017,14 +1025,14 @@ impl ZmqSocket {
                 .inner
                 .readable_mut()
                 .await
-                .context("AsyncFd readable")?;
+                .map_err(io("AsyncFd readable"))?;
             tracing::trace!("zmq: fd readable");
             // Not actually ready: clear the readiness and wait again.
             let events = guard
                 .get_inner_mut()
                 .socket
                 .get_events()
-                .context("zmq get_events")?;
+                .map_err(zmq("zmq get_events"))?;
             if !events.contains(zmq::POLLIN) {
                 tracing::trace!(events = events.bits(), "zmq: readable but no POLLIN");
                 guard.clear_ready();
@@ -1040,7 +1048,7 @@ impl ZmqSocket {
                     guard.clear_ready();
                     continue;
                 }
-                Err(err) => return Err(anyhow!("recv_multipart: {err}")),
+                Err(source) => return Err(Error::Zmq { op: "recv", source }),
             }
         }
     }
@@ -1050,7 +1058,7 @@ impl ZmqSocket {
     async fn recv_multipart_with_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<Option<Vec<Vec<u8>>>> {
+    ) -> Result<Option<Vec<Vec<u8>>>, Error> {
         match tokio::time::timeout(timeout, self.recv_multipart()).await {
             Ok(Ok(msg)) => Ok(Some(msg)),
             Ok(Err(err)) => Err(err),
@@ -1058,7 +1066,7 @@ impl ZmqSocket {
         }
     }
 
-    async fn send_multipart(&mut self, frames: &[Vec<u8>]) -> Result<()> {
+    async fn send_multipart(&mut self, frames: &[Vec<u8>]) -> Result<(), Error> {
         if frames.is_empty() {
             return Ok(());
         }
@@ -1074,12 +1082,12 @@ impl ZmqSocket {
                     .inner
                     .writable_mut()
                     .await
-                    .context("AsyncFd writable")?;
+                    .map_err(io("AsyncFd writable"))?;
                 let events = guard
                     .get_inner_mut()
                     .socket
                     .get_events()
-                    .context("zmq get_events")?;
+                    .map_err(zmq("zmq get_events"))?;
                 if !events.contains(zmq::POLLOUT) {
                     guard.clear_ready();
                     continue;
@@ -1090,7 +1098,7 @@ impl ZmqSocket {
                         guard.clear_ready();
                         continue;
                     }
-                    Err(err) => return Err(anyhow!("send: {err}")),
+                    Err(source) => return Err(Error::Zmq { op: "send", source }),
                 }
             }
         }

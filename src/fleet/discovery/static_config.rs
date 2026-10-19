@@ -5,13 +5,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::{Discovery, WorkerChange, WorkerConfig};
+use crate::fleet::error::Error;
 
 pub struct StaticDiscovery {
     workers: Vec<WorkerConfig>,
@@ -51,12 +51,16 @@ pub struct WorkersFile {
 }
 
 impl WorkersFile {
-    pub fn load(path: impl AsRef<Path>) -> Result<Vec<WorkerConfig>> {
+    pub fn load(path: impl AsRef<Path>) -> Result<Vec<WorkerConfig>, Error> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading workers file from {}", path.display()))?;
-        let wf: Self = toml::from_str(&text)
-            .with_context(|| format!("parsing workers TOML from {}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|source| Error::ReadWorkersFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let wf: Self = toml::from_str(&text).map_err(|source| Error::ParseWorkersFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Ok(wf.workers)
     }
 }

@@ -532,7 +532,7 @@ impl crate::fleet::pool::PoolHooks for NoopHooks {
         &self,
         _pool: &std::sync::Arc<crate::fleet::pool::Pool>,
         _spec: &PoolSpec,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), crate::fleet::error::Error> {
         Ok(())
     }
     fn on_retire(&self, _pool: &std::sync::Arc<crate::fleet::pool::Pool>) {}
