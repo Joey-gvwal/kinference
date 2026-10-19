@@ -16,7 +16,6 @@ use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use crate::fleet::discovery::{DiscoveryMode, kubernetes::KubeDiscovery};
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;
-use crate::fleet::rollup;
 use crate::fleet::scrape::MetricsRegistry;
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::router::body_store;
@@ -364,14 +363,8 @@ pub async fn run() -> Result<()> {
         // for.
         let policy_store_cell = cfg.policy.enabled.then(policy::store::PolicyStore::new);
 
-        // Admin listener and the metrics rollup, when configured.
+        // Admin listener, when configured.
         if let Some(dash_addr) = cfg.admin_listen {
-            rollup::spawn(
-                pool_registry.clone(),
-                metrics.clone(),
-                prom.clone(),
-                cancel.clone(),
-            );
             // `/readyz` gates on the policy store being listed, so picks don't
             // bypass policy at startup.
             let dash_pools = pool_registry.clone();

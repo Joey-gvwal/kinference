@@ -4,11 +4,11 @@
 pub mod coordinator;
 pub mod discovery;
 pub mod eviction;
+pub mod gauges;
 pub mod inflight;
 pub mod ingest;
 pub mod models;
 pub mod pool;
 pub mod profile;
-pub mod rollup;
 pub mod scrape;
 pub mod workers;

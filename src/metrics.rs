@@ -9,10 +9,9 @@
 //! fields here.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
 
 use prometheus::{
-    Encoder, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Opts, Registry, TextEncoder, exponential_buckets,
 };
 
@@ -314,20 +313,8 @@ pub struct PromMetrics {
     tokenize_duration_ms: Histogram,
     /// `kinference_tokenize_compare_total{result}`: compare-mode agreement.
     tokenize_compare: IntCounterVec,
-    /// `kinference_workers{state}`: worker reachability.
-    workers: IntGaugeVec,
     /// `kinference_worker_evictions_total{reason}`: workers kinference removed itself.
     worker_evictions: IntCounterVec,
-    /// `kinference_workers_by_model{model,state}`: the same reachability, split
-    /// by served model. A separate family because a worker serving several
-    /// models is counted under each, so the sum can exceed the fleet.
-    workers_by_model: IntGaugeVec,
-    /// Models `workers_by_model` has emitted, so departed ones can be zeroed.
-    workers_by_model_seen: Mutex<HashSet<String>>,
-    /// `kinference_index_blocks`: blocks in the radix tree, fleet-wide.
-    index_blocks: IntGauge,
-    /// `kinference_index_workers`: workers present in the radix tree, fleet-wide.
-    index_workers: IntGauge,
     /// `kinference_index_events_total{kind}`: KV events applied, by kind.
     index_events: IntCounterVec,
     /// `kinference_index_blocks_stored_total` / `_removed_total`: block churn.
@@ -374,11 +361,6 @@ pub struct PromMetrics {
     /// `kinference_policy_warnings{policy,code}`: how many findings each policy
     /// carries in `status.warnings`, by code.
     policy_warnings: IntGaugeVec,
-    /// `kinference_worker_queued_prompts_mean30s{worker,model}` and its KV
-    /// sibling: the two signals `InferencePolicy` thresholds on, per worker so
-    /// thresholds can be calibrated. Cardinality is bounded by the fleet.
-    worker_queued_prompts_mean: GaugeVec,
-    worker_kv_cache_usage_mean: GaugeVec,
     /// `kinference_predicted_ttft_ms{worker,model}`: the values `predictedTTFT`
     /// compares against, for every candidate scored (winners alone would be
     /// biased low).
@@ -715,16 +697,6 @@ impl PromMetrics {
             &["result"],
         )
         .expect("tokenize_compare counter opts are valid");
-        let workers = IntGaugeVec::new(
-            Opts::new(
-                "kinference_workers",
-                "Workers by reachability: ok, or unresponsive when its /metrics \
-                 scrape has been stale for over 5s. An unresponsive worker is still \
-                 routable — it is scored on its last known sample",
-            ),
-            &["state"],
-        )
-        .expect("workers gauge opts are valid");
         let worker_evictions = IntCounterVec::new(
             Opts::new(
                 "kinference_worker_evictions_total",
@@ -739,31 +711,6 @@ impl PromMetrics {
             &["reason"],
         )
         .expect("worker_evictions counter opts are valid");
-        let workers_by_model = IntGaugeVec::new(
-            Opts::new(
-                "kinference_workers_by_model",
-                "Worker reachability by served model and state. A worker serving \
-                 several models is counted under EACH, so summing across models \
-                 can exceed the fleet — use kinference_workers for the total",
-            ),
-            &["model", "state"],
-        )
-        .expect("workers_by_model gauge opts are valid");
-        let index_blocks = IntGauge::new(
-            "kinference_index_blocks",
-            "Blocks currently in the prefix radix tree, summed across pools. \
-             Refreshed on a THROTTLED tree dump (roughly every 10s), not per \
-             scrape, because the dump is O(tree)",
-        )
-        .expect("index_blocks gauge opts are valid");
-        let index_workers = IntGauge::new(
-            "kinference_index_workers",
-            "Workers appearing in the prefix radix tree, summed across pools. \
-             Compare against the configured worker count: a worker missing here \
-             can never win a cache-affinity pick, so it silently gets no prefix \
-             credit. Same throttled refresh as kinference_index_blocks",
-        )
-        .expect("index_workers gauge opts are valid");
         let index_events = IntCounterVec::new(
             Opts::new(
                 "kinference_index_events_total",
@@ -887,28 +834,6 @@ impl PromMetrics {
             &["worker", "model"],
         )
         .expect("predicted_ttft_ms histogram opts are valid");
-        let worker_queued_prompts_mean = GaugeVec::new(
-            Opts::new(
-                "kinference_worker_queued_prompts_mean30s",
-                "Mean queued prompts per worker over a 30s window — the exact \
-                 value `InferencePolicy`'s `queuedPrompts` predicate reads. \
-                 Fractional: a worker that queued 5 prompts for two seconds \
-                 out of thirty reads about 0.3. Plot it to pick a threshold",
-            ),
-            &["worker", "model"],
-        )
-        .expect("worker_queued_prompts_mean gauge opts are valid");
-        let worker_kv_cache_usage_mean = GaugeVec::new(
-            Opts::new(
-                "kinference_worker_kv_cache_usage_mean30s",
-                "Mean KV-cache utilization per worker (0..1) over the same 30s \
-                 window, as read by the `kvCacheUsage` predicate. The headroom \
-                 signal: it rises monotonically with pressure, where the queue \
-                 can read low at high pressure",
-            ),
-            &["worker", "model"],
-        )
-        .expect("worker_kv_cache_usage_mean gauge opts are valid");
         let policy_revision_mismatch = IntCounter::new(
             "kinference_policy_revision_mismatch_total",
             "Picks whose named InferencePool revision differed from the watched one",
@@ -1015,20 +940,8 @@ impl PromMetrics {
             .register(Box::new(tokenize_compare.clone()))
             .expect("register tokenize_compare");
         registry
-            .register(Box::new(workers.clone()))
-            .expect("register workers");
-        registry
-            .register(Box::new(workers_by_model.clone()))
-            .expect("register workers_by_model");
-        registry
             .register(Box::new(worker_evictions.clone()))
             .expect("register worker_evictions");
-        registry
-            .register(Box::new(index_blocks.clone()))
-            .expect("register index_blocks");
-        registry
-            .register(Box::new(index_workers.clone()))
-            .expect("register index_workers");
         registry
             .register(Box::new(index_events.clone()))
             .expect("register index_events");
@@ -1072,12 +985,6 @@ impl PromMetrics {
             .register(Box::new(predicted_ttft_ms.clone()))
             .expect("register predicted_ttft_ms");
         registry
-            .register(Box::new(worker_queued_prompts_mean.clone()))
-            .expect("register worker_queued_prompts_mean");
-        registry
-            .register(Box::new(worker_kv_cache_usage_mean.clone()))
-            .expect("register worker_kv_cache_usage_mean");
-        registry
             .register(Box::new(policy_revision_mismatch.clone()))
             .expect("register policy_revision_mismatch");
         registry
@@ -1090,12 +997,7 @@ impl PromMetrics {
             tokenize_path,
             tokenize_duration_ms,
             tokenize_compare,
-            workers,
-            workers_by_model,
             worker_evictions,
-            workers_by_model_seen: Mutex::new(HashSet::new()),
-            index_blocks,
-            index_workers,
             index_events,
             index_blocks_stored,
             index_blocks_removed,
@@ -1134,8 +1036,6 @@ impl PromMetrics {
             leader_election_errors,
             policy_rule_matches,
             predicted_ttft_ms,
-            worker_queued_prompts_mean,
-            worker_kv_cache_usage_mean,
             policy_revision_mismatch,
             policy_warnings,
         };
@@ -1244,14 +1144,6 @@ impl PromMetrics {
         self.tokenize_compare.with_label_values(&[result]).inc();
     }
 
-    /// Worker reachability, recomputed each rollup tick.
-    pub fn set_worker_states(&self, ok: u64, unresponsive: u64) {
-        self.workers.with_label_values(&["ok"]).set(ok as i64);
-        self.workers
-            .with_label_values(&["unresponsive"])
-            .set(unresponsive as i64);
-    }
-
     /// One final-token report that could not be attributed to a pick.
     ///
     /// A direct counter, since deriving it from the difference of two families
@@ -1266,43 +1158,6 @@ impl PromMetrics {
     /// label and the WARN log cannot name different things.
     pub fn record_worker_eviction(&self, reason: &str) {
         self.worker_evictions.with_label_values(&[reason]).inc();
-    }
-
-    /// Per-model worker reachability. Companion to [`Self::set_worker_states`],
-    /// which stays the fleet total.
-    ///
-    /// Zeroes any model that has dropped out of the input since the last call.
-    /// Zeroing rather than `reset()` avoids a scrape seeing an empty family.
-    pub fn set_worker_states_by_model(&self, per_model: &[(String, u64, u64)]) {
-        let mut seen = self.workers_by_model_seen.lock().unwrap();
-        for (model, ok, unresponsive) in per_model {
-            self.workers_by_model
-                .with_label_values(&[model, "ok"])
-                .set(*ok as i64);
-            self.workers_by_model
-                .with_label_values(&[model, "unresponsive"])
-                .set(*unresponsive as i64);
-            seen.insert(model.clone());
-        }
-        let present: HashSet<&str> = per_model.iter().map(|(m, _, _)| m.as_str()).collect();
-        for model in seen.iter() {
-            if !present.contains(model.as_str()) {
-                self.workers_by_model
-                    .with_label_values(&[model, "ok"])
-                    .set(0);
-                self.workers_by_model
-                    .with_label_values(&[model, "unresponsive"])
-                    .set(0);
-            }
-        }
-    }
-
-    /// The radix tree's size, from a throttled dump.
-    ///
-    /// Between dumps the gauges hold their last value.
-    pub fn set_index_size(&self, blocks: u64, workers: u64) {
-        self.index_blocks.set(blocks as i64);
-        self.index_workers.set(workers as i64);
     }
 
     /// One KV-cache event as ingest decoded it, with the blocks it carried.
@@ -1414,22 +1269,6 @@ impl PromMetrics {
         self.predicted_ttft_ms
             .with_label_values(&[worker, model])
             .observe(ms);
-    }
-
-    /// Publish the per-worker saturation means, replacing the previous tick.
-    ///
-    /// `reset()` first, so a departed worker's last reading doesn't linger.
-    pub fn set_worker_saturation(&self, rows: &[(String, String, f64, f64)]) {
-        self.worker_queued_prompts_mean.reset();
-        self.worker_kv_cache_usage_mean.reset();
-        for (worker, model, queued, kv) in rows {
-            self.worker_queued_prompts_mean
-                .with_label_values(&[worker, model])
-                .set(*queued);
-            self.worker_kv_cache_usage_mean
-                .with_label_values(&[worker, model])
-                .set(*kv);
-        }
     }
 
     /// The pool revision the gateway routed on differs from the one we hold.

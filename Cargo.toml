@@ -105,6 +105,8 @@ getrandom.workspace = true
 workspace = true
 
 [dev-dependencies]
+# `tokio::time::pause` and `advance`, for the fleet gauges' dump-interval tests.
+tokio = { version = "1", features = ["test-util"] }
 # `PoolId::from_raw`, for tests that need a specific pool id.
 kinference-policy = { workspace = true, features = ["test-util"] }
 # `ServiceExt::oneshot`, to drive the admin router in tests exactly as a
