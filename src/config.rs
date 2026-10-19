@@ -9,13 +9,13 @@ use serde::Deserialize;
 use crate::controller::leader::{self, LeaderElectionConfig};
 use crate::controller::policy::PolicyConfig;
 use crate::controller::policy::worker_sets::KubernetesConfig;
-use crate::fleet::discovery::static_config::WorkersFile;
-use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode};
-use crate::fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
-use crate::fleet::pool::PoolSpec;
-use crate::fleet::profile::ProfileConfig;
 use crate::router::metrics::MetricsConfig;
 use crate::router::tokenize_client::TokenizeConfig;
+use kinference_fleet::discovery::static_config::WorkersFile;
+use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryMode};
+use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
+use kinference_fleet::pool::PoolSpec;
+use kinference_fleet::profile::ProfileConfig;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]

@@ -10,7 +10,7 @@ fn render(registry: &prometheus::Registry) -> String {
 }
 use kinference_policy::PoolId;
 
-use crate::fleet::pool::test_pool;
+use kinference_fleet::pool::test_pool;
 
 fn score(endpoint: &str, queue_waiting: u32) -> WorkerScore {
     WorkerScore {
@@ -338,7 +338,7 @@ fn an_observed_provider_carries_its_p95_as_both_signal_and_objective() {
 /// Five of its parameters are `u32`, so a transposition would type-check.
 #[test]
 fn worker_score_maps_each_input_to_its_own_field() {
-    let entry = crate::fleet::workers::WorkerEntry {
+    let entry = kinference_fleet::workers::WorkerEntry {
         worker_id_str: "w-7".into(),
         model_name_hint: None,
         current_models: vec![],
@@ -357,7 +357,7 @@ fn worker_score_maps_each_input_to_its_own_field() {
         instance_type: None,
     };
     // Distinct values throughout, so any swap changes the assertion that fails.
-    let sample = crate::fleet::scrape::MetricsSample {
+    let sample = kinference_fleet::scrape::MetricsSample {
         completion_rate_per_sec: 1.5,
         waiting: 11,
         running: 22,
@@ -386,8 +386,8 @@ fn worker_score_maps_each_input_to_its_own_field() {
 // HTTP URL, so tokenization fails and scoring degrades to load only, which
 // still yields a score per worker.
 
-fn offline_worker(model: &str, addr: &str) -> crate::fleet::workers::WorkerEntry {
-    crate::fleet::workers::WorkerEntry {
+fn offline_worker(model: &str, addr: &str) -> kinference_fleet::workers::WorkerEntry {
+    kinference_fleet::workers::WorkerEntry {
         worker_id_str: addr.into(),
         model_name_hint: Some(model.into()),
         current_models: vec![model.into()],
@@ -439,14 +439,14 @@ fn policy_fleet_with(
 ) {
     let registry_prom = prometheus::Registry::new();
     let metrics = Arc::new(MetricsRegistry::new());
-    let registry = crate::fleet::pool::PoolRegistry::new();
+    let registry = kinference_fleet::pool::PoolRegistry::new();
     let (mut live, mut worker_sets, mut dests) = (Vec::new(), Vec::new(), Vec::new());
     let mut bound = std::collections::BTreeMap::new();
     let mut id = 0;
     for (name, model, addrs) in sets {
         // Named as a CRD worker set's pool is: keyed by namespace, with `name`
         // the key's `namespace/name` form (see `policy::worker_sets`).
-        let mut spec = crate::fleet::pool::test_spec(name, 16);
+        let mut spec = kinference_fleet::pool::test_spec(name, 16);
         spec.key = kinference_policy::PoolKey::namespaced("default", *name);
         spec.name = spec.key.to_string();
         let p = Arc::new(Pool::from_spec(
@@ -472,7 +472,7 @@ fn policy_fleet_with(
         dests.push(serde_json::json!({"kind": "InferenceWorkerSet", "name": name}));
         live.push(p);
     }
-    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(
+    registry.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(
         live.clone(),
     )));
     let mut provs = Vec::new();
@@ -625,7 +625,7 @@ async fn an_unscraped_worker_has_no_saturation_signals() {
     // Worker 2 was scraped and is idle; worker 1 never was.
     svc.metrics.record_sample_for_test(
         2,
-        crate::fleet::scrape::MetricsSample {
+        kinference_fleet::scrape::MetricsSample {
             scraped_at: Some(Instant::now()),
             ..Default::default()
         },

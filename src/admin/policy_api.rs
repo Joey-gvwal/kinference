@@ -39,9 +39,9 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use crate::controller::policy::store::PolicyStore;
-use crate::fleet::pool::PoolRegistry;
-use crate::fleet::scrape::MetricsRegistry;
 use crate::router::picker::{self, WorkerScore};
+use kinference_fleet::pool::PoolRegistry;
+use kinference_fleet::scrape::MetricsRegistry;
 
 // ── limits ───────────────────────────────────────────────────────────────────
 
@@ -960,28 +960,29 @@ fn predict(
     // none. Coefficients and block size differ per set. A synthesized worker
     // belongs to no set, so it borrows one, reported as `Borrowed`.
     let map = st.pools.snapshot();
-    let found: Result<(Option<String>, Arc<crate::fleet::pool::Pool>), &'static str> = match pool {
-        None => Err("no pool selected, so no predictor to run; ranked as 0.0 ms"),
-        Some(resolved) => {
-            let own = resolved
-                .local_destinations()
-                .find(|d| d.name == o.backend_name);
-            match own.map(|d| (d, None)).or_else(|| {
-                resolved
+    let found: Result<(Option<String>, Arc<kinference_fleet::pool::Pool>), &'static str> =
+        match pool {
+            None => Err("no pool selected, so no predictor to run; ranked as 0.0 ms"),
+            Some(resolved) => {
+                let own = resolved
                     .local_destinations()
-                    .next()
-                    .map(|d| (d, Some(d.name.clone())))
-            }) {
-                None => Err(
-                    "the pool has no local worker set to borrow a predictor from; ranked as 0.0 ms",
-                ),
-                Some((ws, borrowed)) => map
-                    .get(ws.pool_id)
-                    .map(|live| (borrowed, live.clone()))
-                    .ok_or("the worker set has no live pool yet; ranked as 0.0 ms"),
+                    .find(|d| d.name == o.backend_name);
+                match own.map(|d| (d, None)).or_else(|| {
+                    resolved
+                        .local_destinations()
+                        .next()
+                        .map(|d| (d, Some(d.name.clone())))
+                }) {
+                    None => Err(
+                        "the pool has no local worker set to borrow a predictor from; ranked as 0.0 ms",
+                    ),
+                    Some((ws, borrowed)) => map
+                        .get(ws.pool_id)
+                        .map(|live| (borrowed, live.clone()))
+                        .ok_or("the worker set has no live pool yet; ranked as 0.0 ms"),
+                }
             }
-        }
-    };
+        };
 
     // Ceiling division: a partial block still has to be prefilled. `validate`
     // bounds the token count, so this can't overflow.

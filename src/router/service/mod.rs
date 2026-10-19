@@ -14,15 +14,15 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::AUTO_MODEL;
 
-use crate::fleet::models::ModelIndex;
-use crate::fleet::pool::Pool;
-use crate::fleet::scrape::MetricsRegistry;
-use crate::fleet::workers::WorkerEntry;
 use crate::router::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
 use crate::router::tokenize::TokenizeInput;
+use kinference_fleet::models::ModelIndex;
+use kinference_fleet::pool::Pool;
+use kinference_fleet::scrape::MetricsRegistry;
+use kinference_fleet::workers::WorkerEntry;
 
 /// Quality-of-service class for a request, mapped from the proto
 /// `PickRequest.QosClass`. Used as the `qos` label on `/metrics` series.
@@ -316,7 +316,7 @@ pub struct KinferenceService {
     /// The pools this fleet manages. Each owns its own predictor, picker,
     /// block size, indexer and registry. Pools come and go, and the service is
     /// shared behind an `Arc`, so the set is swapped rather than edited.
-    pub(crate) pools: Arc<crate::fleet::pool::PoolRegistry>,
+    pub(crate) pools: Arc<kinference_fleet::pool::PoolRegistry>,
     /// Which pools serve each model, read on the pick hot path. Several pools
     /// may serve one model; `pick_and_record` ranks across them.
     pub(crate) models: Arc<ModelIndex>,
@@ -363,7 +363,7 @@ pub struct KinferenceService {
 impl KinferenceService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pools: Arc<crate::fleet::pool::PoolRegistry>,
+        pools: Arc<kinference_fleet::pool::PoolRegistry>,
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
         tokenize_client: Arc<reqwest::Client>,
@@ -542,7 +542,7 @@ impl KinferenceService {
 /// them while still reporting real load.
 fn worker_score(
     entry: &WorkerEntry,
-    sample: &crate::fleet::scrape::MetricsSample,
+    sample: &kinference_fleet::scrape::MetricsSample,
     block_size: u32,
     matched_blocks: u32,
     total_blocks: u32,
@@ -617,7 +617,7 @@ fn best_group(
             .scores
             .iter()
             .map(|s| {
-                let summaries: Vec<crate::fleet::inflight::InflightSummary> = group
+                let summaries: Vec<kinference_fleet::inflight::InflightSummary> = group
                     .pool
                     .inflight_prefixes
                     .dispatches_for(&s.endpoint)

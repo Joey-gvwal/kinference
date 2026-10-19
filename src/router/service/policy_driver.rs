@@ -383,7 +383,7 @@ impl KinferenceService {
             .scores
             .iter()
             .map(|s| {
-                let summaries: Vec<crate::fleet::inflight::InflightSummary> = group
+                let summaries: Vec<kinference_fleet::inflight::InflightSummary> = group
                     .pool
                     .inflight_prefixes
                     .dispatches_for(&s.endpoint)

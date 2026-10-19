@@ -1,7 +1,7 @@
 use super::*;
-use crate::fleet::workers::WorkerEntry;
+use kinference_fleet::workers::WorkerEntry;
 
-use crate::fleet::pool::test_pool as pool;
+use kinference_fleet::pool::test_pool as pool;
 
 fn ready_entry() -> WorkerEntry {
     WorkerEntry {
@@ -50,7 +50,7 @@ async fn ready_with_no_pools_at_all() {
 #[tokio::test]
 async fn ready_with_pools_whose_workers_are_still_cold() {
     let registry = PoolRegistry::new();
-    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+    registry.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
         pool("cold"),
     ])));
     let (status, body) = status_and_body(registry, None).await;
@@ -64,7 +64,9 @@ async fn the_body_counts_pools_with_ready_endpoints() {
     let registry = PoolRegistry::new();
     let p = pool("warm");
     p.registry.register(1, ready_entry());
-    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![p])));
+    registry.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
+        p,
+    ])));
     let (status, body) = status_and_body(registry, None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("ready endpoints: 1"), "got: {body:?}");
@@ -81,9 +83,11 @@ async fn the_first_scrape_shows_the_fleet_gauges_with_no_task_running() {
     let p = pool("warm");
     p.registry.register(1, ready_entry());
     p.indexer
-        .apply_event(crate::fleet::gauges::test_stored_event(1, &[1, 2]))
+        .apply_event(kinference_fleet::gauges::test_stored_event(1, &[1, 2]))
         .await;
-    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![p])));
+    registry.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
+        p,
+    ])));
     let (app, _) = app_with(None, registry);
 
     let (status, _, body) = call(&app, "GET", "/metrics", None, Body::empty()).await;
@@ -140,7 +144,7 @@ fn api_state(
     policy_api::PolicyApiState::new(
         policy,
         PoolRegistry::new(),
-        Arc::new(crate::fleet::scrape::MetricsRegistry::new()),
+        Arc::new(kinference_fleet::scrape::MetricsRegistry::new()),
     )
 }
 
@@ -488,7 +492,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
     entry.model_name_hint = Some("google/gemma-4-12B-it".into());
     live.registry.register(1, entry);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+    pools.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
         live,
     ])));
 
@@ -516,7 +520,7 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
     let st = policy_api::PolicyApiState::new(
         Some(store),
         pools,
-        Arc::new(crate::fleet::scrape::MetricsRegistry::new()),
+        Arc::new(kinference_fleet::scrape::MetricsRegistry::new()),
     );
     let (status, body) = body_of(policy_api::context(State(st)).await).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -612,7 +616,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
     entry.current_models = vec!["Qwen/Qwen2.5-32B-Instruct-AWQ".into()];
     live.registry.register(1, entry);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+    pools.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
         live,
     ])));
 
@@ -664,7 +668,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
             let st = policy_api::PolicyApiState::new(
                 Some(store),
                 pools,
-                Arc::new(crate::fleet::scrape::MetricsRegistry::new()),
+                Arc::new(kinference_fleet::scrape::MetricsRegistry::new()),
             );
             body_of(policy_api::simulate(State(st), policy_api::ApiJson(req)).await).await
         }
@@ -742,11 +746,11 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
 
     // Two live pools with different block sizes, so `total_blocks` and the
     // prefill term differ for one prompt.
-    let big = crate::fleet::pool::test_pool_with_block_size("big-blocks", 256);
-    let small = crate::fleet::pool::test_pool_with_block_size("small-blocks", 16);
+    let big = kinference_fleet::pool::test_pool_with_block_size("big-blocks", 256);
+    let small = kinference_fleet::pool::test_pool_with_block_size("small-blocks", 16);
     let (big_id, small_id) = (big.id, small.id);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+    pools.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
         big, small,
     ])));
 
@@ -798,7 +802,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
     let st = policy_api::PolicyApiState::new(
         Some(store),
         pools,
-        Arc::new(crate::fleet::scrape::MetricsRegistry::new()),
+        Arc::new(kinference_fleet::scrape::MetricsRegistry::new()),
     );
     let (status, body) =
         body_of(policy_api::simulate(State(st), policy_api::ApiJson(req)).await).await;
@@ -1001,7 +1005,7 @@ fn app_with(
     policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     pools: Arc<PoolRegistry>,
 ) -> (axum::Router, prometheus::Registry) {
-    let metrics = Arc::new(crate::fleet::scrape::MetricsRegistry::new());
+    let metrics = Arc::new(kinference_fleet::scrape::MetricsRegistry::new());
     let registry = metrics::registry();
     let state = AppState {
         pools: pools.clone(),
@@ -1332,7 +1336,7 @@ fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> a
     entry.model_name_hint = Some("google/gemma-4-12B-it".into());
     live.registry.register(1, entry);
     let pools = PoolRegistry::new();
-    pools.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![
+    pools.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
         live,
     ])));
     let mut by_key = std::collections::BTreeMap::new();

@@ -35,7 +35,7 @@ use kube::runtime::watcher::{self, watcher as start_watcher};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::fleet::discovery::{
+use kinference_fleet::discovery::{
     Discovery, DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
 };
 

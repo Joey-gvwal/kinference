@@ -14,13 +14,6 @@ use crate::controller::discovery::KubeDiscovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
-use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use crate::fleet::discovery::{Discovery, DiscoveryFactory, DiscoveryMode};
-use crate::fleet::metrics::FleetMetrics;
-use crate::fleet::models::ModelIndex;
-use crate::fleet::pool;
-use crate::fleet::scrape::MetricsRegistry;
-use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::router::body_store;
 use crate::router::local_tokenize;
 use crate::router::metrics::RouterMetrics;
@@ -29,6 +22,13 @@ use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
 use crate::{admin, metrics, version};
+use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
+use kinference_fleet::discovery::{Discovery, DiscoveryFactory, DiscoveryMode};
+use kinference_fleet::metrics::FleetMetrics;
+use kinference_fleet::models::ModelIndex;
+use kinference_fleet::pool;
+use kinference_fleet::scrape::MetricsRegistry;
+use kinference_fleet::workers::{WorkerEntry, WorkerRegistry};
 
 #[derive(Parser, Debug)]
 #[command(

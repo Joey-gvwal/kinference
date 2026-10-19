@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::fleet::profile::{PickerConfig, PredictorConfig};
 use crate::router::picker::WaitPrediction;
 use crate::router::picker::WorkerScore;
 use crate::router::service::Qos;
+use kinference_fleet::profile::{PickerConfig, PredictorConfig};
 
 /// The per-pool state a completed pick must release: decrement the endpoint's
 /// shadow count, and forget its in-flight prefix.
@@ -35,12 +35,12 @@ use crate::router::service::Qos;
 /// two small maps outlive it, for as long as an observation needs them.
 #[derive(Clone)]
 pub struct InflightHandles {
-    pub inflight: std::sync::Arc<crate::fleet::inflight::InflightRegistry>,
-    pub prefixes: std::sync::Arc<crate::fleet::inflight::InflightPrefixes>,
+    pub inflight: std::sync::Arc<kinference_fleet::inflight::InflightRegistry>,
+    pub prefixes: std::sync::Arc<kinference_fleet::inflight::InflightPrefixes>,
 }
 
 impl InflightHandles {
-    pub fn of(pool: &crate::fleet::pool::Pool) -> Self {
+    pub fn of(pool: &kinference_fleet::pool::Pool) -> Self {
         Self {
             inflight: pool.inflight.clone(),
             prefixes: pool.inflight_prefixes.clone(),

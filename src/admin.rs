@@ -18,10 +18,10 @@ use axum::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::fleet::gauges::FleetGauges;
-use crate::fleet::pool::PoolRegistry;
-use crate::fleet::scrape::MetricsRegistry;
 use crate::metrics;
+use kinference_fleet::gauges::FleetGauges;
+use kinference_fleet::pool::PoolRegistry;
+use kinference_fleet::scrape::MetricsRegistry;
 
 mod policy_api;
 

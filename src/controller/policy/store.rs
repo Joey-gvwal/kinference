@@ -48,7 +48,7 @@ impl PolicyStore {
 }
 
 /// Build the identity index from a live pool snapshot.
-pub fn pool_index(pools: &crate::fleet::pool::PoolMap) -> PoolIndex {
+pub fn pool_index(pools: &kinference_fleet::pool::PoolMap) -> PoolIndex {
     pools.iter().map(|p| (p.key.clone(), p.id)).collect()
 }
 
@@ -60,7 +60,7 @@ pub struct PolicyWatcher {
     /// destination reports the actual cause rather than a guess.
     rejections: Arc<super::worker_sets::RejectionStore>,
     /// The live pool set, read on every resolve since pools come and go.
-    pools: Arc<crate::fleet::pool::PoolRegistry>,
+    pools: Arc<kinference_fleet::pool::PoolRegistry>,
     store: Arc<PolicyStore>,
 }
 
@@ -74,7 +74,7 @@ impl PolicyWatcher {
     /// local cluster.
     pub async fn new(
         namespace: Option<String>,
-        pools: Arc<crate::fleet::pool::PoolRegistry>,
+        pools: Arc<kinference_fleet::pool::PoolRegistry>,
         rejections: Arc<super::worker_sets::RejectionStore>,
         store: Arc<PolicyStore>,
     ) -> anyhow::Result<Self> {

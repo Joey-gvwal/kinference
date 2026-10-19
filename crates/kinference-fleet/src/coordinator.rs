@@ -15,18 +15,18 @@ use kinference_policy::PoolId;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::fleet::discovery::{
+use crate::discovery::{
     Discovery, DiscoveryFactory, DiscoveryMode, WorkerChange, WorkerConfig,
     static_config::StaticDiscovery,
 };
-use crate::fleet::error::Error;
-use crate::fleet::eviction::{self, EvictionReason};
-use crate::fleet::ingest::{self, IngestConfig};
-use crate::fleet::metrics::FleetMetrics;
-use crate::fleet::models::ModelIndex;
-use crate::fleet::pool::{Pool, PoolHooks, PoolSpec, WorkerContext};
-use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
-use crate::fleet::workers::{ServedModelsVerdict, WorkerEntry};
+use crate::error::Error;
+use crate::eviction::{self, EvictionReason};
+use crate::ingest::{self, IngestConfig};
+use crate::metrics::FleetMetrics;
+use crate::models::ModelIndex;
+use crate::pool::{Pool, PoolHooks, PoolSpec, WorkerContext};
+use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
+use crate::workers::{ServedModelsVerdict, WorkerEntry};
 
 /// Shared handles, built once in `server`.
 pub struct Handles {

@@ -1795,12 +1795,12 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "k8s-openapi",
+ "kinference-fleet",
  "kinference-policy",
  "kube",
  "minijinja",
  "minijinja-contrib",
  "prometheus",
- "prometheus-parse",
  "prost",
  "protoc-bin-vendored",
  "reqwest",
@@ -1817,6 +1817,24 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "kinference-fleet"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "dynamo-kv-router",
+ "kinference-policy",
+ "prometheus",
+ "prometheus-parse",
+ "reqwest",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
  "zmq",
 ]
 

@@ -34,8 +34,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::store::PolicyStore;
-use crate::fleet::pool::Pool;
-use crate::fleet::scrape::MetricsRegistry;
+use kinference_fleet::pool::Pool;
+use kinference_fleet::scrape::MetricsRegistry;
 
 /// The controller identity written into `status.parents[].controllerName`.
 pub const CONTROLLER_NAME: &str = "kinference.buoyant.io/router";
@@ -850,7 +850,7 @@ fn cache_key(kind: &'static str, ns: &str, name: &str, uid: Option<&str>) -> Cac
 /// The live state the status writer reads, built once in `server`.
 pub struct StatusHandles {
     pub store: Arc<PolicyStore>,
-    pub pools: Arc<crate::fleet::pool::PoolRegistry>,
+    pub pools: Arc<kinference_fleet::pool::PoolRegistry>,
     /// Worker sets that produced no pool, which appear in no `PolicyIndex`.
     pub rejections: Arc<super::worker_sets::RejectionStore>,
     pub metrics: Arc<MetricsRegistry>,
@@ -867,7 +867,7 @@ pub struct StatusHandles {
 pub struct StatusWriter {
     client: kube::Client,
     store: Arc<PolicyStore>,
-    pools: Arc<crate::fleet::pool::PoolRegistry>,
+    pools: Arc<kinference_fleet::pool::PoolRegistry>,
     rejections: Arc<super::worker_sets::RejectionStore>,
     metrics: Arc<MetricsRegistry>,
     provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,

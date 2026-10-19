@@ -3,7 +3,7 @@
 
 use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 
-use crate::fleet::metrics::{int_counter, int_counter_vec, int_gauge, int_gauge_vec};
+use kinference_fleet::metrics::{int_counter, int_counter_vec, int_gauge, int_gauge_vec};
 
 /// `kinference_workerset_rejected_total{reason}`.
 /// Source: `kinference_policy::rejection::RejectReason::as_condition_reason`.

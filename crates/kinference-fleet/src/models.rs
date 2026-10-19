@@ -9,7 +9,7 @@ use std::sync::RwLock;
 
 use kinference_policy::PoolId;
 
-use crate::fleet::sync::{read, write};
+use crate::sync::{read, write};
 use tokio::sync::broadcast;
 
 /// A (model, pool) pair the index did not hold before. A repeat claim sends

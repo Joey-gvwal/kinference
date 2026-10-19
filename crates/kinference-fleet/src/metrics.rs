@@ -71,7 +71,7 @@ pub fn histogram_vec(
 const INDEX_EVENT_KINDS: [&str; 3] = ["stored", "removed", "cleared"];
 
 /// `kinference_worker_evictions_total{reason}`.
-/// Source: `crate::fleet::eviction::EvictionReason::as_label`.
+/// Source: `crate::eviction::EvictionReason::as_label`.
 ///
 /// Only evictions kinference decided on; ordinary discovery removals are not
 /// counted, so a rolling restart doesn't look like a fault.
@@ -156,7 +156,7 @@ impl FleetMetrics {
 
     /// One worker evicted by kinference's own decision.
     ///
-    /// `reason` comes from [`crate::fleet::eviction::EvictionReason::as_label`] so the
+    /// `reason` comes from [`crate::eviction::EvictionReason::as_label`] so the
     /// label and the WARN log cannot name different things.
     pub fn record_worker_eviction(&self, reason: &str) {
         self.worker_evictions.with_label_values(&[reason]).inc();

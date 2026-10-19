@@ -5,8 +5,8 @@
 use std::fmt::Write;
 use std::time::Instant;
 
-use crate::fleet::inflight::InflightSummary;
-use crate::fleet::profile::{PickerConfig, PredictorConfig};
+use kinference_fleet::inflight::InflightSummary;
+use kinference_fleet::profile::{PickerConfig, PredictorConfig};
 
 /// One worker's inputs to the picker, projected from `metrics::MetricsSample`
 /// by `service::scoring::worker_score`.

@@ -10,8 +10,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::fleet::discovery::{Discovery, WorkerChange, WorkerConfig};
-use crate::fleet::error::Error;
+use crate::discovery::{Discovery, WorkerChange, WorkerConfig};
+use crate::error::Error;
 
 pub struct StaticDiscovery {
     workers: Vec<WorkerConfig>,

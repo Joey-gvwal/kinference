@@ -1,6 +1,6 @@
 [workspace]
-members = [".", "crates/kinference-policy", "crates/kinfctl"]
-default-members = [".", "crates/kinference-policy", "crates/kinfctl"]
+members = [".", "crates/kinference-policy", "crates/kinference-fleet", "crates/kinfctl"]
+default-members = [".", "crates/kinference-policy", "crates/kinference-fleet", "crates/kinfctl"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 kinference-policy = { path = "crates/kinference-policy" }
+kinference-fleet = { path = "crates/kinference-fleet" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -19,6 +20,16 @@ clap = { version = "4", features = ["derive"] }
 kube = { version = "4", default-features = false }
 k8s-openapi = { version = "0.28", features = ["latest"] }
 getrandom = "0.2"
+dynamo-kv-router = { git = "https://github.com/ai-dynamo/dynamo", rev = "12207ba2cb397e40e260d39bce3f65c6fc799a49", default-features = false }
+tokio = "1"
+tokio-util = "0.7"
+toml = "0.8"
+zmq = "0.10"
+reqwest = { version = "0.12", default-features = false }
+dashmap = "6"
+prometheus-parse = "0.2"
+prometheus = { version = "0.13", default-features = false }
+async-trait = "0.1"
 
 [workspace.lints.clippy]
 # Service-facing functions return `tonic::Status` (and `(Status, RejectReason)`)
@@ -36,34 +47,31 @@ license.workspace = true
 
 [dependencies]
 kinference-policy.workspace = true
-dynamo-kv-router = { git = "https://github.com/ai-dynamo/dynamo", rev = "12207ba2cb397e40e260d39bce3f65c6fc799a49", default-features = false }
+kinference-fleet.workspace = true
+dynamo-kv-router.workspace = true
 tonic = "0.12"
 prost = "0.13"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = "0.7"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util.workspace = true
 # `ReceiverStream` for wrapping our mpsc::Receiver into the
 # `tonic::codegen::tokio_stream::Stream` shape the server-streaming
 # `PullBody` method requires. Already a transitive dep via tonic, but
 # pulled in directly for clarity.
 tokio-stream = "0.1"
 serde.workspace = true
-toml = "0.8"
-zmq = "0.10"
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 clap.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde_json.workspace = true
-dashmap = "6"
-# `prometheus-parse` PARSES worker /metrics (scrape side). `prometheus` is the
-# EXPOSITION side — the typed registry + counters behind our own /metrics
-# endpoint. default-features = false drops the procfs process-collector we
-# don't use; Registry / IntCounterVec / TextEncoder are core.
-prometheus-parse = "0.2"
-prometheus = { version = "0.13", default-features = false }
+dashmap.workspace = true
+# The exposition side: the typed registry and counters behind our own
+# /metrics endpoint. The scrape side, `prometheus-parse`, is the fleet's.
+prometheus.workspace = true
 axum = "0.7"
-async-trait = "0.1"
+async-trait.workspace = true
 # K8s discovery (`discovery.mode = "kubernetes"`) and the kinference.buoyant.io CRD
 # watch/status writer. Two client-construction policies live in the tree
 # deliberately: `Config::incluster_env()` in `controller::discovery` (kubeconfig
@@ -105,10 +113,10 @@ getrandom.workspace = true
 workspace = true
 
 [dev-dependencies]
-# `tokio::time::pause` and `advance`, for the fleet gauges' dump-interval tests.
-tokio = { version = "1", features = ["test-util"] }
 # `PoolId::from_raw`, for tests that need a specific pool id.
 kinference-policy = { workspace = true, features = ["test-util"] }
+# `test_pool` and friends, for tests that need a pool or a scrape sample.
+kinference-fleet = { workspace = true, features = ["test-util"] }
 # `ServiceExt::oneshot`, to drive the admin router in tests exactly as a
 # client would. Already in the tree through axum; this only names the feature.
 tower = { version = "0.5", features = ["util"] }
