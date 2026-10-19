@@ -615,22 +615,6 @@ fn tokenize_compare_counts_divergences_separately() {
     );
 }
 
-/// Worker states are a gauge, so a recovery must bring the count back down,
-/// not leave a stale `unresponsive` behind.
-#[test]
-fn worker_states_are_a_gauge_and_recover() {
-    let m = PromMetrics::new();
-    m.set_worker_states(2, 1);
-    let out = m.render();
-    assert_line(&out, r#"kinference_workers{state="ok"} 2"#);
-    assert_line(&out, r#"kinference_workers{state="unresponsive"} 1"#);
-
-    m.set_worker_states(3, 0);
-    let out = m.render();
-    assert_line(&out, r#"kinference_workers{state="ok"} 3"#);
-    assert_line(&out, r#"kinference_workers{state="unresponsive"} 0"#);
-}
-
 /// An empty ITL report records nothing, and is not an error.
 ///
 /// The proto sends empty `itl_bucket_counts` for responses with fewer than two
@@ -879,82 +863,6 @@ fn cached_tokens_reported_and_absent_partition_every_report() {
     );
 }
 
-/// The per-model split must zero a model that disappears, not freeze it.
-#[test]
-fn workers_by_model_zeroes_a_model_that_disappears() {
-    let m = PromMetrics::new();
-    m.set_worker_states_by_model(&[("gemma".to_string(), 3, 1), ("qwen".to_string(), 2, 0)]);
-    let out = m.render();
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"gemma\",state=\"ok\"} 3"
-        ),
-        "{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"gemma\",state=\"unresponsive\"} 1"
-        ),
-        "{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"qwen\",state=\"ok\"} 2"
-        ),
-        "{out}"
-    );
-
-    // qwen's worker set is deleted.
-    m.set_worker_states_by_model(&[("gemma".to_string(), 3, 1)]);
-    let out = m.render();
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"qwen\",state=\"ok\"} 0"
-        ),
-        "qwen must be ZEROED, not left at 2:\n{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"gemma\",state=\"ok\"} 3"
-        ),
-        "{out}"
-    );
-}
-
-/// `kinference_workers` stays the fleet total; the per-model family counts a
-/// multi-model worker under each model.
-#[test]
-fn workers_total_is_independent_of_the_per_model_split() {
-    let m = PromMetrics::new();
-    m.set_worker_states(4, 0);
-    // One worker serves both models, so the per-model counts sum to 5, not 4.
-    m.set_worker_states_by_model(&[("gemma".to_string(), 3, 0), ("qwen".to_string(), 2, 0)]);
-    let out = m.render();
-    assert!(
-        has_line(&out, "kinference_workers{state=\"ok\"} 4"),
-        "fleet total unchanged:\n{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"gemma\",state=\"ok\"} 3"
-        ),
-        "{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_workers_by_model{model=\"qwen\",state=\"ok\"} 2"
-        ),
-        "{out}"
-    );
-}
-
 /// Orphaned reports get their own counter rather than only being visible as a
 /// difference between two others.
 #[test]
@@ -1078,47 +986,6 @@ fn eviction_reason_labels_match_the_enum() {
     assert!(
         !all[0].as_label().contains("256"),
         "label must be value-free"
-    );
-}
-
-/// The two calibration gauges publish per (worker, model), and a departed
-/// worker leaves no reading behind.
-#[test]
-fn worker_saturation_publishes_per_worker_and_does_not_go_stale() {
-    let p = PromMetrics::new();
-    p.set_worker_saturation(&[
-        ("10.0.0.1:8000".into(), "gemma-4".into(), 0.3, 0.21),
-        ("10.0.0.2:8000".into(), "gemma-4".into(), 4.5, 0.93),
-    ]);
-    let out = p.render();
-    assert!(
-        has_line(
-            &out,
-            "kinference_worker_queued_prompts_mean30s{model=\"gemma-4\",worker=\"10.0.0.1:8000\"} 0.3"
-        ),
-        "{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_worker_kv_cache_usage_mean30s{model=\"gemma-4\",worker=\"10.0.0.2:8000\"} 0.93"
-        ),
-        "{out}"
-    );
-
-    // The second worker goes away; only the first is published now.
-    p.set_worker_saturation(&[("10.0.0.1:8000".into(), "gemma-4".into(), 0.0, 0.05)]);
-    let out = p.render();
-    assert!(
-        !out.contains("10.0.0.2:8000"),
-        "a departed worker must leave no series behind: {out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_worker_queued_prompts_mean30s{model=\"gemma-4\",worker=\"10.0.0.1:8000\"} 0"
-        ),
-        "{out}"
     );
 }
 

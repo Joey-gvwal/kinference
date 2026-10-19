@@ -18,6 +18,7 @@ use axum::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::fleet::gauges::FleetGauges;
 use crate::fleet::pool::PoolRegistry;
 use crate::fleet::scrape::MetricsRegistry;
 use crate::metrics::PromMetrics;
@@ -34,6 +35,9 @@ struct AppState {
     policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     /// Prometheus registry for `/metrics`.
     prom: Arc<PromMetrics>,
+    /// The fleet gauges, registered in `prom`; `/metrics` refreshes their
+    /// tree dump before rendering.
+    gauges: FleetGauges,
     /// The policy API's state, built once so every request shares one
     /// simulation semaphore; see [`policy_api::PolicyApiState`].
     policy_api: policy_api::PolicyApiState,
@@ -62,9 +66,20 @@ impl FromRef<AppState> for ReadyzState {
     }
 }
 
-impl FromRef<AppState> for Arc<PromMetrics> {
+/// What `/metrics` needs: the registry to render and the fleet gauges whose
+/// tree dump is refreshed first.
+#[derive(Clone)]
+struct MetricsState {
+    prom: Arc<PromMetrics>,
+    gauges: FleetGauges,
+}
+
+impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
-        state.prom.clone()
+        Self {
+            prom: state.prom.clone(),
+            gauges: state.gauges.clone(),
+        }
     }
 }
 
@@ -117,8 +132,9 @@ pub async fn serve(
         policy_api: policy_api::PolicyApiState::new(
             policy.clone(),
             pools.clone(),
-            metrics_registry,
+            metrics_registry.clone(),
         ),
+        gauges: FleetGauges::new(pools.clone(), metrics_registry, prom.registry()),
         pools,
         policy,
         prom,
@@ -134,10 +150,11 @@ pub async fn serve(
 }
 
 /// Prometheus scrape target, in the text-exposition format.
-async fn metrics(State(prom): State<Arc<PromMetrics>>) -> Response {
+async fn metrics(State(st): State<MetricsState>) -> Response {
+    st.gauges.refresh_index().await;
     (
         [(header::CONTENT_TYPE, PromMetrics::content_type())],
-        prom.render(),
+        st.prom.render(),
     )
         .into_response()
 }

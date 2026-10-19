@@ -79,7 +79,7 @@ impl PoolSpec {
 /// An immutable view of the fleet's pools.
 ///
 /// A snapshot rather than a concurrent map, so consumers that iterate (the
-/// rollup, `gather_facts`, `/readyz`) see one coherent pool set.
+/// fleet gauges, `gather_facts`, `/readyz`) see one coherent pool set.
 #[derive(Default)]
 pub struct PoolMap {
     by_id: HashMap<PoolId, Arc<Pool>>,

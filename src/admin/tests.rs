@@ -70,6 +70,42 @@ async fn the_body_counts_pools_with_ready_endpoints() {
     assert!(body.contains("ready endpoints: 1"), "got: {body:?}");
 }
 
+/// `/metrics` computes the fleet gauges in the scrape itself: with no task
+/// running, the first scrape after an ingest already shows the index size
+/// and the worker health.
+#[tokio::test]
+async fn the_first_scrape_shows_the_fleet_gauges_with_no_task_running() {
+    use dynamo_kv_router::indexer::KvIndexerInterface;
+
+    let registry = PoolRegistry::new();
+    let p = pool("warm");
+    p.registry.register(1, ready_entry());
+    p.indexer
+        .apply_event(crate::fleet::gauges::test_stored_event(1, &[1, 2]))
+        .await;
+    registry.publish(Arc::new(crate::fleet::pool::PoolMap::from_pools(vec![p])));
+    let (app, _) = app_with(None, registry);
+
+    let (status, _, body) = call(&app, "GET", "/metrics", None, Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = String::from_utf8(body).unwrap();
+    assert!(
+        out.lines().any(|l| l == "kinference_index_blocks 2"),
+        "{out}"
+    );
+    // Never scraped, so its age counts from the registry's startup: just now.
+    assert!(
+        out.lines()
+            .any(|l| l == r#"kinference_workers{state="ok"} 1"#),
+        "{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l == r#"kinference_workers_by_model{model="gemma",state="ok"} 1"#),
+        "{out}"
+    );
+}
+
 /// The one gate: before the policy watch lists, a Pick naming a pool would
 /// route on load alone, bypassing the policy.
 #[tokio::test]
@@ -971,6 +1007,7 @@ fn app_with(
         pools: pools.clone(),
         policy: policy.clone(),
         prom: prom.clone(),
+        gauges: FleetGauges::new(pools.clone(), metrics.clone(), prom.registry()),
         policy_api: policy_api::PolicyApiState::new(policy, pools, metrics),
     };
     (router(state), prom)
