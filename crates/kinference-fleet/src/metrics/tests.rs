@@ -85,7 +85,7 @@ fn index_events_count_by_kind_and_blocks_by_direction() {
 /// which are unbounded.
 #[test]
 fn eviction_reason_labels_match_the_enum() {
-    use crate::fleet::eviction::EvictionReason as E;
+    use crate::eviction::EvictionReason as E;
     let all = [
         E::BlockSizeMismatch {
             expected: 256,

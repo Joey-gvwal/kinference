@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::fleet::profile::TokenizeMode;
-use crate::fleet::workers::WorkerEntry;
 use crate::router::local_tokenize::LocalTokenizeConfig;
 use crate::router::service::KinferenceService;
 use crate::router::tokenize::{
     TokenizeInput, render_post_raw_at_url, render_structured_at_url, render_via_vllm_raw,
     render_via_vllm_structured,
 };
+use kinference_fleet::profile::TokenizeMode;
+use kinference_fleet::workers::WorkerEntry;
 
 /// `[tokenize]`: tokenization settings shared by all pools. The mode is set
 /// per profile.

@@ -18,9 +18,9 @@ use prometheus::proto::MetricFamily;
 use prometheus::{GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
 use tokio::time::Instant;
 
-use crate::fleet::metrics::family;
-use crate::fleet::pool::PoolRegistry;
-use crate::fleet::scrape::MetricsRegistry;
+use crate::metrics::family;
+use crate::pool::PoolRegistry;
+use crate::scrape::MetricsRegistry;
 
 /// How long one tree dump serves `kinference_index_blocks` and
 /// `kinference_index_workers`.
@@ -285,8 +285,8 @@ fn worker_saturation(
 mod tests;
 
 /// A `Stored` event for `worker_id` with one root block per hash.
-#[cfg(test)]
-pub(crate) fn test_stored_event(
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_stored_event(
     worker_id: u64,
     hashes: &[u64],
 ) -> dynamo_kv_router::protocols::RouterEvent {

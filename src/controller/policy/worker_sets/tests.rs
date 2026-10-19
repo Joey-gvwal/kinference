@@ -1,5 +1,7 @@
 use super::*;
-use crate::fleet::profile::{PickerConfig, PredictorConfig, ProfileTokenizeConfig, TokenizeMode};
+use kinference_fleet::profile::{
+    PickerConfig, PredictorConfig, ProfileTokenizeConfig, TokenizeMode,
+};
 use kinference_policy::crd::{InferenceWorkerSetSpec, KvEvents, ServiceRef};
 
 fn profile(name: &str) -> ProfileConfig {
@@ -488,19 +490,19 @@ fn watcher_with(
     profiles: Vec<ProfileConfig>,
 ) -> (
     WorkerSetWatcher,
-    std::sync::Arc<crate::fleet::pool::PoolRegistry>,
+    std::sync::Arc<kinference_fleet::pool::PoolRegistry>,
 ) {
     let (store, mut writer) = reflector::store::<InferenceWorkerSet>();
     for s in sets {
         writer.apply_watcher_event(&watcher::Event::Apply(s.clone()));
     }
-    let registry = crate::fleet::pool::PoolRegistry::new();
-    let manager = crate::fleet::pool::PoolManager::new(
+    let registry = kinference_fleet::pool::PoolRegistry::new();
+    let manager = kinference_fleet::pool::PoolManager::new(
         registry.clone(),
         std::sync::Arc::new(NoopHooks),
         CancellationToken::new(),
-        std::sync::Arc::new(crate::fleet::models::ModelIndex::new()),
-        crate::fleet::pool::ReapPolicy {
+        std::sync::Arc::new(kinference_fleet::models::ModelIndex::new()),
+        kinference_fleet::pool::ReapPolicy {
             linger: Duration::ZERO,
             backstop: Duration::from_secs(600),
         },
@@ -527,15 +529,15 @@ fn watcher_with(
 }
 
 struct NoopHooks;
-impl crate::fleet::pool::PoolHooks for NoopHooks {
+impl kinference_fleet::pool::PoolHooks for NoopHooks {
     fn on_create(
         &self,
-        _pool: &std::sync::Arc<crate::fleet::pool::Pool>,
+        _pool: &std::sync::Arc<kinference_fleet::pool::Pool>,
         _spec: &PoolSpec,
-    ) -> Result<(), crate::fleet::error::Error> {
+    ) -> Result<(), kinference_fleet::error::Error> {
         Ok(())
     }
-    fn on_retire(&self, _pool: &std::sync::Arc<crate::fleet::pool::Pool>) {}
+    fn on_retire(&self, _pool: &std::sync::Arc<kinference_fleet::pool::Pool>) {}
 }
 
 #[tokio::test]

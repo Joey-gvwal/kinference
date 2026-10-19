@@ -230,6 +230,10 @@ impl InflightPrefixes {
     pub fn len(&self) -> usize {
         self.dispatches.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.dispatches.is_empty()
+    }
 }
 
 #[cfg(test)]

@@ -28,10 +28,10 @@ use dynamo_kv_router::zmq_wire::{
 };
 use tokio::io::unix::AsyncFd;
 
-use crate::fleet::error::Error;
-use crate::fleet::eviction::{EvictionReason, EvictionRequest, EvictionTx};
-use crate::fleet::metrics::IngestEvent;
-use crate::fleet::pool::WorkerContext;
+use crate::error::Error;
+use crate::eviction::{EvictionReason, EvictionRequest, EvictionTx};
+use crate::metrics::IngestEvent;
+use crate::pool::WorkerContext;
 
 /// Per-recv DEALER timeout, keeping the replay loop responsive.
 const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;

@@ -1,7 +1,7 @@
 use super::*;
 
-use crate::fleet::pool::{test_pool, test_spec};
-use crate::fleet::scrape::MetricsSample;
+use crate::pool::{test_pool, test_spec};
+use crate::scrape::MetricsSample;
 
 struct Harness {
     coordinator: Arc<Coordinator>,

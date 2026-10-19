@@ -1,6 +1,6 @@
 [workspace]
-members = [".", "crates/kinference-policy", "crates/kinfctl"]
-default-members = [".", "crates/kinference-policy", "crates/kinfctl"]
+members = [".", "crates/kinference-policy", "crates/kinference-fleet", "crates/kinfctl"]
+default-members = [".", "crates/kinference-policy", "crates/kinference-fleet", "crates/kinfctl"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 kinference-policy = { path = "crates/kinference-policy" }
+kinference-fleet = { path = "crates/kinference-fleet" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -46,6 +47,7 @@ license.workspace = true
 
 [dependencies]
 kinference-policy.workspace = true
+kinference-fleet.workspace = true
 dynamo-kv-router.workspace = true
 tonic = "0.12"
 prost = "0.13"
@@ -58,7 +60,6 @@ tokio-util.workspace = true
 tokio-stream = "0.1"
 serde.workspace = true
 toml.workspace = true
-zmq.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
@@ -66,11 +67,8 @@ clap.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde_json.workspace = true
 dashmap.workspace = true
-# `prometheus-parse` PARSES worker /metrics (scrape side). `prometheus` is the
-# EXPOSITION side — the typed registry + counters behind our own /metrics
-# endpoint. default-features = false drops the procfs process-collector we
-# don't use; Registry / IntCounterVec / TextEncoder are core.
-prometheus-parse.workspace = true
+# The exposition side: the typed registry and counters behind our own
+# /metrics endpoint. The scrape side, `prometheus-parse`, is the fleet's.
 prometheus.workspace = true
 axum = "0.7"
 async-trait.workspace = true
@@ -115,10 +113,10 @@ getrandom.workspace = true
 workspace = true
 
 [dev-dependencies]
-# `tokio::time::pause` and `advance`, for the fleet gauges' dump-interval tests.
-tokio = { workspace = true, features = ["test-util"] }
 # `PoolId::from_raw`, for tests that need a specific pool id.
 kinference-policy = { workspace = true, features = ["test-util"] }
+# `test_pool` and friends, for tests that need a pool or a scrape sample.
+kinference-fleet = { workspace = true, features = ["test-util"] }
 # `ServiceExt::oneshot`, to drive the admin router in tests exactly as a
 # client would. Already in the tree through axum; this only names the feature.
 tower = { version = "0.5", features = ["util"] }

@@ -9,7 +9,9 @@ use prometheus::{
 };
 use serde::Deserialize;
 
-use crate::fleet::metrics::{histogram, histogram_vec, int_counter, int_counter_vec, int_gauge};
+use kinference_fleet::metrics::{
+    histogram, histogram_vec, int_counter, int_counter_vec, int_gauge,
+};
 
 /// `[metrics]`
 #[allow(dead_code)]

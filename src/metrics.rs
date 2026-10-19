@@ -1,7 +1,7 @@
 //! Prometheus exposition for kinference's own metrics, served on `GET /metrics`
 //! by the admin listener.
 //!
-//! Unrelated to `src/fleet/scrape.rs`, which scrapes each worker's `/metrics`.
+//! Unrelated to `kinference_fleet::scrape`, which scrapes each worker's `/metrics`.
 //!
 //! The server creates the one `Registry` here and lends it to each group,
 //! which registers its own families: `fleet::metrics`, `router::metrics`,
@@ -9,7 +9,7 @@
 
 use prometheus::{Encoder, Registry, TextEncoder};
 
-use crate::fleet::metrics::int_gauge_vec;
+use kinference_fleet::metrics::int_gauge_vec;
 
 /// The Prometheus text-format content type, as `TextEncoder::format_type()`
 /// returns.

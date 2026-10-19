@@ -1,5 +1,5 @@
 use super::*;
-use crate::fleet::workers::WorkerEntry;
+use kinference_fleet::workers::WorkerEntry;
 
 fn registry_with_model(model: &str) -> Arc<WorkerRegistry> {
     let reg = Arc::new(WorkerRegistry::new());

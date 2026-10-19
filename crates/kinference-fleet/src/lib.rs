@@ -15,3 +15,5 @@ pub mod profile;
 pub mod scrape;
 mod sync;
 pub mod workers;
+
+pub use error::Error;

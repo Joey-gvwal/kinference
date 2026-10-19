@@ -3,9 +3,9 @@ use std::time::Instant as WallInstant;
 
 use prometheus::{Encoder, TextEncoder};
 
-use crate::fleet::pool::{Pool, PoolMap, test_pool};
-use crate::fleet::scrape::MetricsSample;
-use crate::fleet::workers::WorkerEntry;
+use crate::pool::{Pool, PoolMap, test_pool};
+use crate::scrape::MetricsSample;
+use crate::workers::WorkerEntry;
 
 struct Harness {
     pools: Arc<PoolRegistry>,

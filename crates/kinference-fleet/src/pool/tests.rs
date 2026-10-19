@@ -2,7 +2,7 @@ use super::*;
 use dynamo_kv_router::indexer::KvIndexerInterface;
 
 fn cfg(name: &str, block_size: u32) -> PoolSpec {
-    crate::fleet::pool::test_spec(name, block_size)
+    crate::pool::test_spec(name, block_size)
 }
 
 /// Dropping one pool doesn't disturb the process or its siblings, although
@@ -202,10 +202,10 @@ fn eager() -> ReapPolicy {
 }
 
 fn spec(name: &str, block_size: u32) -> PoolSpec {
-    crate::fleet::pool::test_spec(name, block_size)
+    crate::pool::test_spec(name, block_size)
 }
 
-fn worker_cfg(num: u64) -> crate::fleet::discovery::WorkerConfig {
+fn worker_cfg(num: u64) -> crate::discovery::WorkerConfig {
     toml::from_str(&format!(
         r#"
 worker_id_str = "w-{num}"
@@ -438,7 +438,7 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     let pool = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
     pool.registry.register(
         1,
-        crate::fleet::workers::WorkerEntry::from_config(&worker_cfg(1), 16),
+        crate::workers::WorkerEntry::from_config(&worker_cfg(1), 16),
     );
     pool.registry.set_served_models(1, &["old".to_string()]);
     h.models.associate(pool.id, "a", &["old".to_string()]);

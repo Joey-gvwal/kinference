@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::fleet::error::Error;
-use crate::fleet::pool::WorkerContext;
-use crate::fleet::workers::Engine;
+use crate::error::Error;
+use crate::pool::WorkerContext;
+use crate::workers::Engine;
 use dashmap::DashMap;
 
 // vLLM and SGLang prefix metric names with `<engine>:`, which
@@ -199,6 +199,12 @@ pub struct MetricsRegistry {
     startup: Instant,
 }
 
+impl Default for MetricsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsRegistry {
     pub fn new() -> Self {
         Self {
@@ -326,8 +332,8 @@ impl MetricsRegistry {
     }
 
     /// Record `sample` as this worker's latest scrape. Test-only.
-    #[cfg(test)]
-    pub(crate) fn record_sample_for_test(&self, worker_id_num: u64, sample: MetricsSample) {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn record_sample_for_test(&self, worker_id_num: u64, sample: MetricsSample) {
         self.by_worker.insert(worker_id_num, sample);
     }
 
@@ -415,7 +421,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                 match workers.set_served_models(cfg.worker_id_num, &names) {
                     // Widened/Narrowed are routable, e.g. a LoRA adapter
                     // rollout: index what this worker serves rather than evict.
-                    crate::fleet::workers::ServedModelsVerdict::Widened { added } => {
+                    crate::workers::ServedModelsVerdict::Widened { added } => {
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
                             ?added,
@@ -424,7 +430,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         );
                         index.associate(pool_id, &pool_name, &names);
                     }
-                    crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
+                    crate::workers::ServedModelsVerdict::Narrowed { missing } => {
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
                             ?missing,
@@ -433,20 +439,20 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         );
                         index.associate(pool_id, &pool_name, &names);
                     }
-                    crate::fleet::workers::ServedModelsVerdict::Accepted
-                    | crate::fleet::workers::ServedModelsVerdict::Empty => {
+                    crate::workers::ServedModelsVerdict::Accepted
+                    | crate::workers::ServedModelsVerdict::Empty => {
                         index.associate(pool_id, &pool_name, &names);
                     }
-                    crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
+                    crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                         tracing::warn!(
                             worker_id = cfg.worker_id_str,
                             ?expected,
                             ?observed,
                             "warmup: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
                         );
-                        let _ = eviction_tx.send(crate::fleet::eviction::EvictionRequest {
+                        let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                             worker_id_num: cfg.worker_id_num,
-                            reason: crate::fleet::eviction::EvictionReason::ModelMismatch {
+                            reason: crate::eviction::EvictionReason::ModelMismatch {
                                 expected,
                                 observed,
                             },
@@ -559,7 +565,7 @@ pub fn spawn_metrics_poller(
                         let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
                         match workers.set_served_models(cfg.worker_id_num, &names) {
                             // As in the warmup path: only a conflict is fatal.
-                            crate::fleet::workers::ServedModelsVerdict::Widened { added } => {
+                            crate::workers::ServedModelsVerdict::Widened { added } => {
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
                                     ?added,
@@ -568,7 +574,7 @@ pub fn spawn_metrics_poller(
                                 );
                                 index.associate(pool_id, &pool_name, &names);
                             }
-                            crate::fleet::workers::ServedModelsVerdict::Narrowed { missing } => {
+                            crate::workers::ServedModelsVerdict::Narrowed { missing } => {
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
                                     ?missing,
@@ -577,11 +583,11 @@ pub fn spawn_metrics_poller(
                                 );
                                 index.associate(pool_id, &pool_name, &names);
                             }
-                            crate::fleet::workers::ServedModelsVerdict::Accepted
-                            | crate::fleet::workers::ServedModelsVerdict::Empty => {
+                            crate::workers::ServedModelsVerdict::Accepted
+                            | crate::workers::ServedModelsVerdict::Empty => {
                                 index.associate(pool_id, &pool_name, &names);
                             }
-                            crate::fleet::workers::ServedModelsVerdict::Mismatch {
+                            crate::workers::ServedModelsVerdict::Mismatch {
                                 expected,
                                 observed,
                             } => {
@@ -591,9 +597,9 @@ pub fn spawn_metrics_poller(
                                     ?observed,
                                     "poller: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
                                 );
-                                let _ = eviction_tx.send(crate::fleet::eviction::EvictionRequest {
+                                let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                                     worker_id_num: cfg.worker_id_num,
-                                    reason: crate::fleet::eviction::EvictionReason::ModelMismatch {
+                                    reason: crate::eviction::EvictionReason::ModelMismatch {
                                         expected,
                                         observed,
                                     },

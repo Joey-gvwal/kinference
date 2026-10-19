@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::fleet::workers::WorkerRegistry;
 use crate::router::body_store::BodyStore;
 use crate::router::proto::picker_server::Picker;
 use crate::router::proto::{
@@ -30,6 +29,7 @@ use crate::router::proto::{
     PushBodyResponse, ReportFinalTokenRequest, ReportFinalTokenResponse, ReportFirstTokenRequest,
     ReportFirstTokenResponse, pick_response::Outcome as PickOutcome,
 };
+use kinference_fleet::workers::WorkerRegistry;
 
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;

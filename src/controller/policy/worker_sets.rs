@@ -24,11 +24,11 @@ use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::fleet::discovery::{
+use kinference_fleet::discovery::{
     DiscoveryConfig, DiscoveryDefaults, DiscoveryMode, PortRef, PortRefs,
 };
-use crate::fleet::pool::PoolSpec;
-use crate::fleet::profile::ProfileConfig;
+use kinference_fleet::pool::PoolSpec;
+use kinference_fleet::profile::ProfileConfig;
 
 /// Worker sets that produced no pool, published for the status writer. A
 /// rejected set appears in no `PolicyIndex`, so this is the only way its status
@@ -254,7 +254,7 @@ pub struct KubernetesConfig {
     pub discovery_defaults: DiscoveryDefaults,
 }
 
-/// Watch `InferenceWorkerSet`s and drive [`crate::fleet::pool::PoolManager`].
+/// Watch `InferenceWorkerSet`s and drive [`kinference_fleet::pool::PoolManager`].
 ///
 /// Owns the manager, so the live map needs no lock; the periodic reap sweep
 /// runs here for the same reason.
@@ -263,7 +263,7 @@ pub struct WorkerSetWatcher {
     selector: Option<String>,
     profiles: Vec<ProfileConfig>,
     defaults: DiscoveryDefaults,
-    manager: crate::fleet::pool::PoolManager,
+    manager: kinference_fleet::pool::PoolManager,
     /// Sets that resolved to nothing, kept so a rejection is logged once per
     /// transition rather than on every watch tick.
     rejected: Vec<Rejection>,
@@ -279,7 +279,7 @@ impl WorkerSetWatcher {
     pub fn new(
         kube_cfg: &KubernetesConfig,
         profiles: Vec<ProfileConfig>,
-        manager: crate::fleet::pool::PoolManager,
+        manager: kinference_fleet::pool::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,
         prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
     ) -> Self {

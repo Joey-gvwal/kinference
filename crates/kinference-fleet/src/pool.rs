@@ -32,16 +32,16 @@ use dynamo_kv_router::indexer::{KvIndexer, KvIndexerMetrics};
 use kinference_policy::{PoolId, PoolKey};
 use tokio_util::sync::CancellationToken;
 
-use crate::fleet::discovery::static_config::WorkersFile;
-use crate::fleet::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
-use crate::fleet::error::Error;
-use crate::fleet::eviction::EvictionTx;
-use crate::fleet::inflight::{InflightPrefixes, InflightRegistry};
-use crate::fleet::metrics::FleetMetrics;
-use crate::fleet::models::ModelIndex;
-use crate::fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
-use crate::fleet::sync::{read, write};
-use crate::fleet::workers::WorkerRegistry;
+use crate::discovery::static_config::WorkersFile;
+use crate::discovery::{DiscoveryConfig, DiscoveryMode, WorkerConfig};
+use crate::error::Error;
+use crate::eviction::EvictionTx;
+use crate::inflight::{InflightPrefixes, InflightRegistry};
+use crate::metrics::FleetMetrics;
+use crate::models::ModelIndex;
+use crate::profile::{PickerConfig, PredictorConfig, TokenizeMode};
+use crate::sync::{read, write};
+use crate::workers::WorkerRegistry;
 
 /// A worker set with its profile resolved: everything needed to build a
 /// `pool::Pool`, whether declared in TOML or by an `InferenceWorkerSet`.
@@ -667,15 +667,15 @@ impl PoolManager {
 }
 
 /// One `Pool` for tests, from a minimal static spec.
-#[cfg(test)]
-pub(crate) fn test_pool(name: &str) -> Arc<Pool> {
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_pool(name: &str) -> Arc<Pool> {
     test_pool_with_block_size(name, 16)
 }
 
 /// A test pool with a given block size, which sets `total_blocks` and so the
 /// prefill term, making pools predict differently for one prompt.
-#[cfg(test)]
-pub(crate) fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool> {
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool> {
     Arc::new(Pool::from_spec(
         PoolId::next(),
         &test_spec(name, block_size),
@@ -684,8 +684,8 @@ pub(crate) fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool
 }
 
 /// A minimal static spec shared by tests that need a `Pool`.
-#[cfg(test)]
-pub(crate) fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
     PoolSpec {
         key: PoolKey::local(name),
         name: name.to_string(),
