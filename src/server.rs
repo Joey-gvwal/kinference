@@ -14,6 +14,7 @@ use crate::controller::leader;
 use crate::controller::policy;
 use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use crate::fleet::discovery::{DiscoveryMode, kubernetes::KubeDiscovery};
+use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;
 use crate::fleet::scrape::MetricsRegistry;
@@ -131,6 +132,7 @@ pub async fn run() -> Result<()> {
         // Prometheus registry, shared by the gRPC handlers and the admin
         // listener's `/metrics`.
         let prom = Arc::new(metrics::PromMetrics::with_config(&cfg.metrics));
+        let fleet_prom = Arc::new(FleetMetrics::new(prom.registry()));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
         let ingest_cfg = cfg.ingest;
@@ -284,7 +286,7 @@ pub async fn run() -> Result<()> {
                 cancel: cancel.clone(),
                 kube_client,
                 metrics: metrics.clone(),
-                prom: prom.clone(),
+                prom: fleet_prom,
                 models: models.clone(),
             },
             WorkerTaskSettings {

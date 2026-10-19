@@ -19,7 +19,7 @@ fn harness() -> Harness {
             cancel: process.clone(),
             kube_client: None,
             metrics: metrics.clone(),
-            prom: Arc::new(PromMetrics::new()),
+            prom: Arc::new(FleetMetrics::new(&prometheus::Registry::new())),
             models: models.clone(),
         },
         WorkerTaskSettings {

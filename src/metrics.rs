@@ -125,9 +125,6 @@ const TOKENIZE_PATHS: [&str; 3] = ["local", "http_fallback", "unavailable"];
 /// Only moves in compare mode.
 const TOKENIZE_COMPARE_RESULTS: [&str; 3] = ["match", "divergence", "error"];
 
-/// `kinference_index_events_total{kind}`. Source: [`IngestEvent::as_label`].
-const INDEX_EVENT_KINDS: [&str; 3] = ["stored", "removed", "cleared"];
-
 /// `kinference_body_rejected_total{reason}`.
 /// Source: [`crate::router::body_store::RejectReason::as_label`].
 const BODY_REJECT_REASONS: [&str; 3] = ["declared_too_large", "request_too_large", "server_full"];
@@ -157,13 +154,6 @@ const POLICY_DECISION_OUTCOMES: [&str; 9] = [
     "forced_endpoint_missing",
 ];
 
-/// `kinference_worker_evictions_total{reason}`.
-/// Source: `crate::fleet::eviction::EvictionReason::as_label`.
-///
-/// Only evictions kinference decided on; ordinary discovery removals are not
-/// counted, so a rolling restart doesn't look like a fault.
-const EVICTION_REASONS: [&str; 2] = ["block_size_mismatch", "model_mismatch"];
-
 /// `kinference_workerset_rejected_total{reason}`.
 /// Source: `kinference_policy::rejection::RejectReason::as_condition_reason`.
 /// CamelCase, since these double as Kubernetes condition reasons.
@@ -176,25 +166,6 @@ const WORKERSET_REJECT_REASONS: [&str; 7] = [
     "ModelMissingName",
     "KvEventsMissingPort",
 ];
-
-/// One KV-cache event kind, as the `kind` label on
-/// `kinference_index_events_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngestEvent {
-    Stored,
-    Removed,
-    Cleared,
-}
-
-impl IngestEvent {
-    pub fn as_label(self) -> &'static str {
-        match self {
-            IngestEvent::Stored => "stored",
-            IngestEvent::Removed => "removed",
-            IngestEvent::Cleared => "cleared",
-        }
-    }
-}
 
 /// Outcome of one pick, as the `outcome` label on `kinference_picks_total` and
 /// `kinference_pick_duration_ms`.
@@ -313,13 +284,6 @@ pub struct PromMetrics {
     tokenize_duration_ms: Histogram,
     /// `kinference_tokenize_compare_total{result}`: compare-mode agreement.
     tokenize_compare: IntCounterVec,
-    /// `kinference_worker_evictions_total{reason}`: workers kinference removed itself.
-    worker_evictions: IntCounterVec,
-    /// `kinference_index_events_total{kind}`: KV events applied, by kind.
-    index_events: IntCounterVec,
-    /// `kinference_index_blocks_stored_total` / `_removed_total`: block churn.
-    index_blocks_stored: IntCounter,
-    index_blocks_removed: IntCounter,
     /// `kinference_prefix_requested_blocks_total{model,qos}`: prompt blocks scored.
     prefix_requested_blocks: IntCounterVec,
     /// `kinference_prefix_matched_blocks_total{model,qos}`: layered overlap.
@@ -697,39 +661,6 @@ impl PromMetrics {
             &["result"],
         )
         .expect("tokenize_compare counter opts are valid");
-        let worker_evictions = IntCounterVec::new(
-            Opts::new(
-                "kinference_worker_evictions_total",
-                "Workers kinference evicted itself, by reason. An eviction means the \
-                 worker was discovered and healthy but disagreed with the pool \
-                 about something the pool cannot vary per worker — so it is \
-                 removed to keep the rest serving on coherent assumptions. \
-                 Normal discovery removals are NOT counted: a rolling restart \
-                 would otherwise read as a fault. Non-zero means a CONFIG \
-                 mismatch; the WARN log carries both values and the fix",
-            ),
-            &["reason"],
-        )
-        .expect("worker_evictions counter opts are valid");
-        let index_events = IntCounterVec::new(
-            Opts::new(
-                "kinference_index_events_total",
-                "KV-cache events applied to the radix tree, by kind (stored, \
-                 removed, cleared)",
-            ),
-            &["kind"],
-        )
-        .expect("index_events counter opts are valid");
-        let index_blocks_stored = IntCounter::new(
-            "kinference_index_blocks_stored_total",
-            "Blocks added to the radix tree",
-        )
-        .expect("index_blocks_stored counter opts are valid");
-        let index_blocks_removed = IntCounter::new(
-            "kinference_index_blocks_removed_total",
-            "Blocks evicted from the radix tree",
-        )
-        .expect("index_blocks_removed counter opts are valid");
         let prefix_requested_blocks = IntCounterVec::new(
             Opts::new(
                 "kinference_prefix_requested_blocks_total",
@@ -940,18 +871,6 @@ impl PromMetrics {
             .register(Box::new(tokenize_compare.clone()))
             .expect("register tokenize_compare");
         registry
-            .register(Box::new(worker_evictions.clone()))
-            .expect("register worker_evictions");
-        registry
-            .register(Box::new(index_events.clone()))
-            .expect("register index_events");
-        registry
-            .register(Box::new(index_blocks_stored.clone()))
-            .expect("register index_blocks_stored");
-        registry
-            .register(Box::new(index_blocks_removed.clone()))
-            .expect("register index_blocks_removed");
-        registry
             .register(Box::new(prefix_requested_blocks.clone()))
             .expect("register prefix_requested_blocks");
         registry
@@ -997,10 +916,6 @@ impl PromMetrics {
             tokenize_path,
             tokenize_duration_ms,
             tokenize_compare,
-            worker_evictions,
-            index_events,
-            index_blocks_stored,
-            index_blocks_removed,
             prefix_requested_blocks,
             prefix_matched_blocks,
             prefix_radix_matched_blocks,
@@ -1064,9 +979,6 @@ impl PromMetrics {
         for result in TOKENIZE_COMPARE_RESULTS {
             self.tokenize_compare.with_label_values(&[result]);
         }
-        for kind in INDEX_EVENT_KINDS {
-            self.index_events.with_label_values(&[kind]);
-        }
         for reason in BODY_REJECT_REASONS {
             self.body_rejected.with_label_values(&[reason]);
         }
@@ -1078,9 +990,6 @@ impl PromMetrics {
         }
         for reason in WORKERSET_REJECT_REASONS {
             self.workerset_rejected.with_label_values(&[reason]);
-        }
-        for reason in EVICTION_REASONS {
-            self.worker_evictions.with_label_values(&[reason]);
         }
     }
 
@@ -1150,26 +1059,6 @@ impl PromMetrics {
     /// with different label sets is unreliable.
     pub fn record_orphaned_report(&self) {
         self.orphaned_reports.inc();
-    }
-
-    /// One worker evicted by kinference's own decision.
-    ///
-    /// `reason` comes from [`crate::fleet::eviction::EvictionReason::as_label`] so the
-    /// label and the WARN log cannot name different things.
-    pub fn record_worker_eviction(&self, reason: &str) {
-        self.worker_evictions.with_label_values(&[reason]).inc();
-    }
-
-    /// One KV-cache event as ingest decoded it, with the blocks it carried.
-    pub fn record_index_event(&self, kind: IngestEvent, blocks: u64) {
-        self.index_events
-            .with_label_values(&[kind.as_label()])
-            .inc();
-        match kind {
-            IngestEvent::Stored => self.index_blocks_stored.inc_by(blocks),
-            IngestEvent::Removed => self.index_blocks_removed.inc_by(blocks),
-            IngestEvent::Cleared => {}
-        }
     }
 
     /// One pick's prefix-cache outcome for the CHOSEN worker.

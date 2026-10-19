@@ -725,7 +725,7 @@ fn has_line(out: &str, line: &str) -> bool {
 fn preinit_creates_every_closed_set_series_at_zero() {
     let out = PromMetrics::new().render();
 
-    let counters: [(&str, &[&str]); 7] = [
+    let counters: [(&str, &[&str]); 6] = [
         ("kinference_picks_total{outcome=", &PICK_OUTCOMES),
         ("kinference_score_degraded_total{reason=", &DEGRADE_REASONS),
         ("kinference_tokenize_total{path=", &TOKENIZE_PATHS),
@@ -733,7 +733,6 @@ fn preinit_creates_every_closed_set_series_at_zero() {
             "kinference_tokenize_compare_total{result=",
             &TOKENIZE_COMPARE_RESULTS,
         ),
-        ("kinference_index_events_total{kind=", &INDEX_EVENT_KINDS),
         (
             "kinference_body_rejected_total{reason=",
             &BODY_REJECT_REASONS,
@@ -919,74 +918,6 @@ fn from_proto_never_yields_unknown() {
             "wire value {wire} must not declassify a pick"
         );
     }
-}
-
-/// Eviction reasons are seeded at zero.
-#[test]
-fn worker_evictions_are_counted_by_reason() {
-    let m = PromMetrics::new();
-    let out = m.render();
-    for r in EVICTION_REASONS {
-        assert!(
-            has_line(
-                &out,
-                &format!("kinference_worker_evictions_total{{reason=\"{r}\"}} 0")
-            ),
-            "seeded at 0: {r}\n{out}"
-        );
-    }
-    m.record_worker_eviction("block_size_mismatch");
-    m.record_worker_eviction("block_size_mismatch");
-    m.record_worker_eviction("model_mismatch");
-    let out = m.render();
-    assert!(
-        has_line(
-            &out,
-            "kinference_worker_evictions_total{reason=\"block_size_mismatch\"} 2"
-        ),
-        "{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_worker_evictions_total{reason=\"model_mismatch\"} 1"
-        ),
-        "{out}"
-    );
-}
-
-/// The label list matches the enum, and doesn't carry the mismatched values,
-/// which are unbounded.
-#[test]
-fn eviction_reason_labels_match_the_enum() {
-    use crate::fleet::eviction::EvictionReason as E;
-    let all = [
-        E::BlockSizeMismatch {
-            expected: 256,
-            observed: 64,
-        },
-        E::ModelMismatch {
-            expected: vec!["a".into()],
-            observed: vec!["b".into()],
-        },
-    ];
-    for v in &all {
-        match v {
-            E::BlockSizeMismatch { .. } | E::ModelMismatch { .. } => {}
-        }
-    }
-    let from_enum: Vec<&str> = all.iter().map(|r| r.as_label()).collect();
-    assert_eq!(from_enum, EVICTION_REASONS);
-    // Display carries the numbers; the label must not.
-    let d = all[0].to_string();
-    assert!(
-        d.contains("256") && d.contains("64"),
-        "Display should name both: {d}"
-    );
-    assert!(
-        !all[0].as_label().contains("256"),
-        "label must be value-free"
-    );
 }
 
 /// The prediction histogram is labelled per worker and shares `kinference_ttft_ms`'s

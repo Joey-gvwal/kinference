@@ -7,6 +7,7 @@ pub mod eviction;
 pub mod gauges;
 pub mod inflight;
 pub mod ingest;
+pub mod metrics;
 pub mod models;
 pub mod pool;
 pub mod profile;
