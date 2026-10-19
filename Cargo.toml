@@ -66,7 +66,7 @@ axum = "0.7"
 async-trait = "0.1"
 # K8s discovery (`discovery.mode = "kubernetes"`) and the kinference.buoyant.io CRD
 # watch/status writer. Two client-construction policies live in the tree
-# deliberately: `Config::incluster_env()` in `discovery::kubernetes` (kubeconfig
+# deliberately: `Config::incluster_env()` in `controller::discovery` (kubeconfig
 # is refused there because pod IPs are unroutable from outside the cluster) and
 # `Config::infer()` in `policy::{store,status}` so the controller side stays
 # testable against a local cluster.

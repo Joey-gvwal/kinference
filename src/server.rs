@@ -10,13 +10,12 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
+use crate::controller::discovery::KubeDiscovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use crate::fleet::discovery::{
-    Discovery, DiscoveryFactory, DiscoveryMode, kubernetes::KubeDiscovery,
-};
+use crate::fleet::discovery::{Discovery, DiscoveryFactory, DiscoveryMode};
 use crate::fleet::metrics::FleetMetrics;
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;

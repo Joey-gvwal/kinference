@@ -8,10 +8,10 @@
 //! Two implementations:
 //! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
 //!   set's `workers_file`, then waits on `cancel`.
-//! - [`kubernetes::KubeDiscovery`] watches a Service's EndpointSlices and
-//!   emits `Added`/`Removed` as endpoints become or stop being Ready. The
-//!   server builds it through a [`DiscoveryFactory`], so the coordinator
-//!   never holds a Kubernetes client.
+//! - `controller::discovery::KubeDiscovery` watches a Service's
+//!   EndpointSlices and emits `Added`/`Removed` as endpoints become or stop
+//!   being Ready. The server builds it through a [`DiscoveryFactory`], so
+//!   the fleet never holds a Kubernetes client.
 
 use std::sync::Arc;
 
@@ -20,7 +20,6 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub mod kubernetes;
 pub mod static_config;
 
 /// One discovery event, consumed by `fleet::coordinator`.
