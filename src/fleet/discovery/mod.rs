@@ -1,9 +1,9 @@
 //! Worker discovery layer.
 //!
 //! A `Discovery` is the source of truth for which workers in one worker set
-//! are live. It emits `WorkerChange::{Added, Removed}` events; the coordinator
-//! in `server.rs` registers or unregisters each worker and spawns or cancels
-//! its per-worker tasks.
+//! are live. It emits `WorkerChange::{Added, Removed}` events;
+//! `fleet::coordinator` registers or unregisters each worker and spawns or
+//! cancels its per-worker tasks.
 //!
 //! Two implementations:
 //! - [`static_config::StaticDiscovery`] emits one `Added` per worker in the
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 pub mod kubernetes;
 pub mod static_config;
 
-/// One discovery event, consumed by the coordinator in `server.rs`.
+/// One discovery event, consumed by `fleet::coordinator`.
 // `Added(WorkerConfig)` dwarfs `Removed(u64)`, but discovery events are rare,
 // so boxing isn't worth it.
 #[allow(clippy::large_enum_variant)]
@@ -30,7 +30,6 @@ pub enum WorkerChange {
     Added(WorkerConfig),
     /// A previously-Added worker is gone. The coordinator should cancel
     /// its per-worker tasks and unregister it from every state store.
-    #[allow(dead_code)]
     Removed(u64),
 }
 
@@ -56,7 +55,6 @@ pub trait Discovery: Send + Sync + 'static {
 }
 
 /// `[workerset.discovery]`: where a pool's workers come from.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct DiscoveryConfig {
     #[serde(default)]
@@ -115,7 +113,6 @@ pub enum PortRef {
 }
 
 /// Last-resort per-pod ports. See [`DiscoveryConfig::defaults`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DiscoveryDefaults {
     /// OpenAI-compatible HTTP port, also used for `/metrics`.
@@ -148,7 +145,6 @@ fn default_zmq_port() -> u16 {
     5557
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiscoveryMode {

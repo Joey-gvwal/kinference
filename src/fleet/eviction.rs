@@ -1,5 +1,3 @@
-//! Worker eviction signaling and teardown.
-//!
 //! Worker eviction signaling.
 //!
 //! A worker is torn down when discovery removes it, or on a homogeneity
@@ -8,8 +6,8 @@
 //! set.
 //!
 //! The ingest listener and metrics poller request eviction by sending an
-//! [`EvictionRequest`]; the coordinator in `server.rs` owns the receiver and
-//! does the teardown, keeping lifecycle logic in one place.
+//! [`EvictionRequest`]; `fleet::coordinator` owns the receiver and does the
+//! teardown, keeping lifecycle logic in one place.
 
 use tokio::sync::mpsc;
 

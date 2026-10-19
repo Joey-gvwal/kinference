@@ -6,26 +6,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use dashmap::DashMap;
-use dynamo_kv_router::indexer::KvIndexerInterface;
-use kinference_policy::PoolId;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
 use crate::controller::leader;
 use crate::controller::policy;
-use crate::fleet::discovery::{
-    Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
-    static_config::StaticDiscovery,
-};
-use crate::fleet::eviction;
-use crate::fleet::ingest;
+use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
+use crate::fleet::discovery::{DiscoveryMode, kubernetes::KubeDiscovery};
 use crate::fleet::models::ModelIndex;
 use crate::fleet::pool;
-use crate::fleet::pool::Pool;
 use crate::fleet::rollup;
-use crate::fleet::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
+use crate::fleet::scrape::MetricsRegistry;
 use crate::fleet::workers::{WorkerEntry, WorkerRegistry};
 use crate::router::body_store;
 use crate::router::local_tokenize;
@@ -164,9 +156,7 @@ pub async fn run() -> Result<()> {
             );
         }
 
-        // Model to pools, and the worker to pool reverse index.
         let models = Arc::new(ModelIndex::new());
-        let worker_pool: Arc<DashMap<u64, Arc<Pool>>> = Arc::new(DashMap::new());
 
         // TTL for a pick's in-flight bookkeeping (pending observation +
         // inflight counter + inflight-prefix entry). Must exceed worst-case
@@ -260,20 +250,6 @@ pub async fn run() -> Result<()> {
             );
         }
 
-        // Coordinator channel of (pool, change). Each pool runs its own
-        // discovery, and a per-pool forwarder tags its events with the pool.
-        let (coord_tx, mut rx) = tokio::sync::mpsc::channel::<(Arc<Pool>, WorkerChange)>(64);
-        // Per-worker cancellation tokens so Removed can stop a single
-        // worker's listeners without disturbing the rest of the fleet.
-        //
-        // Keyed by (pool, worker), so when a worker moves between worker sets
-        // the old pool's Removed doesn't cancel the new pool's listeners.
-        let task_tokens: Arc<DashMap<(PoolId, u64), CancellationToken>> = Arc::new(DashMap::new());
-
-        // Ingest and metrics request a worker's eviction here on a homogeneity
-        // violation; the coordinator runs the same teardown as for Removed.
-        let (eviction_tx, mut eviction_rx) = eviction::channel();
-
         // In-cluster credentials, acquired once here so pool creation stays
         // synchronous and infallible. Required (fatal) when a TOML worker set
         // uses kubernetes discovery; with only `[kubernetes]` on, a failure
@@ -302,23 +278,29 @@ pub async fn run() -> Result<()> {
         };
 
         // Pools can be built now. `PoolManager` owns the live set and
-        // publishes it to the registry.
-        let hooks = Arc::new(MainHooks {
-            cancel: cancel.clone(),
-            coord_tx: coord_tx.clone(),
-            kube_client: kube_client.clone(),
-            metrics: metrics.clone(),
-            task_tokens: task_tokens.clone(),
-            worker_pool: worker_pool.clone(),
-            observation_ttl,
-            discovery_tokens: DashMap::new(),
-        });
+        // publishes it to the registry; the coordinator starts each pool's
+        // discovery and owns its workers.
+        let (coordinator, inbox) = Coordinator::new(
+            Handles {
+                cancel: cancel.clone(),
+                kube_client,
+                metrics: metrics.clone(),
+                prom: prom.clone(),
+                models: models.clone(),
+            },
+            WorkerTaskSettings {
+                poll_ms,
+                models_refresh_secs,
+                ingest: ingest_cfg,
+                observation_ttl,
+            },
+        );
         // Written by the worker-set watch, read by the status writer. Empty
         // with `[kubernetes]` off.
         let rejection_store = policy::worker_sets::RejectionStore::new();
         let mut pool_manager = pool::PoolManager::new(
             pool_registry.clone(),
-            hooks,
+            coordinator.clone(),
             cancel.clone(),
             models.clone(),
             pool::ReapPolicy {
@@ -375,91 +357,7 @@ pub async fn run() -> Result<()> {
                 }
             });
         }
-        // Keep a sender alive in the coordinator, so the channel doesn't close
-        // when the pool count reaches zero; cancellation is the only shutdown
-        // signal.
-        let coord_keepalive = coord_tx.clone();
-        drop(coord_tx);
-
-        // Coordinator. Dispatches each (pool, change) to that pool's state
-        // stores.
-        let coord_metrics = metrics.clone();
-        let coord_cancel = cancel.clone();
-        let coord_task_tokens = task_tokens.clone();
-        let coord_eviction_tx = eviction_tx.clone();
-        let coord_models = models.clone();
-        let coord_worker_pool = worker_pool.clone();
-        let coord_prom = prom.clone();
-        tokio::spawn(async move {
-            // Lives as long as the coordinator.
-            let _keepalive = coord_keepalive;
-            loop {
-                tokio::select! {
-                    biased;
-                    Some(req) = eviction_rx.recv() => {
-                        // Resolve the worker's pool; a worker we no longer
-                        // track (already evicted) is skipped.
-                        let owner = coord_worker_pool
-                            .get(&req.worker_id_num)
-                            .map(|e| e.value().clone());
-                        if let Some(pool) = owner {
-                            // Counted here, the only path with a reason, and
-                            // after the lookup so a gone worker isn't counted.
-                            coord_prom.record_worker_eviction(req.reason.as_label());
-                            evict_worker(
-                                req.worker_id_num,
-                                Some(req.reason),
-                                &pool,
-                                &coord_metrics,
-                                &coord_task_tokens,
-                                &coord_worker_pool,
-                            )
-                            .await;
-                        }
-                    }
-                    change = rx.recv() => {
-                        let Some((pool, change)) = change else {
-                            // Unreachable while `_keepalive` is held.
-                            tracing::error!(
-                                "coordinator: discovery channel closed while a sender is held; \
-                                 no further worker registration will happen"
-                            );
-                            break;
-                        };
-                        let pool = &pool;
-                        match change {
-                            WorkerChange::Added(w) => {
-                                handle_added(
-                                    pool,
-                                    w,
-                                    poll_ms,
-                                    models_refresh_secs,
-                                    ingest_cfg,
-                                    &coord_metrics,
-                                    &coord_prom,
-                                    &coord_task_tokens,
-                                    &coord_cancel,
-                                    &coord_eviction_tx,
-                                    &coord_models,
-                                    &coord_worker_pool,
-                                );
-                            }
-                            WorkerChange::Removed(num) => {
-                                evict_worker(
-                                    num,
-                                    None,
-                                    pool,
-                                    &coord_metrics,
-                                    &coord_task_tokens,
-                                    &coord_worker_pool,
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        tokio::spawn(coordinator.run(inbox));
 
         // One `PolicyStore` for the process, made before anything reads it.
         // `None` when policy is off, which `/readyz` treats as nothing to wait
@@ -731,369 +629,6 @@ pub async fn run() -> Result<()> {
     server_result?;
     tracing::info!("Shut down complete");
     Ok(())
-}
-
-/// Handle a `WorkerChange::Added`. Registers the worker across all state
-/// stores, spawns its ZMQ listener + metrics poller (under a per-worker
-/// cancel token), and kicks a one-shot `/v1/models` scrape so the worker is
-/// routable before the next periodic tick.
-///
-/// On `SlotExhausted`, logs an error and skips the worker.
-#[allow(clippy::too_many_arguments)]
-fn handle_added(
-    pool: &Arc<pool::Pool>,
-    w: WorkerConfig,
-    poll_ms: u64,
-    models_refresh_secs: u64,
-    ingest_cfg: ingest::IngestConfig,
-    metrics: &Arc<MetricsRegistry>,
-    prom: &Arc<metrics::PromMetrics>,
-    task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
-    parent_cancel: &CancellationToken,
-    eviction_tx: &eviction::EvictionTx,
-    models: &Arc<ModelIndex>,
-    worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
-) {
-    let block_size = pool.block_size;
-    let registry = &pool.registry;
-    let indexer = &pool.indexer;
-    let inflight_prefixes = &pool.inflight_prefixes;
-    tracing::info!(
-        pool = pool.name,
-        worker_id = w.worker_id_str,
-        block_size,
-        zmq_endpoint = w.zmq_endpoint.as_deref().unwrap_or("-"),
-        http_url = w.http_url.as_deref().unwrap_or("-"),
-        "Added worker"
-    );
-
-    // 1. Two worker sets selecting one pod. Must bail: `worker_id_num` keys
-    //    fleet-wide state the first registration owns. The fix is a Service
-    //    selector.
-    if let Some(owner) = worker_pool.get(&w.worker_id_num)
-        && owner.value().id != pool.id
-    {
-        tracing::warn!(
-            pool = pool.name,
-            worker_id = w.worker_id_str,
-            owner = owner.value().name,
-            "worker already belongs to another worker set; skipping this Add"
-        );
-        return;
-    }
-
-    // Reverse index for eviction and the observation lifecycle. Provisionally
-    // route the model_name hint, before the first /v1/models scrape.
-    worker_pool.insert(w.worker_id_num, pool.clone());
-    if !w.model_name.is_empty() {
-        models.associate(pool.id, &pool.name, std::slice::from_ref(&w.model_name));
-    }
-
-    // 2. WorkerRegistry, seeded from config.model_name; `by_model` is updated
-    //    by the metrics poller and warmup.
-    let entry = WorkerEntry::from_config(&w, block_size);
-    // The key the pick path uses for inflight state, which the ZMQ listener
-    // also keys `on_stored` by.
-    let endpoint_key = entry.score_addr.clone();
-    if !registry.register(w.worker_id_num, entry) {
-        tracing::warn!(
-            worker_id = w.worker_id_str,
-            "worker id collides with one already in the registry; skipping this Add"
-        );
-        worker_pool.remove(&w.worker_id_num);
-        return;
-    }
-
-    // 3. Per-worker cancellation token. Stored so Removed can target this
-    //    worker without taking down siblings.
-    let worker_token = parent_cancel.child_token();
-    task_tokens.insert((pool.id, w.worker_id_num), worker_token.clone());
-
-    // 3b. A declared model list is authoritative: seed it and skip
-    //     `/v1/models`, for engines that don't serve it.
-    if let Some(declared) = pool.static_models.as_deref() {
-        if declared.is_empty() {
-            tracing::warn!(
-                workerset = pool.name,
-                worker_id = w.worker_id_str,
-                "modelDiscovery.mode is Static but spec.models is empty; this worker \
-                 serves nothing and no scrape will discover otherwise"
-            );
-        } else {
-            // `set_served_models` refuses on a mismatch, so only claim the
-            // models when it accepted them.
-            match registry.set_served_models(w.worker_id_num, declared) {
-                // Every worker gets the same declared list, so these mean the
-                // pin outlived a `spec.models` edit (`reset_declared_models`
-                // didn't run). Still routable.
-                crate::fleet::workers::ServedModelsVerdict::Widened { .. }
-                | crate::fleet::workers::ServedModelsVerdict::Narrowed { .. } => {
-                    tracing::warn!(
-                        workerset = pool.name,
-                        worker_id = w.worker_id_str,
-                        "declared model list differs from this set's pinned models; \
-                         routing anyway on the declared list"
-                    );
-                    models.associate(pool.id, &pool.name, declared);
-                }
-                crate::fleet::workers::ServedModelsVerdict::Accepted
-                | crate::fleet::workers::ServedModelsVerdict::Empty => {
-                    models.associate(pool.id, &pool.name, declared);
-                }
-                crate::fleet::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
-                    // As above, but not routable: skip the worker rather than
-                    // half-register it.
-                    tracing::error!(
-                        workerset = pool.name,
-                        worker_id = w.worker_id_str,
-                        ?expected,
-                        ?observed,
-                        "declared model list disagrees with this set's pinned models; \
-                         not routing to this worker"
-                    );
-                }
-            }
-        }
-        // Readiness normally waits on a `/v1/models` scrape. With a declared
-        // list there is nothing to wait for.
-        registry.set_initial_sync_complete(w.worker_id_num);
-    }
-
-    // 4. Spawn the per-worker tasks. The metrics poller and warmup update
-    //    model routing after a /v1/models scrape.
-    ingest::spawn_worker_listener(
-        w.clone(),
-        block_size,
-        ingest_cfg,
-        endpoint_key,
-        indexer.clone(),
-        prom.clone(),
-        inflight_prefixes.clone(),
-        registry.clone(),
-        eviction_tx.clone(),
-        worker_token.clone(),
-    );
-    // With a declared model list, push the models refresh out of the way; the
-    // poller still scrapes load metrics.
-    let refresh_secs = if pool.static_models.is_some() {
-        u64::MAX / 2000
-    } else {
-        pool.models_refresh_secs.unwrap_or(models_refresh_secs)
-    };
-    spawn_metrics_poller(
-        w.clone(),
-        poll_ms,
-        refresh_secs,
-        metrics.clone(),
-        registry.clone(),
-        eviction_tx.clone(),
-        worker_token,
-        models.clone(),
-        pool.id,
-        pool.name.clone(),
-    );
-
-    // 5. An immediate /v1/models scrape, so the worker is routable without
-    //    waiting for the periodic tick.
-    spawn_one_shot_warmup(
-        w,
-        metrics.clone(),
-        registry.clone(),
-        eviction_tx.clone(),
-        models.clone(),
-        pool.id,
-        pool.name.clone(),
-    );
-}
-
-/// The side effects `PoolManager` delegates: starting a pool's discovery, and
-/// dropping its workers' fleet-wide state when it retires.
-///
-/// Here rather than in `pool`, which can then be tested against a
-/// stub.
-struct MainHooks {
-    /// Process token. Pool and discovery tokens are its children.
-    cancel: CancellationToken,
-    coord_tx: tokio::sync::mpsc::Sender<(Arc<Pool>, WorkerChange)>,
-    kube_client: Option<kube::Client>,
-    metrics: Arc<MetricsRegistry>,
-    task_tokens: Arc<DashMap<(PoolId, u64), CancellationToken>>,
-    worker_pool: Arc<DashMap<u64, Arc<Pool>>>,
-    observation_ttl: std::time::Duration,
-    /// Per-pool token scoping that pool's discovery, forwarder, and prefix
-    /// sweep.
-    ///
-    /// Not `pool.cancel`, which survives retirement until the reaper fires
-    /// (the `KvIndexer` panics if used after cancellation). Discovery must
-    /// stop the moment the pool retires.
-    discovery_tokens: DashMap<PoolId, CancellationToken>,
-}
-
-impl pool::PoolHooks for MainHooks {
-    fn on_create(&self, pool: &Arc<Pool>, spec: &pool::PoolSpec) -> anyhow::Result<()> {
-        let discovery: Arc<dyn Discovery> = match spec.discovery.mode {
-            DiscoveryMode::Static => {
-                let workers = spec.load_static_workers()?;
-                Arc::new(StaticDiscovery::new(workers))
-            }
-            DiscoveryMode::Kubernetes => {
-                let client = self.kube_client.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "worker set needs Kubernetes discovery but no in-cluster \
-                         client was built at startup"
-                    )
-                })?;
-                Arc::new(KubeDiscovery::from_client(spec.discovery.clone(), client))
-            }
-        };
-
-        let token = self.cancel.child_token();
-        self.discovery_tokens.insert(pool.id, token.clone());
-
-        let (pool_tx, mut pool_rx) = tokio::sync::mpsc::channel::<WorkerChange>(64);
-        {
-            let token = token.clone();
-            tokio::spawn(async move { discovery.run(pool_tx, token).await });
-        }
-        // Forwarder: tag this pool's WorkerChange events with the pool.
-        {
-            let coord_tx = self.coord_tx.clone();
-            let pool = pool.clone();
-            tokio::spawn(async move {
-                while let Some(wc) = pool_rx.recv().await {
-                    if coord_tx.send((pool.clone(), wc)).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        // Per-pool inflight-prefix TTL sweep, a backstop against lifecycle
-        // leaks.
-        {
-            let inflight = pool.inflight_prefixes.clone();
-            let ttl = self.observation_ttl;
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-                loop {
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        _ = interval.tick() => inflight.sweep(ttl),
-                    }
-                }
-            });
-        }
-        Ok(())
-    }
-
-    fn on_retire(&self, pool: &Arc<Pool>) {
-        // Stop discovery FIRST, or it re-announces the workers we are about to
-        // drop and the coordinator resurrects them into a retired pool.
-        if let Some((_, token)) = self.discovery_tokens.remove(&pool.id) {
-            token.cancel();
-        }
-        // Drop every worker's fleet-wide state. Synchronous and indexer-free:
-        // the whole radix tree goes at reap, and touching it here would race
-        // the cancellation.
-        let workers: Vec<u64> = pool
-            .registry
-            .iter_snapshot()
-            .into_iter()
-            .map(|(num, _)| num)
-            .collect();
-        let count = workers.len();
-        for num in workers {
-            drop_worker_state(
-                num,
-                None,
-                pool,
-                &self.metrics,
-                &self.task_tokens,
-                &self.worker_pool,
-            );
-        }
-        tracing::info!(
-            workerset = %pool.key,
-            workers = count,
-            "released this worker set's workers"
-        );
-    }
-}
-
-/// Teardown for both discovery removals and evictions: cancel the worker's
-/// tasks, drop its state, and drop its radix-tree subtree.
-///
-/// `reason` is `None` for discovery removals and `Some` for evictions, which
-/// are logged with the reason.
-async fn evict_worker(
-    worker_id_num: u64,
-    reason: Option<eviction::EvictionReason>,
-    pool: &Arc<pool::Pool>,
-    metrics: &Arc<MetricsRegistry>,
-    task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
-    worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
-) {
-    drop_worker_state(
-        worker_id_num,
-        reason,
-        pool,
-        metrics,
-        task_tokens,
-        worker_pool,
-    );
-
-    pool.indexer.remove_worker(worker_id_num).await;
-}
-
-/// Everything `evict_worker` does except the indexer call, for retiring pools:
-/// `KvIndexer::remove_worker` panics if it races cancellation, and the whole
-/// tree is dropped anyway.
-#[allow(clippy::too_many_arguments)]
-fn drop_worker_state(
-    worker_id_num: u64,
-    reason: Option<eviction::EvictionReason>,
-    pool: &Arc<pool::Pool>,
-    metrics: &Arc<MetricsRegistry>,
-    task_tokens: &Arc<DashMap<(PoolId, u64), CancellationToken>>,
-    worker_pool: &Arc<DashMap<u64, Arc<Pool>>>,
-) {
-    // For the log line, before the registry entry is dropped.
-    let worker_id = pool
-        .registry
-        .lookup(worker_id_num)
-        .map(|e| e.worker_id_str)
-        .unwrap_or_else(|| format!("<unregistered:{worker_id_num}>"));
-    match &reason {
-        Some(r) => {
-            tracing::warn!(pool = pool.name, worker_id, reason = %r, "Evicting worker")
-        }
-        None => tracing::info!(pool = pool.name, worker_id, "Removed worker"),
-    }
-
-    // Stop the per-worker tasks, for this pool only.
-    if let Some((_, token)) = task_tokens.remove(&(pool.id, worker_id_num)) {
-        token.cancel();
-    }
-
-    // Per-pool state: unconditionally ours to drop.
-    pool.registry.unregister(worker_id_num);
-
-    // Fleet-wide state is keyed by `worker_id_num` alone, so only drop it while
-    // this pool is the owner; blanked metrics would make the worker look idle.
-    //
-    // The model index is left alone: other workers may still serve the model.
-    let still_ours = worker_pool
-        .get(&worker_id_num)
-        .is_none_or(|e| e.value().id == pool.id);
-    if still_ours {
-        metrics.forget(worker_id_num);
-        worker_pool.remove(&worker_id_num);
-    } else {
-        tracing::info!(
-            pool = pool.name,
-            worker_id,
-            "worker now belongs to another worker set; leaving fleet-wide state alone"
-        );
-    }
 }
 
 /// The pod's own namespace, from the service-account mount. Used when

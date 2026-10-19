@@ -152,13 +152,6 @@ pub struct ModelEntry {
 #[derive(Clone, Debug, Default)]
 pub struct ModelsInfo {
     pub models: Vec<ModelEntry>,
-    /// Engine identity from `data[*].owned_by`. `None` until the first
-    /// successful refresh. Informational only; nothing reads it yet.
-    #[allow(dead_code)]
-    pub detected_engine: Option<Engine>,
-    /// When the last successful refresh happened. Not read yet.
-    #[allow(dead_code)]
-    pub fetched_at: Option<Instant>,
 }
 
 /// Sliding-window samples of `completions_total` per worker, for
@@ -344,7 +337,6 @@ impl MetricsRegistry {
 
     /// Drop all per-worker state for a removed worker, so a replacement
     /// doesn't inherit its history.
-    #[allow(dead_code)]
     pub fn forget(&self, worker_id_num: u64) {
         self.by_worker.remove(&worker_id_num);
         self.gauge_history.remove(&worker_id_num);
@@ -458,14 +450,9 @@ pub fn spawn_one_shot_warmup(
                 if let Some(eng) = detected_engine {
                     workers.set_engine(cfg.worker_id_num, eng);
                 }
-                registry.models_by_worker.insert(
-                    cfg.worker_id_num,
-                    ModelsInfo {
-                        models,
-                        detected_engine,
-                        fetched_at: Some(Instant::now()),
-                    },
-                );
+                registry
+                    .models_by_worker
+                    .insert(cfg.worker_id_num, ModelsInfo { models });
             }
             Err(err) => {
                 tracing::warn!(
@@ -612,14 +599,9 @@ pub fn spawn_metrics_poller(
                         } else {
                             String::new()
                         };
-                        registry.models_by_worker.insert(
-                            cfg.worker_id_num,
-                            ModelsInfo {
-                                models,
-                                detected_engine,
-                                fetched_at: Some(Instant::now()),
-                            },
-                        );
+                        registry
+                            .models_by_worker
+                            .insert(cfg.worker_id_num, ModelsInfo { models });
                     }
                     Err(err) => {
                         if !warned_about_models {

@@ -44,7 +44,6 @@ impl Discovery for StaticDiscovery {
 }
 
 /// A static worker list, loaded from `discovery.workers_file`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkersFile {
     #[serde(default)]
