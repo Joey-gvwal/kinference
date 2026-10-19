@@ -17,7 +17,7 @@ fn harness() -> Harness {
     let (coordinator, _inbox) = Coordinator::new(
         Handles {
             cancel: process.clone(),
-            kube_client: None,
+            kubernetes: None,
             metrics: metrics.clone(),
             prom: Arc::new(FleetMetrics::new(&prometheus::Registry::new())),
             models: models.clone(),

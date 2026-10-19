@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::fleet::discovery::{
-    Discovery, DiscoveryMode, WorkerChange, WorkerConfig, kubernetes::KubeDiscovery,
+    Discovery, DiscoveryFactory, DiscoveryMode, WorkerChange, WorkerConfig,
     static_config::StaticDiscovery,
 };
 use crate::fleet::eviction::{self, EvictionReason};
@@ -31,9 +31,9 @@ use crate::fleet::workers::{ServedModelsVerdict, WorkerEntry};
 pub struct Handles {
     /// Process token. Pool and discovery tokens are its children.
     pub cancel: CancellationToken,
-    /// In-cluster client for Kubernetes discovery; `None` when no worker set
+    /// Builds a pool's Kubernetes discovery; `None` when no worker set
     /// needs it or credentials were unavailable at startup.
-    pub kube_client: Option<kube::Client>,
+    pub kubernetes: Option<DiscoveryFactory>,
     pub metrics: Arc<MetricsRegistry>,
     pub prom: Arc<FleetMetrics>,
     pub models: Arc<ModelIndex>,
@@ -62,7 +62,7 @@ pub struct Inbox {
 /// discovery starts when it is created and stops when it retires.
 pub struct Coordinator {
     cancel: CancellationToken,
-    kube_client: Option<kube::Client>,
+    kubernetes: Option<DiscoveryFactory>,
     metrics: Arc<MetricsRegistry>,
     prom: Arc<FleetMetrics>,
     models: Arc<ModelIndex>,
@@ -96,7 +96,7 @@ impl Coordinator {
         let (eviction_tx, evictions) = eviction::channel();
         let coordinator = Arc::new(Self {
             cancel: handles.cancel,
-            kube_client: handles.kube_client,
+            kubernetes: handles.kubernetes,
             metrics: handles.metrics,
             prom: handles.prom,
             models: handles.models,
@@ -370,13 +370,13 @@ impl PoolHooks for Coordinator {
                 Arc::new(StaticDiscovery::new(workers))
             }
             DiscoveryMode::Kubernetes => {
-                let client = self.kube_client.clone().ok_or_else(|| {
+                let build = self.kubernetes.as_ref().ok_or_else(|| {
                     anyhow::anyhow!(
                         "worker set needs Kubernetes discovery but no in-cluster \
                          client was built at startup"
                     )
                 })?;
-                Arc::new(KubeDiscovery::from_client(spec.discovery.clone(), client))
+                build(spec.discovery.clone())
             }
         };
 
