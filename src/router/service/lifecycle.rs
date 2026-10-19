@@ -30,7 +30,6 @@ impl KinferenceService {
     ///
     /// The caller mints `request_id` (see `mint_response_id`), so the same id
     /// flows through pending-observation lookup and log correlation.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn pick_and_record(
         &self,
         body: &[u8],
