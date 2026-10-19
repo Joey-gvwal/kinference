@@ -195,7 +195,7 @@ pub(super) fn method_not_allowed(allow: &'static str) -> ApiError {
 
 /// What both handlers need, as one `State` extractor.
 ///
-/// Snapshot readers only: no `PromMetrics`, body store, inflight registry, or
+/// Snapshot readers only: no Prometheus registry, body store, inflight registry, or
 /// HTTP or kube client, which makes the API read-only by construction. The
 /// semaphore only bounds this API's own load.
 #[derive(Clone)]

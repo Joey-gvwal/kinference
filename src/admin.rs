@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::fleet::gauges::FleetGauges;
 use crate::fleet::pool::PoolRegistry;
 use crate::fleet::scrape::MetricsRegistry;
-use crate::metrics::PromMetrics;
+use crate::metrics;
 
 mod policy_api;
 
@@ -34,8 +34,8 @@ struct AppState {
     /// [`readyz`].
     policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
     /// Prometheus registry for `/metrics`.
-    prom: Arc<PromMetrics>,
-    /// The fleet gauges, registered in `prom`; `/metrics` refreshes their
+    registry: prometheus::Registry,
+    /// The fleet gauges, registered in `registry`; `/metrics` refreshes their
     /// tree dump before rendering.
     gauges: FleetGauges,
     /// The policy API's state, built once so every request shares one
@@ -70,14 +70,14 @@ impl FromRef<AppState> for ReadyzState {
 /// tree dump is refreshed first.
 #[derive(Clone)]
 struct MetricsState {
-    prom: Arc<PromMetrics>,
+    registry: prometheus::Registry,
     gauges: FleetGauges,
 }
 
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
-            prom: state.prom.clone(),
+            registry: state.registry.clone(),
             gauges: state.gauges.clone(),
         }
     }
@@ -124,7 +124,7 @@ pub async fn serve(
     addr: SocketAddr,
     pools: Arc<PoolRegistry>,
     policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
-    prom: Arc<PromMetrics>,
+    registry: prometheus::Registry,
     metrics_registry: Arc<MetricsRegistry>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -134,10 +134,10 @@ pub async fn serve(
             pools.clone(),
             metrics_registry.clone(),
         ),
-        gauges: FleetGauges::new(pools.clone(), metrics_registry, prom.registry()),
+        gauges: FleetGauges::new(pools.clone(), metrics_registry, &registry),
         pools,
         policy,
-        prom,
+        registry,
     };
     let app = router(state);
 
@@ -153,8 +153,8 @@ pub async fn serve(
 async fn metrics(State(st): State<MetricsState>) -> Response {
     st.gauges.refresh_index().await;
     (
-        [(header::CONTENT_TYPE, PromMetrics::content_type())],
-        st.prom.render(),
+        [(header::CONTENT_TYPE, metrics::CONTENT_TYPE)],
+        metrics::render(&st.registry),
     )
         .into_response()
 }

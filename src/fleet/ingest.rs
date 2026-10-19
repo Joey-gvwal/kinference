@@ -3,7 +3,7 @@
 //! One [`spawn_worker_listener`] task per worker. Each task owns its sockets,
 //! parses vLLM's wire-format events through `dynamo_kv_router::zmq_wire`, and
 //! feeds them into the shared [`KvIndexer`] (radix tree) and our bookkeeping
-//! ([`InflightPrefixes`], [`PromMetrics`], [`WorkerRegistry`]) in
+//! ([`InflightPrefixes`], [`FleetMetrics`], [`WorkerRegistry`]) in
 //! [`apply_frame`].
 //!
 //! Modelled after dynamo's `standalone_indexer` listener

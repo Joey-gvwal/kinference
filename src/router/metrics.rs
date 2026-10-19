@@ -39,7 +39,7 @@ pub enum TenantLabels {
     #[default]
     None,
     /// Unbounded cardinality: about 91 series per (model, qos, tenant).
-    /// `crate::metrics` warns at startup when set.
+    /// [`RouterMetrics::new`] warns at startup when set.
     All,
     Allow(Vec<String>),
 }

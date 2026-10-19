@@ -131,12 +131,12 @@ pub async fn run() -> Result<()> {
             .await
     } else {
         let metrics = Arc::new(MetricsRegistry::new());
-        // Prometheus registry, shared by the gRPC handlers and the admin
-        // listener's `/metrics`.
-        let prom = Arc::new(metrics::PromMetrics::new());
-        let router_prom = Arc::new(RouterMetrics::new(prom.registry(), &cfg.metrics));
-        let fleet_prom = Arc::new(FleetMetrics::new(prom.registry()));
-        let controller_prom = Arc::new(ControllerMetrics::new(prom.registry()));
+        // One Prometheus registry; each group registers its families, and
+        // the admin listener renders it on `/metrics`.
+        let registry = metrics::registry();
+        let router_prom = Arc::new(RouterMetrics::new(&registry, &cfg.metrics));
+        let fleet_prom = Arc::new(FleetMetrics::new(&registry));
+        let controller_prom = Arc::new(ControllerMetrics::new(&registry));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
         let ingest_cfg = cfg.ingest;
@@ -376,14 +376,14 @@ pub async fn run() -> Result<()> {
             let dash_pools = pool_registry.clone();
             let dash_policy = policy_store_cell.clone();
             let dash_metrics = metrics.clone();
-            let dash_prom = prom.clone();
+            let dash_registry = registry.clone();
             let dash_cancel = cancel.clone();
             tokio::spawn(async move {
                 if let Err(err) = admin::serve(
                     dash_addr,
                     dash_pools,
                     dash_policy,
-                    dash_prom,
+                    dash_registry,
                     dash_metrics,
                     dash_cancel,
                 )

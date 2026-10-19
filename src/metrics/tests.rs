@@ -19,7 +19,7 @@ fn assert_line(out: &str, expect: &str) {
 /// fresh registry, since it is set at construction.
 #[test]
 fn build_info_reports_the_version_at_construction() {
-    let out = PromMetrics::new().render();
+    let out = render(&registry());
     assert_line(
         &out,
         &format!(
