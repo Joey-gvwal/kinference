@@ -11,6 +11,7 @@ use tonic::transport::Server;
 
 use crate::config::Config;
 use crate::controller::leader;
+use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use crate::fleet::discovery::{DiscoveryMode, kubernetes::KubeDiscovery};
@@ -133,6 +134,7 @@ pub async fn run() -> Result<()> {
         // listener's `/metrics`.
         let prom = Arc::new(metrics::PromMetrics::with_config(&cfg.metrics));
         let fleet_prom = Arc::new(FleetMetrics::new(prom.registry()));
+        let controller_prom = Arc::new(ControllerMetrics::new(prom.registry()));
         let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
         let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
         let ingest_cfg = cfg.ingest;
@@ -341,7 +343,7 @@ pub async fn run() -> Result<()> {
                 cfg.profiles.clone(),
                 pool_manager,
                 rejection_store.clone(),
-                prom.clone(),
+                controller_prom.clone(),
             );
             let cancel = cancel.clone();
             tokio::spawn(async move { watcher.run(client, cancel).await });
@@ -483,7 +485,7 @@ pub async fn run() -> Result<()> {
                 metrics.clone(),
                 provider_health.clone(),
                 leader_rx.clone(),
-                prom.clone(),
+                controller_prom.clone(),
                 cancel.clone(),
             )
             .await?;

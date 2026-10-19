@@ -1,7 +1,9 @@
 //! The fleet's own Prometheus families, registered in the registry the
 //! server lends, plus the helpers every group registers its families with.
 
-use prometheus::{IntCounter, IntCounterVec, Opts, Registry, core::Collector};
+use prometheus::{
+    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, core::Collector,
+};
 
 /// Build a family and register a clone of it, so the returned handle and the
 /// registry share storage.
@@ -25,6 +27,14 @@ pub fn int_counter_vec(
     labels: &[&str],
 ) -> IntCounterVec {
     register(registry, IntCounterVec::new(Opts::new(name, help), labels))
+}
+
+pub fn int_gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
+    register(registry, IntGauge::new(name, help))
+}
+
+pub fn int_gauge_vec(registry: &Registry, name: &str, help: &str, labels: &[&str]) -> IntGaugeVec {
+    register(registry, IntGaugeVec::new(Opts::new(name, help), labels))
 }
 
 /// `kinference_index_events_total{kind}`. Source: [`IngestEvent::as_label`].

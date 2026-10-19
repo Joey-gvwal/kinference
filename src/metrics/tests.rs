@@ -752,10 +752,6 @@ fn preinit_creates_every_closed_set_series_at_zero() {
         let line = format!("kinference_policy_decisions_total{{outcome=\"{v}\"}} 0");
         assert!(has_line(&out, &line), "missing `{line}`:\n{out}");
     }
-    for v in WORKERSET_REJECT_REASONS {
-        let line = format!("kinference_workerset_rejected_total{{reason=\"{v}\"}} 0");
-        assert!(has_line(&out, &line), "missing `{line}`:\n{out}");
-    }
     // The histogram beside `picks` is not seeded; see `preinit`.
     assert!(
         !out.lines()

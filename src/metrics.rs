@@ -154,19 +154,6 @@ const POLICY_DECISION_OUTCOMES: [&str; 9] = [
     "forced_endpoint_missing",
 ];
 
-/// `kinference_workerset_rejected_total{reason}`.
-/// Source: `kinference_policy::rejection::RejectReason::as_condition_reason`.
-/// CamelCase, since these double as Kubernetes condition reasons.
-const WORKERSET_REJECT_REASONS: [&str; 7] = [
-    "MissingProfile",
-    "UnknownProfile",
-    "MissingKvBlockSize",
-    "InvalidKvBlockSize",
-    "MissingServiceRef",
-    "ModelMissingName",
-    "KvEventsMissingPort",
-];
-
 /// Outcome of one pick, as the `outcome` label on `kinference_picks_total` and
 /// `kinference_pick_duration_ms`.
 ///
@@ -296,35 +283,16 @@ pub struct PromMetrics {
     prefix_overmatch: IntCounterVec,
     /// `kinference_score_degraded_total{reason}`.
     score_degraded: IntCounterVec,
-    /// `kinference_workerset_rejected_total{reason}`.
-    workerset_rejected: IntCounterVec,
     /// `kinference_policy_decisions_total{outcome}`.
     policy_decisions: IntCounterVec,
     /// `kinference_routed_requests_total{tenant,destination,type}`: which worker
     /// set or provider each tenant's traffic went to.
     routed_requests: IntCounterVec,
-    // --- Leader election. See `crate::controller::leader`.
-    /// `kinference_leader`: 1 when this replica holds the Lease, else 0.
-    ///
-    /// Exactly one pod should report 1. None means election is broken or
-    /// another deployment holds a same-named Lease (check `holderIdentity`).
-    leader: IntGauge,
-    /// `kinference_leader_transitions_total`: leadership changes observed by
-    /// this replica. A steady rate means flapping.
-    leader_transitions: IntCounter,
-    /// `kinference_leader_election_errors_total`: failed Lease reads/writes.
-    ///
-    /// Election fails closed, so rising errors with `kinference_leader` at 0
-    /// everywhere means no replica writes status.
-    leader_election_errors: IntCounter,
     /// `kinference_policy_rule_matches_total{rule}`: which rules are actually live.
     policy_rule_matches: IntCounterVec,
     /// `kinference_policy_revision_mismatch_total`: the gateway routed on a pool
     /// revision we don't hold. Rising means our watch lags the gateway.
     policy_revision_mismatch: IntCounter,
-    /// `kinference_policy_warnings{policy,code}`: how many findings each policy
-    /// carries in `status.warnings`, by code.
-    policy_warnings: IntGaugeVec,
     /// `kinference_predicted_ttft_ms{worker,model}`: the values `predictedTTFT`
     /// compares against, for every candidate scored (winners alone would be
     /// biased low).
@@ -548,21 +516,6 @@ impl PromMetrics {
             "Request bodies currently tracked by the body store",
         )
         .expect("body_buffer_entries gauge opts are valid");
-        let leader = IntGauge::new(
-            "kinference_leader",
-            "1 when this replica holds the leader Lease and writes CRD status, else 0",
-        )
-        .expect("leader gauge opts are valid");
-        let leader_transitions = IntCounter::new(
-            "kinference_leader_transitions_total",
-            "Leadership transitions observed by this replica",
-        )
-        .expect("leader_transitions counter opts are valid");
-        let leader_election_errors = IntCounter::new(
-            "kinference_leader_election_errors_total",
-            "Failed leader-election Lease reads or writes",
-        )
-        .expect("leader_election_errors counter opts are valid");
         let body_pushed = IntCounter::new(
             "kinference_body_pushed_total",
             "Request bodies successfully pushed and buffered",
@@ -591,14 +544,6 @@ impl PromMetrics {
             &["reason"],
         )
         .expect("body_aborted counter opts are valid");
-        let workerset_rejected = IntCounterVec::new(
-            Opts::new(
-                "kinference_workerset_rejected_total",
-                "InferenceWorkerSets that produced no pool, by why",
-            ),
-            &["reason"],
-        )
-        .expect("workerset_rejected counter opts are valid");
         let picks = IntCounterVec::new(
             Opts::new(
                 "kinference_picks_total",
@@ -770,17 +715,6 @@ impl PromMetrics {
             "Picks whose named InferencePool revision differed from the watched one",
         )
         .expect("policy_revision_mismatch counter opts are valid");
-        let policy_warnings = IntGaugeVec::new(
-            Opts::new(
-                "kinference_policy_warnings",
-                "Findings an InferencePolicy carries, by warning code — the list in \
-                 its status.warnings. Non-zero means some part of the policy does not \
-                 do what it says; the code names which kind. Published by the status \
-                 writer, so only the leader exports it",
-            ),
-            &["policy", "code"],
-        )
-        .expect("policy_warnings gauge opts are valid");
         // Clones share storage with the struct's copies.
         registry
             .register(Box::new(cached_prompt_tokens.clone()))
@@ -827,15 +761,6 @@ impl PromMetrics {
         registry
             .register(Box::new(body_buffer_entries.clone()))
             .expect("register body_buffer_entries");
-        registry
-            .register(Box::new(leader.clone()))
-            .expect("register leader");
-        registry
-            .register(Box::new(leader_transitions.clone()))
-            .expect("register leader_transitions");
-        registry
-            .register(Box::new(leader_election_errors.clone()))
-            .expect("register leader_election_errors");
         registry
             .register(Box::new(body_pushed.clone()))
             .expect("register body_pushed");
@@ -889,9 +814,6 @@ impl PromMetrics {
             .register(Box::new(score_degraded.clone()))
             .expect("register score_degraded");
         registry
-            .register(Box::new(workerset_rejected.clone()))
-            .expect("register workerset_rejected");
-        registry
             .register(Box::new(policy_decisions.clone()))
             .expect("register policy_decisions");
         registry
@@ -906,9 +828,6 @@ impl PromMetrics {
         registry
             .register(Box::new(policy_revision_mismatch.clone()))
             .expect("register policy_revision_mismatch");
-        registry
-            .register(Box::new(policy_warnings.clone()))
-            .expect("register policy_warnings");
         let m = Self {
             tenants,
             picks,
@@ -943,16 +862,11 @@ impl PromMetrics {
             body_reaped,
             body_aborted,
             score_degraded,
-            workerset_rejected,
             policy_decisions,
             routed_requests,
-            leader,
-            leader_transitions,
-            leader_election_errors,
             policy_rule_matches,
             predicted_ttft_ms,
             policy_revision_mismatch,
-            policy_warnings,
         };
         m.preinit();
         m
@@ -988,9 +902,6 @@ impl PromMetrics {
         for outcome in POLICY_DECISION_OUTCOMES {
             self.policy_decisions.with_label_values(&[outcome]);
         }
-        for reason in WORKERSET_REJECT_REASONS {
-            self.workerset_rejected.with_label_values(&[reason]);
-        }
     }
 
     /// One body accepted by `PushBody`.
@@ -1014,12 +925,6 @@ impl PromMetrics {
     /// Bodies reclaimed by the TTL sweep.
     pub fn record_bodies_reaped(&self, count: u64) {
         self.body_reaped.inc_by(count);
-    }
-
-    /// A worker set the operator declared but the router could not use.
-    /// Counted on the transition into rejection, not per watch tick.
-    pub fn record_workerset_rejected(&self, reason: &str) {
-        self.workerset_rejected.with_label_values(&[reason]).inc();
     }
 
     /// One completed `Pick()`: its wire outcome and how long the router took.
@@ -1133,21 +1038,6 @@ impl PromMetrics {
             .inc();
     }
 
-    /// Publish this replica's leadership state. Counts a transition only on an
-    /// actual change, so the counter measures flapping rather than tick rate.
-    pub fn set_leader(&self, is_leader: bool) {
-        let want = i64::from(is_leader);
-        if self.leader.get() != want {
-            self.leader.set(want);
-            self.leader_transitions.inc();
-        }
-    }
-
-    /// A Lease read or write failed.
-    pub fn record_leader_election_error(&self) {
-        self.leader_election_errors.inc();
-    }
-
     /// A rule fired.
     pub fn record_policy_rule_match(&self, rule: &str) {
         self.policy_rule_matches.with_label_values(&[rule]).inc();
@@ -1164,18 +1054,6 @@ impl PromMetrics {
     /// A rising count means the watch is lagging the gateway.
     pub fn record_policy_revision_mismatch(&self) {
         self.policy_revision_mismatch.inc();
-    }
-
-    /// Publish per-policy warning counts, replacing the previous pass.
-    ///
-    /// `reset()` first, so fixed or deleted policies drop out.
-    pub fn set_policy_warnings(&self, rows: &[(String, &'static str, i64)]) {
-        self.policy_warnings.reset();
-        for (policy, code, n) in rows {
-            self.policy_warnings
-                .with_label_values(&[policy.as_str(), code])
-                .set(*n);
-        }
     }
 
     /// Publish the body store's current occupancy. Called from the sweep task.
