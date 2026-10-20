@@ -15,11 +15,11 @@ use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::router::body_store;
-use crate::router::local_tokenize;
 use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
+use crate::router::tokenizer;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
@@ -153,58 +153,15 @@ pub async fn run() -> Result<()> {
         "Body buffer configured"
     );
 
-    // Shared HTTP client for tokenization, so connections pool.
-    //
-    // Settings mirror the Gateway API Inference Extension EPP's. vLLM speaks
-    // HTTP/1.1 only, so force it; without multiplexing that means several
-    // connections per host (`tokenize.pool_max_idle_per_host`, default 16;
-    // raise to peak concurrency with a single `render_url`).
-    // `pool_idle_timeout = 90s` matches the EPP and AWS NLB idle tolerance;
-    // `tcp_keepalive` detects half-closed connections.
-    let pool_max_idle_per_host = cfg.tokenize.pool_max_idle_per_host.unwrap_or(16);
-    let tokenize_client = Arc::new(
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .pool_max_idle_per_host(pool_max_idle_per_host)
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-            .tcp_nodelay(true)
-            .http1_only()
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to build tokenize HTTP client: {e}"))?,
-    );
-    tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
-
-    // The local tokenizer registry is fleet-wide and cheap to build, so it
-    // is always built; each pool's tokenize mode decides whether to use it.
-    let warmup_enabled = cfg.tokenize.local.warmup;
-    let local_tokenizer =
-        match local_tokenize::LocalTokenizerRegistry::new(cfg.tokenize.local.clone()) {
-            Ok(reg) => {
-                tracing::info!(
-                    mount_dir = ?cfg.tokenize.local.mount_dir,
-                    warmup = warmup_enabled,
-                    "Local tokenize registry built"
-                );
-                Some(Arc::new(reg))
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "Failed to build LocalTokenizerRegistry; local/compare \
-                     pools will fall back to HTTP /render"
-                );
-                None
-            }
-        };
-    if warmup_enabled && let Some(registry) = local_tokenizer.as_ref() {
-        local_tokenize::spawn_warmup(
-            registry.clone(),
-            pool_registry.clone(),
-            models.subscribe(),
-            cancel.clone(),
-        );
-    }
+    let tokenizer = tokenizer::build(
+        &cfg.tokenize,
+        metrics.clone(),
+        router_prom.clone(),
+        pool_registry.clone(),
+        &models,
+        cancel.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("failed to build the tokenizer: {e}"))?;
 
     // In-cluster credentials, acquired once here so pool creation stays
     // synchronous and infallible. Required (fatal) when the config declares
@@ -475,8 +432,7 @@ pub async fn run() -> Result<()> {
         pool_registry.clone(),
         models.clone(),
         metrics.clone(),
-        tokenize_client.clone(),
-        local_tokenizer,
+        tokenizer,
         pending_observations.clone(),
         request_labels.clone(),
         body_store.clone(),

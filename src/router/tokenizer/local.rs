@@ -1,7 +1,8 @@
 //! In-process tokenization via the HuggingFace `tokenizers` Rust crate.
 //!
 //! Used by pools whose profile sets tokenize mode `local` or `compare`; the
-//! mode handling and the compare harness live in [`crate::router::tokenize_client`].
+//! mode dispatch is [`crate::router::tokenizer::ByMode`] and the compare
+//! harness [`crate::router::tokenizer::compare`].
 //!
 //! ## Loading model tokenizers
 //!
@@ -43,13 +44,16 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
-use crate::router::tokenize::TokenizeInput;
+use super::http::HttpRender;
+use futures::future::BoxFuture;
+
+use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest};
+use crate::router::metrics::RouterMetrics;
 use kinference_fleet::models::ModelClaim;
 use kinference_fleet::pool::{Pool, PoolRegistry};
 use kinference_fleet::profile::TokenizeMode;
 
-/// `tokenize.local`. See `src/router/local_tokenize.rs`.
-#[allow(dead_code)]
+/// `tokenize.local`. See `src/router/tokenizer/local.rs`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalTokenizeConfig {
     /// Directory checked for tokenizer files before fetching from the Hub:
@@ -81,49 +85,6 @@ fn default_warmup() -> bool {
     true
 }
 
-/// Load a tokenizer for each new model claim whose pool uses the local
-/// tokenizer, until `cancel`. Each load runs in its own task, so a slow Hub
-/// fetch does not hold up the stream.
-pub fn spawn_warmup(
-    registry: Arc<LocalTokenizerRegistry>,
-    pools: Arc<PoolRegistry>,
-    mut claims: broadcast::Receiver<ModelClaim>,
-    cancel: CancellationToken,
-) {
-    tokio::spawn(async move {
-        loop {
-            let claim = tokio::select! {
-                _ = cancel.cancelled() => return,
-                next = claims.recv() => match next {
-                    Ok(claim) => claim,
-                    Err(RecvError::Lagged(missed)) => {
-                        tracing::warn!(
-                            missed,
-                            "tokenizer warmup fell behind; skipped models load on first request"
-                        );
-                        continue;
-                    }
-                    Err(RecvError::Closed) => return,
-                },
-            };
-            if !should_warm(pools.snapshot().get(claim.pool)) {
-                continue;
-            }
-            let registry = registry.clone();
-            tokio::spawn(async move {
-                if let Err(err) = registry.warmup(&claim.model).await {
-                    tracing::warn!(
-                        model = %claim.model,
-                        error = %err,
-                        "tokenizer warmup failed; first request will pay the load cost or fall \
-                         back to HTTP /render"
-                    );
-                }
-            });
-        }
-    });
-}
-
 /// A render-mode pool never uses the local tokenizer. A pool missing from the
 /// snapshot is warmed anyway: it may be published a beat after its first
 /// claim, and an extra load is harmless.
@@ -138,7 +99,7 @@ struct LoadedTokenizer {
     /// `tokenizer_config.json` or as a sibling `chat_template.jinja`).
     /// `None` for tokenizer-only models that don't publish a template
     /// (chat-mode requests for such a model will error from
-    /// `LocalTokenizerRegistry::tokenize`).
+    /// `LocalTokenizer::encode`).
     chat_template: Option<String>,
     /// Special-token strings bound into the Jinja render context (see
     /// [`extract_special_tokens`]). Without them, `{{- bos_token -}}`
@@ -154,31 +115,130 @@ struct TokenizerConfigMeta {
     special_tokens: HashMap<String, String>,
 }
 
-/// Process-wide registry of loaded tokenizers. Lazy-loaded per model;
-/// the load itself is synchronous (Hub fetch can block briefly).
-pub struct LocalTokenizerRegistry {
+/// In-process tokenization, falling back to `/render` on any local failure.
+/// Owns the loaded tokenizers, lazily loaded per model (the load itself is
+/// synchronous; a Hub fetch can block briefly), and their warm-up.
+pub struct LocalTokenizer {
     loaded: DashMap<String, Arc<LoadedTokenizer>>,
     config: LocalTokenizeConfig,
-    client: reqwest::Client,
+    hub: reqwest::Client,
     /// Log-once latch per model for "mount miss, falling back to Hub".
     /// Concurrent first-loads of a model aren't deduplicated (only one
     /// result is kept), so without this each would log.
     hub_fallback_logged: DashMap<String, ()>,
+    /// Warn-once latch per model, since some models fail locally on every
+    /// request.
+    warn_latch: DashMap<String, ()>,
+    http: Arc<HttpRender>,
+    prom: Arc<RouterMetrics>,
 }
 
-impl LocalTokenizerRegistry {
-    /// Build an empty registry. Models are loaded on first use.
-    pub fn new(config: LocalTokenizeConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
+impl LocalTokenizer {
+    /// Build an empty backend. Models are loaded on first use.
+    pub fn new(
+        config: LocalTokenizeConfig,
+        http: Arc<HttpRender>,
+        prom: Arc<RouterMetrics>,
+    ) -> Result<Self> {
+        let hub = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .context("building reqwest client for local-tokenize Hub fetch")?;
         Ok(Self {
             loaded: DashMap::new(),
             config,
-            client,
+            hub,
             hub_fallback_logged: DashMap::new(),
+            warn_latch: DashMap::new(),
+            http,
+            prom,
         })
+    }
+
+    /// Load a tokenizer for each new model claim whose pool uses the local
+    /// tokenizer, until `cancel`. Each load runs in its own task, so a slow
+    /// Hub fetch does not hold up the stream.
+    pub fn spawn_warmup(
+        self: Arc<Self>,
+        pools: Arc<PoolRegistry>,
+        mut claims: broadcast::Receiver<ModelClaim>,
+        cancel: CancellationToken,
+    ) {
+        tokio::spawn(async move {
+            loop {
+                let claim = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    next = claims.recv() => match next {
+                        Ok(claim) => claim,
+                        Err(RecvError::Lagged(missed)) => {
+                            tracing::warn!(
+                                missed,
+                                "tokenizer warmup fell behind; skipped models load on first request"
+                            );
+                            continue;
+                        }
+                        Err(RecvError::Closed) => return,
+                    },
+                };
+                if !should_warm(pools.snapshot().get(claim.pool)) {
+                    continue;
+                }
+                let this = self.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = this.warmup(&claim.model).await {
+                        tracing::warn!(
+                            model = %claim.model,
+                            error = %err,
+                            "tokenizer warmup failed; first request will pay the load cost or fall \
+                             back to HTTP /render"
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    /// `encode`, else `/render`. Any local failure (unknown model, missing
+    /// chat template, render or encode error) falls back.
+    pub(crate) async fn encode_or_render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
+        let &TokenizeRequest {
+            model,
+            ref input,
+            req_id,
+            ..
+        } = req;
+        let started = std::time::Instant::now();
+        let result = self.encode(model, input).await;
+        let render_ms = started.elapsed().as_secs_f64() * 1000.0;
+        match result {
+            Ok(tokens) => {
+                self.prom.record_tokenize_path("local");
+                tracing::debug!(
+                    req = %req_id.unwrap_or("-"),
+                    mode = "local",
+                    model = %model,
+                    render_ms = format_args!("{render_ms:.1}"),
+                    token_count = tokens.len(),
+                    "render ok"
+                );
+                TokenizeOutcome::Ok(tokens)
+            }
+            Err(e) => {
+                if self.warn_latch.insert(model.to_string(), ()).is_none() {
+                    tracing::warn!(
+                        model,
+                        error = %e,
+                        "local tokenize failed; falling back to HTTP /render"
+                    );
+                }
+                let outcome = self.http.render(req).await;
+                // A double failure is counted by the dispatcher.
+                if matches!(outcome, TokenizeOutcome::Ok(_)) {
+                    self.prom.record_tokenize_path("http_fallback");
+                }
+                outcome
+            }
+        }
     }
 
     /// Load `model_name`'s tokenizer into the cache, so requests find it
@@ -197,17 +257,12 @@ impl LocalTokenizerRegistry {
         entry.tokenizer.decode(tokens, false).ok()
     }
 
-    /// Tokenize `input` against `model_name`'s tokenizer.
+    /// Tokenize `input` against `model_name`'s tokenizer, in process only.
     ///
     /// Errors when the tokenizer can't be loaded, chat input is given for a
     /// model with no `chat_template`, the template fails to render, or
     /// `encode` rejects the input.
-    pub async fn tokenize(
-        &self,
-        model_name: &str,
-        input: &TokenizeInput,
-        chat_kwargs: &HashMap<String, String>,
-    ) -> Result<Vec<u32>> {
+    pub async fn encode(&self, model_name: &str, input: &TokenizeInput) -> Result<Vec<u32>> {
         let loaded = self.get_or_load(model_name).await?;
         match input {
             TokenizeInput::Raw(prompt) => {
@@ -219,10 +274,10 @@ impl LocalTokenizerRegistry {
             }
             TokenizeInput::Chat {
                 messages,
+                kwargs,
                 tools,
                 tool_choice,
                 add_generation_prompt,
-                ..
             } => {
                 let template = loaded.chat_template.as_deref().ok_or_else(|| {
                     anyhow!(
@@ -233,7 +288,7 @@ impl LocalTokenizerRegistry {
                 let rendered = render_chat_template(
                     template,
                     messages,
-                    chat_kwargs,
+                    kwargs,
                     tools,
                     tool_choice.as_ref(),
                     *add_generation_prompt,
@@ -320,28 +375,32 @@ impl LocalTokenizerRegistry {
         .await
         .context("spawn_blocking join")??;
 
-        let meta = fetch_chat_template_from_hub(
-            &self.client,
-            self.config.hub_token.as_deref(),
-            model_name,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::debug!(
-                model = model_name,
-                error = %e,
-                "local_tokenize: no chat_template available via Hub"
-            );
-            TokenizerConfigMeta {
-                chat_template: None,
-                special_tokens: HashMap::new(),
-            }
-        });
+        let meta =
+            fetch_chat_template_from_hub(&self.hub, self.config.hub_token.as_deref(), model_name)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::debug!(
+                        model = model_name,
+                        error = %e,
+                        "local_tokenize: no chat_template available via Hub"
+                    );
+                    TokenizerConfigMeta {
+                        chat_template: None,
+                        special_tokens: HashMap::new(),
+                    }
+                });
         Ok(Arc::new(LoadedTokenizer {
             tokenizer,
             chat_template: meta.chat_template,
             special_tokens: meta.special_tokens,
         }))
+    }
+}
+
+// The HuggingFace type takes the short name here.
+impl super::Tokenizer for LocalTokenizer {
+    fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome> {
+        Box::pin(async move { self.encode_or_render(&req).await })
     }
 }
 
@@ -352,7 +411,7 @@ impl LocalTokenizerRegistry {
 ///
 /// Values in `chat_kwargs` are JSON-parsed (`"false"` becomes `false`),
 /// falling back to literal strings, as the HTTP body builder in
-/// `src/router/tokenize.rs` does, so both render the same prompt.
+/// `src/router/tokenizer/http.rs` does, so both render the same prompt.
 fn render_chat_template(
     template: &str,
     messages: &[serde_json::Value],

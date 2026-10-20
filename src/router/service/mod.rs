@@ -4,7 +4,7 @@
 //! This module owns the service struct, `score_workers` (tokenize, query the
 //! indexer, assemble `WorkerScore` rows), and the value types passed through
 //! it. The pick lifecycle is in `lifecycle`; tokenize/render HTTP plumbing is
-//! in [`crate::router::tokenize_client`].
+//! in [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use crate::router::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
-use crate::router::tokenize::TokenizeInput;
+use crate::router::tokenizer::TokenizeInput;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
@@ -321,17 +321,8 @@ pub struct KinferenceService {
     /// may serve one model; `pick_and_record` ranks across them.
     pub(crate) models: Arc<ModelIndex>,
     pub(crate) metrics: Arc<MetricsRegistry>,
-    /// Shared HTTP client for tokenization calls, with a per-request timeout.
-    /// The tokenization mode and render URL are per pool.
-    pub(crate) tokenize_client: Arc<reqwest::Client>,
-    /// In-process tokenizer registry, keyed by model and shared across pools.
-    /// `None` when it couldn't be built at startup; `local`/`compare` pools
-    /// then fall back to `/render`.
-    pub(crate) local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
-    /// Warn-once latch for local tokenization falling back to `/render`, per
-    /// `(model_name, error_shape)`, since some models fail locally on every
-    /// request.
-    pub(crate) local_tokenize_warn_latch: dashmap::DashMap<String, ()>,
+    /// The tokenizer. The mode and render URL are per pool, on the request.
+    pub(crate) tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
     /// Per-pick observation stash. Inserted by `pick_and_record`, consumed by
     /// `finalize_observation` (CSV row) or `abort_observation`, and TTL-swept.
     pub(crate) pending_observations: Arc<PendingObservations>,
@@ -366,8 +357,7 @@ impl KinferenceService {
         pools: Arc<kinference_fleet::pool::PoolRegistry>,
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
-        tokenize_client: Arc<reqwest::Client>,
-        local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
+        tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::router::body_store::BodyStore>,
@@ -381,9 +371,7 @@ impl KinferenceService {
             pools,
             models,
             metrics,
-            tokenize_client,
-            local_tokenizer,
-            local_tokenize_warn_latch: dashmap::DashMap::new(),
+            tokenizer,
             pending_observations,
             request_labels,
             body_store,
@@ -672,7 +660,7 @@ fn best_group(
 
 /// OpenAI ChatCompletionRequest fields beyond `messages` that local
 /// chat-template rendering needs to match the engine's tokens. Ends up in
-/// [`crate::router::tokenize::TokenizeInput::Chat`].
+/// [`crate::router::tokenizer::TokenizeInput::Chat`].
 ///
 /// The default has no tools and `add_generation_prompt = true`, the OpenAI
 /// default.
@@ -694,7 +682,7 @@ impl Default for ChatExtras {
 }
 
 /// Resolved input: pre-supplied tokens, or input for
-/// `tokenize_with_fallback`.
+/// the tokenizer.
 pub(crate) enum TokenSource {
     Direct(Vec<u32>),
     NeedsTokenize(TokenizeInput),

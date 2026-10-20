@@ -96,9 +96,9 @@ minijinja = { version = "2.20", features = ["loop_controls", "json"] }
 # equivalents — Gemma 3/4 chat templates call
 # `message.get('reasoning')` and friends, so without this the template
 # fails at render with "map has no method named get". The env in
-# `local_tokenize::render_chat_template` wires the callback per env.
+# `tokenizer::local::render_chat_template` wires the callback per env.
 minijinja-contrib = { version = "2.20", features = ["pycompat"] }
-# Used by `local_tokenize::render_chat_template` to register the
+# Used by `tokenizer::local::render_chat_template` to register the
 # `strftime_now` Jinja global (Llama 3.1+ chat templates call it for
 # the system message's date line). Already transitively pulled in by
 # `k8s-openapi` so this adds nothing to compile time. Default features
