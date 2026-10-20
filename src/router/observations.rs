@@ -726,6 +726,65 @@ impl Observations {
         self.note_provider_failure(&labels.provider, kind, detail);
     }
 
+    /// Consume the labels for a terminal report and record the per-(model,
+    /// qos, tenant) usage, duration and ITL families.
+    ///
+    /// Returns whether `response_id` was known. When it was not (swept or
+    /// never picked), the families are still recorded, under the report's
+    /// own model and `Qos::Unknown`, and the orphan is counted.
+    pub(crate) fn record_final_token(&self, response_id: u64, report: &FinalTokenReport) -> bool {
+        let meta = self.labels.take(response_id);
+        // An unknown or expired `response_id` leaves nothing to attribute this
+        // to. The empty tenant maps to the default bucket.
+        let (model, qos, tenant) = match &meta {
+            Some(m) => (m.model.clone(), m.qos, m.tenant.clone()),
+            // `Unknown`, rather than a guess.
+            None => (report.model.clone(), Qos::Unknown, String::new()),
+        };
+        if meta.is_none() {
+            self.prom.record_orphaned_report();
+        }
+        let qos_label = qos.as_label();
+        tracing::debug!(
+            response_id,
+            model = %model,
+            qos = qos_label,
+            prompt_tokens = report.prompt_tokens,
+            completion_tokens = report.completion_tokens,
+            itl_layout = report.itl_bucket_layout,
+            itl_buckets = report.itl_bucket_counts.len(),
+            known = meta.is_some(),
+            "report_final_token"
+        );
+        // End-to-end duration, when we know when the pick happened.
+        if let Some(m) = &meta {
+            self.prom.record_request_duration(
+                &model,
+                qos_label,
+                &tenant,
+                m.picked_at.elapsed().as_millis() as u64,
+            );
+        }
+        self.prom.record_usage(
+            &model,
+            qos_label,
+            &tenant,
+            report.prompt_tokens,
+            report.completion_tokens,
+        );
+        // Engine-measured prefix-cache hit; `None` is counted as unknown.
+        self.prom
+            .record_cached_prompt_tokens(&model, qos_label, &tenant, report.cached_tokens);
+        self.prom.record_itl(
+            &model,
+            qos_label,
+            &tenant,
+            report.itl_bucket_layout,
+            &report.itl_bucket_counts,
+        );
+        meta.is_some()
+    }
+
     /// Record a failure and log the moment a provider stops being dispatched to.
     ///
     /// Logged on the transition only.
@@ -843,6 +902,19 @@ impl Observations {
         self.labels.take_expired();
         evicted.len()
     }
+}
+
+/// What `ReportFinalToken` carries: the served model, the token counts and
+/// the inter-token-latency buckets, free of the proto.
+pub(crate) struct FinalTokenReport {
+    pub model: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// Engine-measured prefix-cache hit; `None` when the engine did not
+    /// report it.
+    pub cached_tokens: Option<u32>,
+    pub itl_bucket_layout: u32,
+    pub itl_bucket_counts: Vec<u32>,
 }
 
 /// Release the inflight counter and inflight-prefix entry a pick reserved

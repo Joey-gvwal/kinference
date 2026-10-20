@@ -19,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::router::metrics::PickOutcome;
-use crate::router::observations::Qos;
+use crate::router::observations::{FinalTokenReport, Qos};
 use crate::router::service::{KinferenceService, PickAndRecordOutcome};
 
 use crate::router::proto;
@@ -335,58 +335,18 @@ impl Picker for KinferenceService {
         request: Request<ReportFinalTokenRequest>,
     ) -> Result<Response<ReportFinalTokenResponse>, Status> {
         let req = request.into_inner();
-        let meta = self.observations.labels.take(req.response_id);
-        // An unknown or expired `response_id` leaves nothing to attribute this
-        // to. The empty tenant maps to the default bucket.
-        let (model, qos, tenant) = match &meta {
-            Some(m) => (m.model.clone(), m.qos, m.tenant.clone()),
-            // `Unknown`, rather than a guess.
-            None => (req.model.clone(), Qos::Unknown, String::new()),
+        let report = FinalTokenReport {
+            model: req.model,
+            prompt_tokens: req.prompt_tokens,
+            completion_tokens: req.completion_tokens,
+            cached_tokens: req.cached_tokens,
+            itl_bucket_layout: req.itl_bucket_layout,
+            itl_bucket_counts: req.itl_bucket_counts,
         };
-        if meta.is_none() {
-            self.prom.record_orphaned_report();
-        }
-        let qos_label = qos.as_label();
-        tracing::debug!(
-            response_id = req.response_id,
-            model = %model,
-            qos = qos_label,
-            prompt_tokens = req.prompt_tokens,
-            completion_tokens = req.completion_tokens,
-            itl_layout = req.itl_bucket_layout,
-            itl_buckets = req.itl_bucket_counts.len(),
-            known = meta.is_some(),
-            "report_final_token"
-        );
-        // End-to-end duration, when we know when the pick happened.
-        if let Some(m) = &meta {
-            self.prom.record_request_duration(
-                &model,
-                qos_label,
-                &tenant,
-                m.picked_at.elapsed().as_millis() as u64,
-            );
-        }
-        self.prom.record_usage(
-            &model,
-            qos_label,
-            &tenant,
-            req.prompt_tokens,
-            req.completion_tokens,
-        );
-        // Engine-measured prefix-cache hit; `None` is counted as unknown.
-        self.prom
-            .record_cached_prompt_tokens(&model, qos_label, &tenant, req.cached_tokens);
-        self.prom.record_itl(
-            &model,
-            qos_label,
-            &tenant,
-            req.itl_bucket_layout,
-            &req.itl_bucket_counts,
-        );
-        Ok(Response::new(ReportFinalTokenResponse {
-            acknowledged: meta.is_some(),
-        }))
+        let acknowledged = self
+            .observations
+            .record_final_token(req.response_id, &report);
+        Ok(Response::new(ReportFinalTokenResponse { acknowledged }))
     }
 
     /// Release state for a request that will never complete.
