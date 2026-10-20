@@ -19,7 +19,7 @@ use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
-use crate::router::tokenizer::local;
+use crate::router::tokenizer::{http, local};
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
@@ -153,24 +153,10 @@ pub async fn run() -> Result<()> {
         "Body buffer configured"
     );
 
-    // Shared HTTP client for tokenization, so connections pool.
-    //
-    // Settings mirror the Gateway API Inference Extension EPP's. vLLM speaks
-    // HTTP/1.1 only, so force it; without multiplexing that means several
-    // connections per host (`tokenize.pool_max_idle_per_host`, default 16;
-    // raise to peak concurrency with a single `render_url`).
-    // `pool_idle_timeout = 90s` matches the EPP and AWS NLB idle tolerance;
-    // `tcp_keepalive` detects half-closed connections.
+    // One `/render` client for every pool, so connections pool.
     let pool_max_idle_per_host = cfg.tokenize.pool_max_idle_per_host.unwrap_or(16);
-    let tokenize_client = Arc::new(
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .pool_max_idle_per_host(pool_max_idle_per_host)
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-            .tcp_nodelay(true)
-            .http1_only()
-            .build()
+    let http = Arc::new(
+        http::HttpRender::new(pool_max_idle_per_host, metrics.clone())
             .map_err(|e| anyhow::anyhow!("failed to build tokenize HTTP client: {e}"))?,
     );
     tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
@@ -465,7 +451,7 @@ pub async fn run() -> Result<()> {
         pool_registry.clone(),
         models.clone(),
         metrics.clone(),
-        tokenize_client.clone(),
+        http.clone(),
         local_tokenizer,
         pending_observations.clone(),
         request_labels.clone(),

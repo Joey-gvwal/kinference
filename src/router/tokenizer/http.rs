@@ -1,53 +1,185 @@
-//! HTTP helpers that POST to vLLM's `/render` endpoints.
+//! The `/render` backend: vLLM's `/v1/chat/completions/render` runs the same
+//! preprocessing as `/v1/chat/completions` (tools, multimodal placeholders,
+//! system-prompt defaulting, reasoning prefixes, `add_generation_prompt`)
+//! and stops before inference, so the token ids match what the engine
+//! hashes into its `BlockStored` events.
 //!
-//! `/v1/chat/completions/render` runs the same preprocessing as
-//! `/v1/chat/completions` (tools, multimodal placeholders, system-prompt
-//! defaulting, reasoning prefixes, `add_generation_prompt`) and stops before
-//! inference, so the token ids match what the engine hashes into its
-//! `BlockStored` events.
-//!
-//! - [`render_via_vllm_raw`] forwards the caller's OpenAI request body
-//!   verbatim, so fields kinference doesn't know about still reach vLLM.
-//! - [`render_via_vllm_structured`] builds a body from a [`TokenizeInput`],
-//!   for callers without a raw body.
-//!
-//! Both parse the response with [`parse_render_response`].
+//! A raw request body is forwarded verbatim, so fields kinference doesn't
+//! know about still reach vLLM; without one, a body is built from the
+//! [`TokenizeInput`].
 
-use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-/// Map of `chat_template_kwargs` forwarded into the engine's
-/// `/render` body. Values are JSON-encoded: `"false"` becomes a bool,
-/// `"1024"` an int, and a non-JSON value like `en` stays a string.
-pub type ChatTemplateKwargs = HashMap<String, String>;
+use super::{ChatTemplateKwargs, TokenizeInput, TokenizeOutcome, TokenizeRequest};
+use kinference_fleet::scrape::MetricsRegistry;
 
-/// Structured input to the HTTP `/render` leg. Carries everything
-/// vLLM's `_preprocess_chat` needs to produce the same token
-/// sequence the engine would.
-///
-/// `Clone` because compare mode re-tokenizes it in a background task.
-#[derive(Clone)]
-pub enum TokenizeInput {
-    /// Raw completion-style prompt → `/v1/completions/render` with
-    /// `{ model, prompt }`, with vLLM's default `add_special_tokens=true`.
-    Raw(String),
-    /// Chat-style messages (full OpenAI array) →
-    /// `/v1/chat/completions/render` with `{ model, messages, tools,
-    /// tool_choice, add_generation_prompt, chat_template_kwargs }`.
-    Chat {
-        messages: Vec<serde_json::Value>,
-        kwargs: ChatTemplateKwargs,
-        /// OpenAI `tools` array (JSON-schema dicts). Empty when absent.
-        tools: Vec<serde_json::Value>,
-        /// OpenAI `tool_choice` ("auto" | "none" | "required" | {...}).
-        /// `None` when unset.
-        tool_choice: Option<serde_json::Value>,
-        /// OpenAI `add_generation_prompt` (default `true`); `false` for
-        /// assistant-prefill continuations.
-        add_generation_prompt: bool,
-    },
+/// Maximum number of workers tried in sequence, freshest metrics first, so
+/// an outage doesn't try every worker on every request.
+const FALLBACK_MAX_ATTEMPTS: usize = 3;
+
+/// Wall-clock cap on the whole attempt loop. The client timeout bounds each
+/// attempt. When it elapses, scoring degrades.
+const TOTAL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Tokenization over `/render`: a dedicated URL tried once, else the pool's
+/// workers in turn, freshest scrape first, at most three, within one
+/// deadline.
+pub(crate) struct HttpRender {
+    client: reqwest::Client,
+    /// Scrape ages order the workers: a fresh scrape is a free liveness
+    /// proxy.
+    scrape: Arc<MetricsRegistry>,
+}
+
+impl HttpRender {
+    /// One client for every pool, so connections pool.
+    ///
+    /// Settings mirror the Gateway API Inference Extension EPP's. vLLM speaks
+    /// HTTP/1.1 only, so force it; without multiplexing that means several
+    /// connections per host (`pool_max_idle_per_host`; raise to peak
+    /// concurrency with a single `render_url`). `pool_idle_timeout = 90s`
+    /// matches the EPP and AWS NLB idle tolerance; `tcp_keepalive` detects
+    /// half-closed connections.
+    pub(crate) fn new(pool_max_idle_per_host: usize, scrape: Arc<MetricsRegistry>) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(pool_max_idle_per_host)
+            .tcp_keepalive(Duration::from_secs(30))
+            .tcp_nodelay(true)
+            .http1_only()
+            .build()
+            .context("building the tokenize HTTP client")?;
+        Ok(Self { client, scrape })
+    }
+
+    /// `/render` with retries across workers. Forwards `raw_body` verbatim
+    /// when present, otherwise a body built from `input`. Workers serving one
+    /// model share its tokenizer, so any of them returns the same tokens.
+    pub(crate) async fn render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
+        let &TokenizeRequest {
+            render_url,
+            workers,
+            model,
+            ref input,
+            raw_body,
+            req_id,
+        } = req;
+        // A configured `render_url` (typically a Service) replaces the
+        // per-worker rotation, keeping warm connections to one host. It fails
+        // fast rather than falling back to individual workers.
+        if let Some(url) = render_url {
+            let started = std::time::Instant::now();
+            let result = match raw_body {
+                Some(body) => render_post_raw_at_url(&self.client, url, body).await,
+                None => render_structured_at_url(&self.client, url, model, input).await,
+            };
+            let render_ms = started.elapsed().as_secs_f64() * 1000.0;
+            match result {
+                Ok(tokens) => {
+                    tracing::debug!(
+                        req = %req_id.unwrap_or("-"),
+                        mode = "render",
+                        tokenize_url = %url,
+                        attempt = 1,
+                        render_ms = format_args!("{render_ms:.1}"),
+                        token_count = tokens.len(),
+                        "render ok"
+                    );
+                    return TokenizeOutcome::Ok(tokens);
+                }
+                Err(e) => {
+                    let err = format!("{e:#}");
+                    tracing::warn!(
+                        tokenize_url = url,
+                        render_ms = format_args!("{render_ms:.1}"),
+                        error = %err,
+                        "render via the worker set's render_url failed; failing fast (no per-worker fallback)"
+                    );
+                    return TokenizeOutcome::Unavailable {
+                        reason: format!("render_url={url} failed: {err}"),
+                        attempts: 1,
+                    };
+                }
+            }
+        }
+
+        // Filter to workers with an http_url; carry worker_id_str + url
+        // for log context.
+        let mut candidates: Vec<(u64, String, String)> = workers
+            .iter()
+            .filter_map(|(num, w)| {
+                w.http_url
+                    .as_deref()
+                    .map(|u| (*num, w.worker_id_str.clone(), u.to_string()))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return TokenizeOutcome::Unavailable {
+                reason: "no worker has http_url configured".to_string(),
+                attempts: 0,
+            };
+        }
+        // Freshest metrics scrape first.
+        candidates.sort_by_key(|(num, _, _)| self.scrape.age_ms_for(*num));
+        candidates.truncate(FALLBACK_MAX_ATTEMPTS);
+        let attempts = candidates.len();
+
+        // The client timeout caps each attempt; the deadline caps the loop.
+        let do_attempts = async {
+            let mut last_err: Option<String> = None;
+            for (i, (_num, worker_id_str, url)) in candidates.iter().enumerate() {
+                // Timed per call, logged at DEBUG.
+                let render_start = std::time::Instant::now();
+                let result = match raw_body {
+                    Some(body) => render_via_vllm_raw(&self.client, url, body).await,
+                    None => render_via_vllm_structured(&self.client, url, model, input).await,
+                };
+                let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
+                match result {
+                    Ok(tokens) => {
+                        tracing::debug!(
+                            req = %req_id.unwrap_or("-"),
+                            mode = "render",
+                            http_url = %url,
+                            attempt = i + 1,
+                            render_ms = format_args!("{render_ms:.1}"),
+                            token_count = tokens.len(),
+                            "render ok"
+                        );
+                        return Ok(tokens);
+                    }
+                    Err(e) => {
+                        let err_string = format!("{e:#}");
+                        tracing::warn!(
+                            worker_id = %worker_id_str,
+                            http_url = %url,
+                            attempt = i + 1,
+                            of_attempts = attempts,
+                            render_ms = format_args!("{render_ms:.1}"),
+                            error = %err_string,
+                            "render failed; falling back to next worker"
+                        );
+                        last_err = Some(err_string);
+                    }
+                }
+            }
+            Err(last_err.unwrap_or_else(|| "no attempts ran".to_string()))
+        };
+
+        match tokio::time::timeout(TOTAL_DEADLINE, do_attempts).await {
+            Ok(Ok(tokens)) => TokenizeOutcome::Ok(tokens),
+            Ok(Err(reason)) => TokenizeOutcome::Unavailable { reason, attempts },
+            Err(_) => TokenizeOutcome::Unavailable {
+                reason: format!("total deadline of {}s elapsed", TOTAL_DEADLINE.as_secs()),
+                attempts,
+            },
+        }
+    }
 }
 
 /// vLLM `/render` returns a `GenerateRequest` object (chat) or an
@@ -120,7 +252,7 @@ fn parse_render_response(json: &[u8]) -> Result<Vec<u32>> {
 }
 
 /// POST `raw_body` verbatim to `{base}/v1/chat/completions/render`.
-pub async fn render_via_vllm_raw(
+async fn render_via_vllm_raw(
     client: &reqwest::Client,
     base: &str,
     raw_body: &[u8],
@@ -131,7 +263,7 @@ pub async fn render_via_vllm_raw(
 
 /// POST `raw_body` verbatim to a fully-qualified `/render` URL (a worker
 /// set's `render_url`), without appending a path.
-pub async fn render_post_raw_at_url(
+async fn render_post_raw_at_url(
     client: &reqwest::Client,
     url: &str,
     raw_body: &[u8],
@@ -157,7 +289,7 @@ pub async fn render_post_raw_at_url(
 
 /// [`render_via_vllm_structured`] for a fully-qualified `url`, which must be
 /// the right endpoint for the input's chat or completion variant.
-pub async fn render_structured_at_url(
+async fn render_structured_at_url(
     client: &reqwest::Client,
     url: &str,
     model: &str,
@@ -205,7 +337,7 @@ pub async fn render_structured_at_url(
 /// `/render` endpoint that matches the variant
 /// (`/v1/chat/completions/render` for `Chat`, `/v1/completions/render`
 /// for `Raw`). For callers without a raw request body.
-pub async fn render_via_vllm_structured(
+async fn render_via_vllm_structured(
     client: &reqwest::Client,
     base: &str,
     model: &str,

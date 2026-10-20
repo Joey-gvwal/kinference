@@ -5,31 +5,21 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::controller::policy::store::PolicyStore;
+use crate::router::tokenizer::http::HttpRender;
+pub(crate) use crate::router::tokenizer::test_support::Render;
+use crate::router::tokenizer::test_support::{FakeRender, worker};
 use kinference_fleet::pool::{PoolMap, PoolRegistry, test_spec};
-use kinference_fleet::workers::WorkerEntry;
 use kinference_policy::crd::{
     InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet,
 };
 use kinference_policy::resolve::PolicyIndex;
 use kinference_policy::{PoolId, PoolKey, PoolRef, RequestIdentity};
-
-/// What the fake `/render` answers.
-#[derive(Clone)]
-pub(crate) enum Render {
-    /// Every request tokenizes to these ids.
-    Tokens(Vec<u32>),
-    /// Every request gets a 500.
-    Failing,
-    /// No worker has an `http_url`, so nothing is tried.
-    Absent,
-}
 
 /// One worker set: a live pool with one worker per address.
 struct PoolFixture {
@@ -130,7 +120,8 @@ impl ServiceBuilder {
             Render::Absent => None,
             answer => Some(FakeRender::start(answer).await),
         };
-        let http_url = render.as_ref().map(|r| r.base.clone());
+        let http_url = render.as_ref().map(|r| r.base().to_string());
+        let scrape = Arc::new(MetricsRegistry::new());
         let registry = prometheus::Registry::new();
         let pool_registry = PoolRegistry::new();
         let models = Arc::new(ModelIndex::new());
@@ -218,13 +209,8 @@ impl ServiceBuilder {
         let svc = KinferenceService::new(
             pool_registry,
             models,
-            Arc::new(MetricsRegistry::new()),
-            Arc::new(
-                reqwest::Client::builder()
-                    .timeout(Duration::from_secs(2))
-                    .build()
-                    .expect("a reqwest client"),
-            ),
+            scrape.clone(),
+            Arc::new(HttpRender::new(16, scrape).expect("an HTTP backend")),
             Arc::new(
                 crate::router::tokenizer::local::LocalTokenizerRegistry::new(Default::default())
                     .expect("a local tokenizer registry"),
@@ -310,83 +296,10 @@ impl TestService {
 
     /// How many requests the fake `/render` has answered.
     pub(crate) fn render_calls(&self) -> usize {
-        self.render
-            .as_ref()
-            .map_or(0, |r| r.calls.load(Ordering::SeqCst))
-    }
-}
-
-/// A worker serving `model` at `addr`, tokenizing at `http_url`.
-fn worker(model: &str, addr: &str, ready: bool, http_url: Option<String>) -> WorkerEntry {
-    WorkerEntry {
-        worker_id_str: addr.into(),
-        model_name_hint: Some(model.into()),
-        current_models: vec![model.into()],
-        http_url,
-        block_size: 16,
-        initial_sync_complete: ready,
-        kv_events_observed: true,
-        score_addr: addr.into(),
-        engine: None,
-        pod_name: None,
-        namespace: None,
-        node_name: None,
-        node_ip: None,
-        pod_ip: None,
-        availability_zone: None,
-        instance_type: None,
+        self.render.as_ref().map_or(0, FakeRender::calls)
     }
 }
 
 fn cr<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Arc<T> {
     Arc::new(serde_json::from_value(v).expect("valid fixture"))
-}
-
-/// A `/render` on a loopback port that gives every request the same answer.
-/// Stops when dropped.
-struct FakeRender {
-    base: String,
-    calls: Arc<AtomicUsize>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl FakeRender {
-    async fn start(answer: Render) -> Self {
-        use axum::response::IntoResponse as _;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a loopback port");
-        let base = format!("http://{}", listener.local_addr().expect("local addr"));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let hits = calls.clone();
-        // Any path: a worker is POSTed `{http_url}/v1/chat/completions/render`.
-        let app = axum::Router::new().fallback(move || {
-            hits.fetch_add(1, Ordering::SeqCst);
-            let answer = answer.clone();
-            async move {
-                match answer {
-                    Render::Tokens(ids) => {
-                        axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
-                    }
-                    Render::Failing => {
-                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
-                            .into_response()
-                    }
-                    Render::Absent => unreachable!("no server is started for Absent"),
-                }
-            }
-        });
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve the fake /render");
-        });
-        Self { base, calls, task }
-    }
-}
-
-impl Drop for FakeRender {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }

@@ -8,7 +8,8 @@
 //! `render_with_fallback` dispatches and records latency and failures once
 //! for every path.
 
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::time::Instant;
 
 use serde::Deserialize;
 
@@ -18,16 +19,13 @@ use kinference_fleet::workers::WorkerEntry;
 
 pub mod http;
 pub mod local;
+#[cfg(test)]
+pub(crate) mod test_support;
 
-use self::http::{
-    TokenizeInput, render_post_raw_at_url, render_structured_at_url, render_via_vllm_raw,
-    render_via_vllm_structured,
-};
 use self::local::LocalTokenizeConfig;
 
 /// `tokenize`: tokenization settings shared by all pools. The mode is set
 /// per profile.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TokenizeConfig {
     /// Idle keep-alive connections kept per host. Set it at or above peak
@@ -39,17 +37,40 @@ pub struct TokenizeConfig {
     pub local: LocalTokenizeConfig,
 }
 
-/// Maximum number of workers tried in sequence, freshest metrics first, so
-/// an outage doesn't try every worker on every request.
-const TOKENIZE_FALLBACK_MAX_ATTEMPTS: usize = 3;
+/// Map of `chat_template_kwargs` forwarded into the engine's
+/// `/render` body. Values are JSON-encoded: `"false"` becomes a bool,
+/// `"1024"` an int, and a non-JSON value like `en` stays a string.
+pub type ChatTemplateKwargs = HashMap<String, String>;
 
-/// Wall-clock cap on the whole attempt loop. The shared `reqwest::Client`
-/// timeout bounds each attempt. When it elapses, scoring degrades (see
-/// `degraded_response`).
-const TOKENIZE_TOTAL_DEADLINE: Duration = Duration::from_secs(5);
+/// What to tokenize. Carries everything vLLM's `_preprocess_chat` needs to
+/// produce the same token sequence the engine would.
+///
+/// `Clone` because compare mode re-tokenizes it in a background task.
+#[derive(Clone)]
+pub enum TokenizeInput {
+    /// Raw completion-style prompt → `/v1/completions/render` with
+    /// `{ model, prompt }`, with vLLM's default `add_special_tokens=true`.
+    Raw(String),
+    /// Chat-style messages (full OpenAI array) →
+    /// `/v1/chat/completions/render` with `{ model, messages, tools,
+    /// tool_choice, add_generation_prompt, chat_template_kwargs }`.
+    Chat {
+        messages: Vec<serde_json::Value>,
+        kwargs: ChatTemplateKwargs,
+        /// OpenAI `tools` array (JSON-schema dicts). Empty when absent.
+        tools: Vec<serde_json::Value>,
+        /// OpenAI `tool_choice` ("auto" | "none" | "required" | {...}).
+        /// `None` when unset.
+        tool_choice: Option<serde_json::Value>,
+        /// OpenAI `add_generation_prompt` (default `true`); `false` for
+        /// assistant-prefill continuations.
+        add_generation_prompt: bool,
+    },
+}
 
 /// Result of tokenizing one request. `Unavailable` is not an error: scoring
 /// degrades to load-only.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TokenizeOutcome {
     Ok(Vec<u32>),
     Unavailable { reason: String, attempts: usize },
@@ -70,12 +91,7 @@ pub(crate) struct TokenizeRequest<'a> {
 }
 
 impl KinferenceService {
-    /// Try to tokenize against the model's worker pool.
-    ///
-    /// Workers are tried freshest-scrape first (a free liveness proxy), up to
-    /// [`TOKENIZE_FALLBACK_MAX_ATTEMPTS`], within [`TOKENIZE_TOTAL_DEADLINE`].
-    /// Workers serving one model share its tokenizer, so any of them
-    /// returns the same tokens.
+    /// Tokenize against the model's worker pool, in the pool's mode.
     pub(crate) async fn render_with_fallback(
         &self,
         mode: TokenizeMode,
@@ -86,7 +102,7 @@ impl KinferenceService {
         // Latency and unavailability are recorded here, once, for every
         // mode. Without a raw body, `/render` gets a synthesized one.
         let outcome = match mode {
-            TokenizeMode::Render => self.render_via_http(&req).await,
+            TokenizeMode::Render => self.http.render(&req).await,
             TokenizeMode::Local => self.tokenize_local_then_http(&req).await,
             TokenizeMode::Compare => self.tokenize_via_http_with_compare(&req).await,
         };
@@ -100,134 +116,6 @@ impl KinferenceService {
         }
 
         outcome
-    }
-
-    /// `/render` with retries across workers. Forwards `raw_body` verbatim
-    /// when present, otherwise a body built from `input`.
-    async fn render_via_http(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
-        let &TokenizeRequest {
-            render_url,
-            workers,
-            model,
-            ref input,
-            raw_body,
-            req_id,
-        } = req;
-        // A configured `render_url` (typically a Service) replaces the
-        // per-worker rotation, keeping warm connections to one host. It fails
-        // fast rather than falling back to individual workers.
-        if let Some(url) = render_url {
-            let started = std::time::Instant::now();
-            let result = match raw_body {
-                Some(body) => render_post_raw_at_url(&self.tokenize_client, url, body).await,
-                None => render_structured_at_url(&self.tokenize_client, url, model, input).await,
-            };
-            let render_ms = started.elapsed().as_secs_f64() * 1000.0;
-            match result {
-                Ok(tokens) => {
-                    tracing::debug!(
-                        req = %req_id.unwrap_or("-"),
-                        mode = "render",
-                        tokenize_url = %url,
-                        attempt = 1,
-                        render_ms = format_args!("{render_ms:.1}"),
-                        token_count = tokens.len(),
-                        "render ok"
-                    );
-                    return TokenizeOutcome::Ok(tokens);
-                }
-                Err(e) => {
-                    let err = format!("{e:#}");
-                    tracing::warn!(
-                        tokenize_url = url,
-                        render_ms = format_args!("{render_ms:.1}"),
-                        error = %err,
-                        "render via configured tokenize.url failed; failing fast (no per-worker fallback)"
-                    );
-                    return TokenizeOutcome::Unavailable {
-                        reason: format!("configured tokenize.url={url} failed: {err}"),
-                        attempts: 1,
-                    };
-                }
-            }
-        }
-
-        // Filter to workers with an http_url; carry worker_id_str + url
-        // for log context.
-        let mut candidates: Vec<(u64, String, String)> = workers
-            .iter()
-            .filter_map(|(num, w)| {
-                w.http_url
-                    .as_deref()
-                    .map(|u| (*num, w.worker_id_str.clone(), u.to_string()))
-            })
-            .collect();
-        if candidates.is_empty() {
-            return TokenizeOutcome::Unavailable {
-                reason: "no worker has http_url configured".to_string(),
-                attempts: 0,
-            };
-        }
-        // Freshest metrics scrape first.
-        candidates.sort_by_key(|(num, _, _)| self.metrics.age_ms_for(*num));
-        candidates.truncate(TOKENIZE_FALLBACK_MAX_ATTEMPTS);
-        let attempts = candidates.len();
-
-        // The client timeout caps each attempt; the deadline caps the loop.
-        let do_attempts = async {
-            let mut last_err: Option<String> = None;
-            for (i, (_num, worker_id_str, url)) in candidates.iter().enumerate() {
-                // Timed per call, logged at DEBUG.
-                let render_start = std::time::Instant::now();
-                let result = match raw_body {
-                    Some(body) => render_via_vllm_raw(&self.tokenize_client, url, body).await,
-                    None => {
-                        render_via_vllm_structured(&self.tokenize_client, url, model, input).await
-                    }
-                };
-                let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
-                match result {
-                    Ok(tokens) => {
-                        tracing::debug!(
-                            req = %req_id.unwrap_or("-"),
-                            mode = "render",
-                            http_url = %url,
-                            attempt = i + 1,
-                            render_ms = format_args!("{render_ms:.1}"),
-                            token_count = tokens.len(),
-                            "render ok"
-                        );
-                        return Ok(tokens);
-                    }
-                    Err(e) => {
-                        let err_string = format!("{e:#}");
-                        tracing::warn!(
-                            worker_id = %worker_id_str,
-                            http_url = %url,
-                            attempt = i + 1,
-                            of_attempts = attempts,
-                            render_ms = format_args!("{render_ms:.1}"),
-                            error = %err_string,
-                            "render failed; falling back to next worker"
-                        );
-                        last_err = Some(err_string);
-                    }
-                }
-            }
-            Err(last_err.unwrap_or_else(|| "no attempts ran".to_string()))
-        };
-
-        match tokio::time::timeout(TOKENIZE_TOTAL_DEADLINE, do_attempts).await {
-            Ok(Ok(tokens)) => TokenizeOutcome::Ok(tokens),
-            Ok(Err(reason)) => TokenizeOutcome::Unavailable { reason, attempts },
-            Err(_) => TokenizeOutcome::Unavailable {
-                reason: format!(
-                    "total deadline of {}s elapsed",
-                    TOKENIZE_TOTAL_DEADLINE.as_secs()
-                ),
-                attempts,
-            },
-        }
     }
 
     /// `Local` mode: in-process tokenization, falling back to `/render` on
@@ -275,7 +163,7 @@ impl KinferenceService {
                         "local tokenize failed; falling back to HTTP /render"
                     );
                 }
-                let outcome = self.render_via_http(req).await;
+                let outcome = self.http.render(req).await;
                 // A double failure is counted by `render_with_fallback`.
                 if matches!(outcome, TokenizeOutcome::Ok(_)) {
                     self.prom.record_tokenize_path("http_fallback");
@@ -288,7 +176,7 @@ impl KinferenceService {
     /// `Compare` mode: `/render` is returned; the local result is only
     /// compared against it, for the divergence counters.
     async fn tokenize_via_http_with_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
-        let outcome = self.render_via_http(req).await;
+        let outcome = self.http.render(req).await;
         if let TokenizeOutcome::Ok(http_tokens) = &outcome {
             // In the background, so local template rendering doesn't add to
             // pick latency.

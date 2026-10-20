@@ -18,7 +18,7 @@ use crate::router::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
-use crate::router::tokenizer::http::TokenizeInput;
+use crate::router::tokenizer::TokenizeInput;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
@@ -321,9 +321,9 @@ pub struct KinferenceService {
     /// may serve one model; `pick_and_record` ranks across them.
     pub(crate) models: Arc<ModelIndex>,
     pub(crate) metrics: Arc<MetricsRegistry>,
-    /// Shared HTTP client for tokenization calls, with a per-request timeout.
-    /// The tokenization mode and render URL are per pool.
-    pub(crate) tokenize_client: Arc<reqwest::Client>,
+    /// The `/render` backend. The tokenization mode and render URL are per
+    /// pool.
+    pub(crate) http: Arc<crate::router::tokenizer::http::HttpRender>,
     /// In-process tokenizer registry, keyed by model and shared across pools.
     pub(crate) local_tokenizer: Arc<crate::router::tokenizer::local::LocalTokenizerRegistry>,
     /// Warn-once latch for local tokenization falling back to `/render`, per
@@ -364,7 +364,7 @@ impl KinferenceService {
         pools: Arc<kinference_fleet::pool::PoolRegistry>,
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
-        tokenize_client: Arc<reqwest::Client>,
+        http: Arc<crate::router::tokenizer::http::HttpRender>,
         local_tokenizer: Arc<crate::router::tokenizer::local::LocalTokenizerRegistry>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
@@ -379,7 +379,7 @@ impl KinferenceService {
             pools,
             models,
             metrics,
-            tokenize_client,
+            http,
             local_tokenizer,
             local_tokenize_warn_latch: dashmap::DashMap::new(),
             pending_observations,
@@ -670,7 +670,7 @@ fn best_group(
 
 /// OpenAI ChatCompletionRequest fields beyond `messages` that local
 /// chat-template rendering needs to match the engine's tokens. Ends up in
-/// [`crate::router::tokenizer::http::TokenizeInput::Chat`].
+/// [`crate::router::tokenizer::TokenizeInput::Chat`].
 ///
 /// The default has no tools and `add_generation_prompt = true`, the OpenAI
 /// default.
