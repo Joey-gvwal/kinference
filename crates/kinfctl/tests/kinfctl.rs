@@ -103,7 +103,7 @@ spec:
   - name: simple-goes-to-gemma
     matches:
     - model: qwen-2.5
-      tag: complexity-low
+      qos: [batch]
     route:
       consider:
       - models: {names: [gemma-4]}
@@ -319,7 +319,7 @@ spec:
   - name: simple-can-go-to-gemma-if-faster
     matches:
     - model: qwen-2.5
-      tag: complexity-low
+      qos: [batch]
     route:
       consider:
       - models: {names: [gemma-4, qwen-2.5]}
@@ -368,9 +368,6 @@ spec:
         drop:
           backend:       {type: Local}
           queuedPrompts: {greaterThan: 4}
-      - name: pii-never-leaves-cluster
-        if:   { tag: [pii-confirmed, pii-unknown] }
-        drop: { backend: {type: Provider} }
       select:
       - {type: Local,    minimize: PredictedTTFT}
       - {type: Provider, order: [databricks]}

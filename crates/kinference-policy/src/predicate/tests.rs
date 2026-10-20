@@ -181,106 +181,45 @@ fn an_empty_model_set_matches_no_named_model() {
     assert!(!p.matches(&attrs));
 }
 
-/// A tag term is well-formed whatever it names; the compiler separately warns
-/// when it can't be satisfied. The classifier is resolved from the tag's
-/// prefix.
+/// Set semantics on `model`: a scalar is contains (not equality), an array
+/// intersects, `containsAll` is all-of, and `not` is absence from the set.
 #[test]
-fn a_tag_term_resolves_its_classifier_from_the_tag_value() {
-    let mut warnings = Vec::new();
-    let raw: RequestPredicate =
-        serde_json::from_value(json!({"model": "bar", "tag": "pii-detected"})).unwrap();
-    let p = CompiledRequestPredicate::compile(&raw, &mut warnings);
-    assert!(
-        warnings.is_empty(),
-        "a tag term is valid whatever it names: {warnings:?}"
-    );
-    // Resolved by prefix, even though no classifier can emit this value.
-    assert_eq!(p.required_classifiers(), vec!["pii"]);
-    assert_eq!(p.unemittable_tags(), vec!["pii-detected".to_string()]);
-
-    // Nothing emits `pii-detected`, so the rule cannot fire even though
-    // `model` matches and the request is tagged by the PII classifier.
-    let mut attrs = req("bar");
-    attrs.tag = super::super::classify::tags_for_request("test", Some("I live in Kansas"));
-    assert!(!p.matches(&attrs));
-
-    // Same predicate, hypothetically-real classifier output.
-    attrs.tag = vec!["pii-detected".into()];
-    assert!(p.matches(&attrs));
-}
-
-/// A rule written against a tag the classifiers emit fires against real
-/// classifier output.
-#[test]
-fn a_rule_on_an_emittable_tag_matches_real_classifier_output() {
-    let mut w = Vec::new();
-    let raw: RequestPredicate = serde_json::from_value(json!({"tag": "pii-none"})).unwrap();
-    let p = CompiledRequestPredicate::compile(&raw, &mut w);
-    assert!(w.is_empty(), "{w:?}");
-    assert!(p.unemittable_tags().is_empty(), "pii-none is emittable");
-
-    let mut attrs = req("bar");
-    attrs.tag = super::super::classify::tags_for_request("test", Some("a plain question"));
-    assert!(
-        p.matches(&attrs),
-        "a request with no PII keyword carries pii-none"
-    );
-
-    // And the same predicate does not match one the classifier flagged.
-    attrs.tag = super::super::classify::tags_for_request("test", Some("I live in Kansas"));
-    assert!(
-        !p.matches(&attrs),
-        "pii-confirmed must not satisfy `tag: pii-none`"
-    );
-}
-
-/// Set semantics: a scalar is contains (not equality), an array intersects,
-/// `containsAll` is all-of, and `not` is absence from the set.
-#[test]
-fn tag_matching_has_set_semantics() {
-    let have: Vec<String> = ["complexity-unknown", "pii-unknown"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let mut attrs = req("bar");
-    attrs.tag = have;
+fn model_matching_has_set_semantics() {
+    let mut attrs = req("qwen");
+    attrs.model.push("qwen-alias".into());
 
     for (raw, want, why) in [
-        (json!({"tag": "pii-unknown"}), true, "scalar means contains"),
         (
-            json!({"tag": "pii-detected"}),
-            false,
-            "a tag not in the set",
+            json!({"model": "qwen-alias"}),
+            true,
+            "scalar means contains",
         ),
+        (json!({"model": "llama"}), false, "a name not in the set"),
         (
-            json!({"tag": ["pii-detected", "pii-unknown"]}),
+            json!({"model": ["llama", "qwen-alias"]}),
             true,
             "array intersects",
         ),
         (
-            json!({"tag": ["ssn", "code"]}),
+            json!({"model": ["llama", "mistral"]}),
             false,
             "array with no overlap",
         ),
         (
-            json!({"tag": {"containsAll": ["pii-unknown", "complexity-unknown"]}}),
+            json!({"model": {"containsAll": ["qwen", "qwen-alias"]}}),
             true,
             "containsAll with both present",
         ),
         (
-            json!({"tag": {"containsAll": ["pii-unknown", "ssn"]}}),
+            json!({"model": {"containsAll": ["qwen", "llama"]}}),
             false,
             "containsAll missing one",
         ),
+        (json!({"model": {"not": "llama"}}), true, "not means absent"),
         (
-            json!({"tag": {"not": "pii-detected"}}),
-            true,
-            "not means absent",
-        ),
-        (
-            json!({"tag": {"not": "pii-unknown"}}),
+            json!({"model": {"not": "qwen"}}),
             false,
-            "not on a present tag",
+            "not on a present name",
         ),
     ] {
         let mut w = Vec::new();
@@ -288,29 +227,6 @@ fn tag_matching_has_set_semantics() {
         let p = CompiledRequestPredicate::compile(&pred, &mut w);
         assert!(w.is_empty(), "{raw} should compile cleanly: {w:?}");
         assert_eq!(p.matches(&attrs), want, "{raw}: {why}");
-    }
-}
-
-/// An empty tag set is present, not absent, so `{not: X}` matches it. This
-/// is why classifiers always emit a tag.
-#[test]
-fn an_empty_tag_set_is_present_but_matches_nothing_positive() {
-    let attrs = RequestAttrs::default();
-    assert_eq!(
-        attrs.get(&RequestAttr::Tag),
-        Some(AttrValue::List(vec![])),
-        "an unscreened request still HAS a tag attribute"
-    );
-
-    for (raw, want) in [
-        (json!({"tag": "pii-detected"}), false),
-        (json!({"tag": {"exists": true}}), true),
-        (json!({"tag": {"not": "pii-detected"}}), true),
-    ] {
-        let mut w = Vec::new();
-        let pred: RequestPredicate = serde_json::from_value(raw.clone()).unwrap();
-        let p = CompiledRequestPredicate::compile(&pred, &mut w);
-        assert_eq!(p.matches(&attrs), want, "{raw} against an empty tag set");
     }
 }
 

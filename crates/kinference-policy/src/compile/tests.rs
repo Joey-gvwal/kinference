@@ -203,51 +203,12 @@ fn a_catch_all_in_last_position_is_not_flagged() {
     );
 }
 
-/// A rule naming a tag no classifier can emit is inert, and the warning lists
-/// what is emittable.
-#[test]
-fn a_rule_on_an_unemittable_tag_is_flagged_as_inert() {
-    let p = policy(json!({
-        "rules": [{"name": "pii-rule", "matches": [{"tag": "pii-detected"}],
-                   "route": {"select": [{"minimize": "PredictedTTFT"}]}}]
-    }));
-    assert_eq!(p.rules[0].requires_classifiers, vec!["pii"]);
-    let w = joined(&p);
-    assert!(
-        w.contains("never matches"),
-        "must say the rule is inert: {w}"
-    );
-    assert!(
-        w.contains("pii-detected"),
-        "must name the offending tag: {w}"
-    );
-    assert!(
-        w.contains("pii-unknown"),
-        "must name what IS emittable: {w}"
-    );
-}
-
-/// A rule written against the emittable `-unknown` tags doesn't warn.
-#[test]
-fn a_rule_on_an_emittable_tag_is_not_flagged() {
-    let p = policy(json!({
-        "rules": [{"name": "fail-closed", "matches": [{"tag": "pii-unknown"}],
-                   "route": {"select": [{"minimize": "PredictedTTFT"}]}}]
-    }));
-    assert_eq!(p.rules[0].requires_classifiers, vec!["pii"]);
-    assert!(
-        !p.warnings.iter().any(|w| w.contains("never matches")),
-        "pii-unknown is emitted on every request: {:?}",
-        p.warnings
-    );
-}
-
 /// An exclusion that cannot fire gets a warning in those terms.
 #[test]
-fn an_exclusion_on_an_unemittable_tag_warns_that_it_never_fires() {
+fn an_exclusion_on_an_invalid_guard_warns_that_it_never_fires() {
     let p = policy(json!({
         "rules": [{"name": "r", "route": {
-            "exclude": [{"name": "no-pii-on-shared", "if": {"tag": "pii-detected"},
+            "exclude": [{"name": "no-big-on-shared", "if": {"inputTokens": "big"},
                          "drop": {"backend": {"name": "shared"}}}],
             "select": [{"minimize": "PredictedTTFT"}]}}]
     }));
@@ -483,30 +444,6 @@ fn a_tier_with_no_subset_at_all_still_warns() {
         "a tier spanning everything really does starve the ones after it: {:?}",
         p.warnings
     );
-}
-
-/// And the general rule, so the next one is caught too.
-#[test]
-fn a_guard_on_an_unemittable_tag_warns_about_failing_open() {
-    let spec: InferencePolicySpec = serde_json::from_value(serde_json::json!({
-        "rules": [{
-            "name": "r",
-            "route": {
-                "exclude": [{
-                    "name": "pii-never-leaves",
-                    "if": {"tag": "pii-detected"},
-                    "drop": {"backend": {"type": "Provider"}}
-                }],
-                "select": [{"type": "Local", "minimize": "PredictedTTFT"}]
-            }
-        }]
-    }))
-    .expect("valid fixture");
-    let p = CompiledPolicy::compile("p", &spec);
-    let w = joined(&p);
-    assert!(w.contains("pii-detected"), "{w}");
-    // The candidates it would have dropped are still selectable.
-    assert!(w.contains("still selectable"), "{w}");
 }
 
 // --- the louder compiler ----------------------------------------------------
@@ -765,39 +702,6 @@ fn an_order_tier_over_local_endpoints_needs_a_random_tie_break() {
     );
 }
 
-/// `{not: X}` over a tag nothing emits is true for every request, and the
-/// warning says so.
-#[test]
-fn a_negated_unemittable_tag_is_reported_as_always_true() {
-    let p = one_rule(json!({
-        "exclude": [{"name": "only-unscreened",
-                     "if": {"tag": {"not": "pii-detected"}},
-                     "drop": {"backend": {"type": "Provider"}}}],
-        "select": [{"type": "Local", "minimize": "PredictedTTFT"}]
-    }));
-    let w = joined(&p);
-    assert!(w.contains("true for every request"), "{w}");
-    assert!(!w.contains("never fires"), "the opposite of the truth: {w}");
-}
-
-/// An array with one live tag still matches on it; only the dead alternatives
-/// are inert, and the warning says which are which.
-#[test]
-fn an_array_with_some_unemittable_tags_still_matches_on_the_rest() {
-    let p = policy(json!({"rules": [{"name": "r",
-        "matches": [{"tag": ["pii-confirmed", "ssn"]}],
-        "route": {"select": [{"minimize": "PredictedTTFT"}]}}]}));
-    let w = joined(&p);
-    assert!(
-        w.contains("UnemittableTag: spec.rules[0].matches[0].tag"),
-        "{w}"
-    );
-    assert!(w.contains("still matches on `pii-confirmed`"), "{w}");
-    assert!(!w.contains("never matches"), "{w}");
-    // `ssn` has no classifier prefix; the emittable list is still non-empty.
-    assert!(w.contains("Emittable today: complexity-"), "{w}");
-}
-
 /// A `drop` pinned to the class that does NOT carry its signal can never fire.
 #[test]
 fn a_drop_pinned_to_the_wrong_class_never_drops_anything() {
@@ -834,7 +738,7 @@ fn from_request_false_without_names_says_so() {
 #[test]
 fn every_warning_carries_a_manifest_path() {
     let p = policy(json!({"rules": [
-        {"name": "a", "matches": [{}, {"tag": "ssn", "inputTokens": "big"}], "route": {
+        {"name": "a", "matches": [{}, {"inputTokens": "big"}], "route": {
             "consider": [{"weight": 3}, {"name": "x"}, {"name": "x"}],
             "exclude": [
                 {"name": "e", "if": {}, "drop": {}},

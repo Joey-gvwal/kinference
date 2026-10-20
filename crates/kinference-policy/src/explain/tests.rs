@@ -63,11 +63,10 @@ fn provider(name: &str, model: &str, observed: Option<f32>) -> Candidate {
     }
 }
 
-fn attrs(model: &str, qos: &str, tags: &[&str]) -> RequestAttrs {
+fn attrs(model: &str, qos: &str) -> RequestAttrs {
     RequestAttrs {
         model: vec![model.to_string()],
         qos: Some(qos.to_string()),
-        tag: tags.iter().map(|t| t.to_string()).collect(),
         input_tokens: Some(1024),
         max_tokens: Some(256),
         tenant: String::new(),
@@ -102,18 +101,18 @@ fn the_two_predicted_ttft_copies_stay_in_sync() {
 /// this independently checks the sequencing.
 #[test]
 fn parity_with_a_direct_evaluate_call() {
-    // policy-2: matches on model+tag, considers two models, minimizes TTFT.
+    // policy-2: matches on model+qos, considers two models, minimizes TTFT.
     let p = policy(serde_json::json!({
         "rules": [{
             "name": "simple-can-go-to-gemma-if-faster",
-            "matches": [{ "model": "qwen-2.5", "tag": "complexity-low" }],
+            "matches": [{ "model": "qwen-2.5", "qos": ["interactive"] }],
             "route": {
                 "consider": [{ "models": { "names": ["gemma-4", "qwen-2.5"] } }],
                 "select": [{ "type": "Local", "minimize": "PredictedTTFT" }]
             }
         }]
     }));
-    let a = attrs("qwen-2.5", "interactive", &["complexity-low"]);
+    let a = attrs("qwen-2.5", "interactive");
     let cands = vec![
         local("ws-gemma", "gemma-4", 900.0, 0),
         local("ws-qwen", "qwen-2.5", 300.0, 0),
@@ -177,12 +176,12 @@ fn a_rule_that_does_not_match_names_the_failing_term() {
     let p = policy(serde_json::json!({
         "rules": [{
             "name": "simple-goes-to-gemma",
-            "matches": [{ "model": "qwen-2.5", "tag": "complexity-low" }],
+            "matches": [{ "model": "qwen-2.5", "qos": ["batch"] }],
             "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] }
         }]
     }));
-    // Right model, wrong tag.
-    let a = attrs("qwen-2.5", "interactive", &["complexity-high"]);
+    // Right model, wrong QoS.
+    let a = attrs("qwen-2.5", "interactive");
     let got = explain(&p, &a, &[local("ws-qwen", "qwen-2.5", 300.0, 0)]);
 
     let step = &got.steps[0];
@@ -190,12 +189,9 @@ fn a_rule_that_does_not_match_names_the_failing_term() {
     let pred = &step.predicates[0];
     assert!(!pred.matched);
     let model_term = pred.terms.iter().find(|t| t.attr == "model").unwrap();
-    let tag_term = pred.terms.iter().find(|t| t.attr == "tag").unwrap();
+    let qos_term = pred.terms.iter().find(|t| t.attr == "qos").unwrap();
     assert!(model_term.matched, "model qwen-2.5 does match");
-    assert!(
-        !tag_term.matched,
-        "complexity-low is absent, so the tag fails"
-    );
+    assert!(!qos_term.matched, "the request is interactive, not batch");
     assert!(
         step.trace.is_none() && step.consider.is_none(),
         "a rule that did not match was never evaluated"
@@ -215,7 +211,7 @@ fn consider_filters_by_model_and_reports_why() {
             }
         }]
     }));
-    let a = attrs("qwen-2.5", "interactive", &[]);
+    let a = attrs("qwen-2.5", "interactive");
     let got = explain(
         &p,
         &a,
@@ -260,7 +256,7 @@ fn on_empty_reject_flips_when_a_candidate_is_edited() {
             }
         }]
     }));
-    let a = attrs("qwen-2.5", "batch", &[]);
+    let a = attrs("qwen-2.5", "batch");
 
     let idle = explain(&p, &a, &[local("ws-qwen", "qwen-2.5", 300.0, 0)]);
     assert_eq!(idle.verdict, Verdict::Chosen, "an idle worker is allowed");
@@ -302,7 +298,7 @@ fn fall_through_advances_to_the_next_rule() {
             }
         ]
     }));
-    let a = attrs("qwen-2.5", "interactive", &[]);
+    let a = attrs("qwen-2.5", "interactive");
     // The only worker is busy, so rule 0 empties and hands on.
     let got = explain(&p, &a, &[local("ws-qwen", "qwen-2.5", 300.0, 5)]);
 
@@ -330,7 +326,7 @@ fn tier_subset_misses_are_reported_though_the_trace_omits_them() {
             }
         }]
     }));
-    let a = attrs("qwen-2.5", "interactive", &[]);
+    let a = attrs("qwen-2.5", "interactive");
     let got = explain(
         &p,
         &a,
@@ -368,7 +364,7 @@ fn unmatched_reject_is_distinct_from_on_empty() {
             "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] }
         }]
     }));
-    let a = attrs("qwen-2.5", "interactive", &[]);
+    let a = attrs("qwen-2.5", "interactive");
     let got = explain(&p, &a, &[local("ws-qwen", "qwen-2.5", 300.0, 0)]);
     assert_eq!(got.verdict, Verdict::RejectedUnmatched);
     assert!(!got.steps[0].matched);
@@ -386,7 +382,7 @@ fn unmatched_serve_local_reports_unmatched_served() {
             "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] }
         }]
     }));
-    let a = attrs("qwen-2.5", "interactive", &[]);
+    let a = attrs("qwen-2.5", "interactive");
     let got = explain(&p, &a, &[local("ws-qwen", "qwen-2.5", 300.0, 0)]);
     assert_eq!(got.verdict, Verdict::UnmatchedServed);
     assert!(got.winner.is_some());
@@ -476,7 +472,7 @@ fn every_rule_is_reported_in_list_order() {
               "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] } }
         ]
     }));
-    let a = attrs("qwen-2.5", "interactive", &[]);
+    let a = attrs("qwen-2.5", "interactive");
     let got = explain(&p, &a, &[local("ws-qwen", "qwen-2.5", 300.0, 0)]);
 
     let names: Vec<&str> = got.steps.iter().map(|s| s.name.as_str()).collect();

@@ -72,22 +72,6 @@ spec:
                             maxItems: 3
                             x-kubernetes-list-type: set
                             items: {type: string, enum: [interactive, batch, deferrable]}
-                          tag:
-                            description: |-
-                              Classifier output as a set of opaque string tags
-                              in the form of `prefix`-`level`, e.g.
-                              pii-possible, ssn-confirmed, complexity-low.
-
-                              Set semantics. A scalar RHS means contains (`tag:
-                              pii-confirmed`); an array means intersects (`tag:
-                              [ssn, credit-card]`); `{containsAll: [...]}` means
-                              all of them; `{not: pii-confirmed}` means the tag
-                              is absent.
-
-                              Note that absence is not proof of a negative; a
-                              classifier that timed out or was skipped will not
-                              emit tags.
-                            x-kubernetes-preserve-unknown-fields: true
                     route:
                       type: object
                       required: [select]
@@ -178,22 +162,6 @@ spec:
                                     maxItems: 3
                                     x-kubernetes-list-type: set
                                     items: {type: string, enum: [interactive, batch, deferrable]}
-                                  tag:
-                                    description: |-
-                                      Classifier output as a set of opaque string tags
-                                      in the form of `prefix`-`level`, e.g.
-                                      pii-possible, ssn-confirmed, complexity-low.
-
-                                      Set semantics. A scalar RHS means contains (`tag:
-                                      pii-confirmed`); an array means intersects (`tag:
-                                      [ssn, credit-card]`); `{containsAll: [...]}` means
-                                      all of them; `{not: pii-confirmed}` means the tag
-                                      is absent.
-
-                                      Note that absence is not proof of a negative; a
-                                      classifier that timed out or was skipped will not
-                                      emit tags.
-                                    x-kubernetes-preserve-unknown-fields: true
                               drop:
                                 type: object
                                 properties:

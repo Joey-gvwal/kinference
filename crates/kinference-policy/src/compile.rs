@@ -215,9 +215,6 @@ pub struct CompiledRule {
     /// Entries are ORed. Empty matches everything.
     pub matches: Vec<CompiledRequestPredicate>,
     pub route: CompiledRoute,
-    /// Classifiers this rule needs, from the tag values it names. Reported as
-    /// `requiresClassifiers` in the policy API's rule summaries.
-    pub requires_classifiers: Vec<&'static str>,
 }
 
 impl CompiledRule {
@@ -303,7 +300,7 @@ impl CompiledPolicy {
 }
 
 /// The request fields a `matches` entry or `if:` accepts, for hints.
-const REQUEST_FIELDS: &str = "model, inputTokens, maxTokens, tenant, qos, tag";
+const REQUEST_FIELDS: &str = "model, inputTokens, maxTokens, tenant, qos";
 /// The candidate fields a `drop:` accepts, for hints.
 const DROP_FIELDS: &str = "contextWindow, predictedTTFT, prefixCacheHitRatio, queuedPrompts, \
                            kvCacheUsage, model.name, backend.type, backend.name, \
@@ -386,7 +383,6 @@ fn is_blank(p: &RequestPredicate) -> bool {
         && p.max_tokens.is_none()
         && p.tenant.is_none()
         && p.qos.is_none()
-        && p.tag.is_none()
 }
 
 /// The values a numeric attribute can take, for spotting comparisons that are
@@ -539,127 +535,6 @@ fn range_warning(
     ));
 }
 
-/// What a `tag` VALUE no classifier emits does to one `tag` term.
-enum TagEffect {
-    /// The term can never be true.
-    Never,
-    /// The term is true for every request: a negated dead tag.
-    Always,
-    /// Some alternatives are dead, but the term can still match on the rest.
-    DeadAlternatives(Vec<String>),
-}
-
-/// How the unemittable values in a `tag` term change what it can match, with
-/// those values. `None` when every value it names is emittable.
-///
-/// Polarity matters: a dead tag makes `tag: X` never match, but `{not: X}`
-/// match every request.
-fn tag_effect(m: &Matcher) -> Option<(TagEffect, Vec<String>)> {
-    let dead = |t: &str| !super::classify::is_emittable(t);
-    match m {
-        Matcher::Equals(AttrValue::Str(t)) if dead(t) => Some((TagEffect::Never, vec![t.clone()])),
-        Matcher::OneOf(vs) => {
-            let named: Vec<&str> = vs
-                .iter()
-                .filter_map(|v| match v {
-                    AttrValue::Str(s) => Some(s.as_str()),
-                    _ => None,
-                })
-                .collect();
-            let gone: Vec<String> = named
-                .iter()
-                .filter(|t| dead(t))
-                .map(|t| t.to_string())
-                .collect();
-            if gone.is_empty() {
-                None
-            } else if gone.len() == named.len() {
-                Some((TagEffect::Never, gone))
-            } else {
-                let live = named
-                    .iter()
-                    .filter(|t| !dead(t))
-                    .map(|t| t.to_string())
-                    .collect();
-                Some((TagEffect::DeadAlternatives(live), gone))
-            }
-        }
-        Matcher::ContainsAll(ts) => {
-            let gone: Vec<String> = ts.iter().filter(|t| dead(t)).cloned().collect();
-            (!gone.is_empty()).then_some((TagEffect::Never, gone))
-        }
-        Matcher::Not(inner) => tag_effect(inner).map(|(effect, gone)| {
-            let flipped = match effect {
-                TagEffect::Never => TagEffect::Always,
-                TagEffect::Always => TagEffect::Never,
-                alt @ TagEffect::DeadAlternatives(_) => alt,
-            };
-            (flipped, gone)
-        }),
-        _ => None,
-    }
-}
-
-/// Warn about each `tag` term in `p` that names a tag no classifier emits.
-fn tag_warnings(
-    p: &CompiledRequestPredicate,
-    path: &str,
-    rule: &str,
-    site: PredicateSite,
-    warnings: &mut Vec<PolicyWarning>,
-) {
-    for (attr, m) in &p.terms {
-        if *attr != RequestAttr::Tag {
-            continue;
-        }
-        let Some((effect, gone)) = tag_effect(m) else {
-            continue;
-        };
-        let gone = gone
-            .iter()
-            .map(|t| format!("`{t}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let what = match (effect, site) {
-            (TagEffect::Never, PredicateSite::MatchesEntry) => format!(
-                "no classifier emits {gone}, so this entry never matches and traffic falls \
-                 through to the next rule (or `unmatched`)"
-            ),
-            (TagEffect::Never, _) => format!(
-                "no classifier emits {gone}, so the guard is never true: {}",
-                PredicateSite::ExclusionIf.never()
-            ),
-            (TagEffect::Always, PredicateSite::MatchesEntry) => format!(
-                "no classifier emits {gone}, so this negated term is true for every request \
-                 and constrains nothing"
-            ),
-            (TagEffect::Always, _) => format!(
-                "no classifier emits {gone}, so this negated guard is true for every request \
-                 and the exclusion applies to all of them"
-            ),
-            (TagEffect::DeadAlternatives(live), _) => format!(
-                "no classifier emits {gone}, so those alternatives can never match; the term \
-                 still matches on {}",
-                live.iter()
-                    .map(|t| format!("`{t}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        warnings.push(PolicyWarning::new(
-            WarningCode::UnemittableTag,
-            format!("{path}.tag"),
-            format!(
-                "rule `{rule}`: {what}. Emittable today: {}",
-                super::classify::emittable_tags(
-                    super::classify::CLASSIFIERS.iter().map(|c| c.name)
-                )
-                .join(", ")
-            ),
-        ));
-    }
-}
-
 /// Which backend classes a `drop`'s `backend.type` term admits, found by
 /// evaluating the compiled matcher on both values. `None` when the drop has no
 /// `backend.type` term.
@@ -713,7 +588,6 @@ fn compile_rule(
                 );
             }
         }
-        tag_warnings(&p, &path, &name, PredicateSite::MatchesEntry, warnings);
         matches.push(p);
     }
 
@@ -745,21 +619,10 @@ fn compile_rule(
         ));
     }
 
-    let requires_classifiers = {
-        let mut c: Vec<&'static str> = matches
-            .iter()
-            .flat_map(|p| p.required_classifiers())
-            .collect();
-        c.sort_unstable();
-        c.dedup();
-        c
-    };
-
     CompiledRule {
         name: name.clone(),
         matches,
         route: compile_route(&name, &format!("{rule_path}.route"), &raw.route, warnings),
-        requires_classifiers,
     }
 }
 
@@ -936,7 +799,6 @@ fn compile_route(
                         );
                     }
                 }
-                tag_warnings(&p, &if_path, rule, PredicateSite::ExclusionIf, warnings);
                 p
             });
 

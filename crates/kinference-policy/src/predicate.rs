@@ -6,7 +6,7 @@
 //!
 //! | RHS shape | Meaning                                        | Example                        |
 //! |-----------|------------------------------------------------|--------------------------------|
-//! | scalar    | exact match; CONTAINS for a set-valued attr    | `tag: ssn`, `model: foo`       |
+//! | scalar    | exact match; CONTAINS for a set-valued attr    | `model: foo`                   |
 //! | array     | membership; INTERSECTION for set-valued attrs  | `qos: [batch, deferrable]`     |
 //! | hash      | explicit operator                              | `queuedPrompts: {greaterThan: 8}` |
 //!
@@ -22,9 +22,8 @@
 //! mismatches like `model: {greaterThan: 5}` are caught at compile time.
 //!
 //! A predicate over an attribute that is absent does not match, in both
-//! scopes, except `{exists: false}`. `model`, `tenant` and `tag` are always
-//! present (see [`RequestAttrs::get`]); classifiers emit an explicit `-unknown`
-//! tag rather than nothing (see [`super::classify`]).
+//! scopes, except `{exists: false}`. `model` and `tenant` are always present
+//! (see [`RequestAttrs::get`]).
 
 use std::time::Duration;
 
@@ -81,18 +80,14 @@ pub enum RequestAttr {
     MaxTokens,
     Tenant,
     Qos,
-    /// Classifier output, as an unordered set of opaque tags. The tag values
-    /// select which classifiers run; see
-    /// [`CompiledRequestPredicate::required_classifiers`].
-    Tag,
 }
 
 impl RequestAttr {
     pub fn kind(&self) -> AttrKind {
         match self {
             RequestAttr::InputTokens | RequestAttr::MaxTokens => AttrKind::Int,
-            // Both are sets; see [`RequestAttrs::model`].
-            RequestAttr::Tag | RequestAttr::Model => AttrKind::StrList,
+            // A set; see [`RequestAttrs::model`].
+            RequestAttr::Model => AttrKind::StrList,
             _ => AttrKind::Str,
         }
     }
@@ -105,7 +100,6 @@ impl RequestAttr {
             RequestAttr::MaxTokens => "maxTokens".into(),
             RequestAttr::Tenant => "tenant".into(),
             RequestAttr::Qos => "qos".into(),
-            RequestAttr::Tag => "tag".into(),
         }
     }
 }
@@ -210,9 +204,7 @@ pub enum Matcher {
 
 impl Matcher {
     /// Every string this matcher compares against, including under `not`.
-    ///
-    /// Used to recover the tag values a rule references, which select the
-    /// classifiers it needs. `{exists: _}` contributes nothing.
+    /// `{exists: _}` contributes nothing.
     pub fn string_operands(&self, out: &mut Vec<String>) {
         match self {
             Matcher::Equals(AttrValue::Str(s)) => out.push(s.clone()),
@@ -614,7 +606,6 @@ impl CompiledRequestPredicate {
         push(RequestAttr::InputTokens, &raw.input_tokens);
         push(RequestAttr::MaxTokens, &raw.max_tokens);
         push(RequestAttr::Tenant, &raw.tenant);
-        push(RequestAttr::Tag, &raw.tag);
         // `qos` after the closure's last use, so it can borrow `terms`.
         if let Some(v) = &raw.qos {
             match compile_qos(v) {
@@ -647,42 +638,6 @@ impl CompiledRequestPredicate {
     /// nothing.
     pub fn is_unconditional(&self) -> bool {
         self.terms.is_empty()
-    }
-
-    /// Every tag VALUE this predicate names, including under `not`.
-    pub fn referenced_tags(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for (attr, m) in &self.terms {
-            if *attr == RequestAttr::Tag {
-                m.string_operands(&mut out);
-            }
-        }
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    /// Classifiers this predicate depends on, by the prefixes of the tag values
-    /// it names. A tag no classifier claims contributes nothing; the compiler
-    /// reports it separately.
-    pub fn required_classifiers(&self) -> Vec<&'static str> {
-        let mut out: Vec<&'static str> = self
-            .referenced_tags()
-            .iter()
-            .filter_map(|t| super::classify::classifier_for(t).map(|c| c.name))
-            .collect();
-        out.sort_unstable();
-        out.dedup();
-        out
-    }
-
-    /// Tags this predicate names that no classifier can emit, which make the
-    /// rule inert.
-    pub fn unemittable_tags(&self) -> Vec<String> {
-        self.referenced_tags()
-            .into_iter()
-            .filter(|t| !super::classify::is_emittable(t))
-            .collect()
     }
 }
 
@@ -758,25 +713,18 @@ pub struct RequestAttrs {
     /// the empty string.
     pub tenant: String,
     pub qos: Option<String>,
-    /// Classifier output. Every classifier that runs emits at least its
-    /// `-unknown` tag, so an empty set means none ran. See
-    /// [`super::classify::tags_for_request`].
-    pub tag: Vec<String>,
 }
 
 impl RequestAttrs {
     pub fn get(&self, attr: &RequestAttr) -> Option<AttrValue> {
         match attr {
-            // Always `Some`, like `tag`.
+            // Always `Some`.
             RequestAttr::Model => Some(AttrValue::List(self.model.clone())),
             RequestAttr::InputTokens => self.input_tokens.map(AttrValue::Int),
             RequestAttr::MaxTokens => self.max_tokens.map(AttrValue::Int),
             // Always `Some`: an empty tenant is the value "", not an absence.
             RequestAttr::Tenant => Some(AttrValue::Str(self.tenant.clone())),
             RequestAttr::Qos => self.qos.clone().map(AttrValue::Str),
-            // Always `Some`, even when empty, so `{not: pii-detected}` matches
-            // a request no classifier screened.
-            RequestAttr::Tag => Some(AttrValue::List(self.tag.clone())),
         }
     }
 }

@@ -64,7 +64,7 @@ fn policy_from_guide_example() {
     let spec: InferencePolicySpec = serde_json::from_value(serde_yaml_lite(
         r#"{"unmatched":"ServeLocal",
                 "rules":[{"name":"cheap-when-simple",
-                          "matches":[{"model":"bar","tag":"complexity-low"}],
+                          "matches":[{"model":"bar","qos":["batch"]}],
                           "route":{"consider":[{"models":{"names":["foo","bar"]}}],
                                    "exclude":[{"name":"keep-long-prompts-off-a100",
                                                "if":{"inputTokens":{"greaterThan":32000}},
@@ -82,9 +82,9 @@ fn policy_from_guide_example() {
         rule.matches[0].model.as_ref().unwrap(),
         &serde_json::json!("bar")
     );
-    assert!(
-        rule.matches[0].tag.is_some(),
-        "the classifier tag vehicle parses"
+    assert_eq!(
+        rule.matches[0].qos.as_ref().unwrap(),
+        &serde_json::json!(["batch"])
     );
     let ex = &rule.route.exclude[0];
     assert_eq!(ex.name, "keep-long-prompts-off-a100");

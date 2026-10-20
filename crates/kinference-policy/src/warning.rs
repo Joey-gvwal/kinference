@@ -24,8 +24,6 @@ pub enum WarningCode {
     /// A rule no request can reach, because an earlier one claims everything
     /// it would match and does not fall through.
     ShadowedRule,
-    /// A `tag` value no classifier emits, which pins its term true or false.
-    UnemittableTag,
     /// A `consider` group whose model choice is contradictory or missing.
     ConsiderModelChoice,
     /// Some `consider` groups are weighted and some are not.
@@ -73,7 +71,6 @@ impl WarningCode {
         WarningCode::InvalidTerm,
         WarningCode::EmptyPredicate,
         WarningCode::ShadowedRule,
-        WarningCode::UnemittableTag,
         WarningCode::ConsiderModelChoice,
         WarningCode::PartialWeights,
         WarningCode::DuplicateName,
@@ -112,7 +109,6 @@ impl WarningCode {
             WarningCode::InvalidTerm => "InvalidTerm",
             WarningCode::EmptyPredicate => "EmptyPredicate",
             WarningCode::ShadowedRule => "ShadowedRule",
-            WarningCode::UnemittableTag => "UnemittableTag",
             WarningCode::ConsiderModelChoice => "ConsiderModelChoice",
             WarningCode::PartialWeights => "PartialWeights",
             WarningCode::DuplicateName => "DuplicateName",

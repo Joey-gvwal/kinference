@@ -193,17 +193,7 @@ async fn context_returns_an_empty_list_once_listed_with_no_policies() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["state"], "ok");
     assert_eq!(body["policies"].as_array().unwrap().len(), 0);
-    // The vocabularies come from the code.
-    let tags: Vec<&str> = body["tags"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t.as_str().unwrap())
-        .collect();
-    assert!(
-        tags.contains(&"pii-confirmed") && tags.contains(&"complexity-low"),
-        "{tags:?}"
-    );
+    // The vocabulary comes from the code.
     let qos: Vec<&str> = body["qos"]
         .as_array()
         .unwrap()
@@ -332,7 +322,6 @@ async fn simulate_flips_verdict_when_a_candidate_override_is_edited() {
                 "policy": "default/policy-5",
                 "model": ["qwen-2.5"],
                 "qos": "batch",
-                "tags": [],
                 "inputTokens": 4096,
                 "maxTokens": 256,
                 "candidates": [{

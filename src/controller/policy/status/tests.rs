@@ -1128,10 +1128,10 @@ fn worker_set_with_no_ready_endpoints_is_not_ready_but_still_accepted() {
 }
 
 #[test]
-fn policy_status_composes_state_tokens_and_reports_an_inert_tag() {
+fn policy_status_composes_state_tokens_and_reports_an_inert_rule() {
     let spec: InferencePolicySpec = serde_json::from_value(serde_json::json!({
         "rules": [
-            {"name": "pii", "matches": [{"tag": "pii-detected"}],
+            {"name": "big", "matches": [{"inputTokens": "big"}],
              "route": {"select": [{"minimize": "PredictedTTFT"}]}},
             {"name": "plain", "route": {"select": [{"minimize": "PredictedTTFT"}]}}
         ]
@@ -1141,20 +1141,14 @@ fn policy_status_composes_state_tokens_and_reports_an_inert_tag() {
     let s = desired_policy_status(&rp(p), None);
     // In force and carrying warnings. Warnings don't affect `Accepted`.
     assert_eq!(s.state.as_deref(), Some("InForce,HasWarnings"));
-    // `tag` is untyped, so this warning is what tells an author that
-    // `pii-detected` is not a tag any classifier emits.
     let inert = s
         .warnings
         .iter()
         .find(|w| w.contains("never matches"))
         .unwrap_or_else(|| panic!("inert-rule warning missing: {:?}", s.warnings));
     assert!(
-        inert.contains("pii-detected"),
-        "the warning must name the offending tag: {inert}"
-    );
-    assert!(
-        inert.contains("pii-confirmed"),
-        "and what CAN be emitted instead: {inert}"
+        inert.contains("inputTokens"),
+        "the warning must name the offending term: {inert}"
     );
     // Warnings never make a policy unusable.
     assert_eq!(s.conditions[0].status, "True");

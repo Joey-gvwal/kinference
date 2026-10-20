@@ -37,8 +37,6 @@ struct Parsed {
 struct BodyFacts {
     streaming: bool,
     max_tokens: Option<i64>,
-    /// The last user turn, or the completions `prompt`, for the classifiers.
-    classifier_text: Option<String>,
 }
 
 /// The body as `PullBody` will serve it. `None`: the pushed body goes out
@@ -188,11 +186,6 @@ impl KinferenceService {
                 model: String::new(),
             });
         }
-        let messages = obj
-            .get("messages")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
         let facts = BodyFacts {
             // Whether the first-byte report will be a real TTFT, for
             // `Observations::finalize`. The same coercion as the body rewrite;
@@ -200,11 +193,6 @@ impl KinferenceService {
             streaming: crate::pick_body::stream_flag(&obj),
             // For `maxTokens` predicates and context-window fitting.
             max_tokens: obj.get("max_tokens").and_then(serde_json::Value::as_i64),
-            classifier_text: kinference_policy::classify::last_user_text(messages).or_else(|| {
-                obj.get("prompt")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            }),
         };
         Ok(Parsed {
             model: model.to_string(),
@@ -542,11 +530,6 @@ impl KinferenceService {
             max_tokens: facts.max_tokens,
             qos: Some(req.qos.as_label().to_string()),
             tenant: req.identity.tenant.clone(),
-            // See `kinference_policy::classify`.
-            tag: kinference_policy::classify::tags_for_request(
-                &req.label,
-                facts.classifier_text.as_deref(),
-            ),
         };
         // Re-bind to the winning group, whose pool's scores and prefix hashes
         // the critical section uses.
