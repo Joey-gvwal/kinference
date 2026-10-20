@@ -3,8 +3,8 @@
 //!
 //! This module owns the service struct and the value types passed through
 //! it. Scoring (the pools, the model index, the scrape reads) is the
-//! `Scoring` part in `scoring`; the pick lifecycle is in `lifecycle`;
-//! tokenizing is [`crate::router::tokenizer`].
+//! `Scoring` part in `scoring`; the pick path, as five steps, is in
+//! `lifecycle`; tokenizing is [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,10 +1,11 @@
-//! The request lifecycle behind `Pick()`: one request from body to chosen
-//! endpoint, and the observation it leaves behind.
+//! The pick path behind `Pick()`: one request from body to chosen endpoint,
+//! and the observation it leaves behind.
 //!
-//! `pick_and_record` is long because it is one transaction over a JSON body
-//! that is rewritten and then drained, plus a critical section under the
-//! pool's `pick_lock`. What it reserves is released by the `Observations`
-//! part, or by `abort_request` when the caller gives up.
+//! `pick_and_record` is five steps, each a method with a typed result the
+//! next consumes: parse, resolve the model, score the groups, select,
+//! commit. Only `commit` writes state; the critical section under the
+//! pool's `pick_lock` is inside it. What it reserves is released by the
+//! `Observations` part, or by `abort_request` when the caller gives up.
 
 use std::time::Instant;
 
@@ -115,20 +116,8 @@ enum Selected {
 }
 
 impl KinferenceService {
-    /// Full pick path behind gRPC `Pick()`:
-    /// 1. Parse the OpenAI body for model + messages + chat-template
-    ///    inputs. Resolve the `"auto"` pseudo-model to a concrete model,
-    ///    then apply the Pick-time body rewrites (`crate::router::pick_body`):
-    ///    model="auto" → concrete, and `stream_options.include_usage` for
-    ///    streaming requests.
-    /// 2. Call `score_workers` (which tokenizes + queries the indexer),
-    ///    passing the rewritten body so `/render` sees what the engine will.
-    /// 3. Inside `pick_lock`: apply layered overlap, snapshot
-    ///    InflightRegistry, run the picker, bump inflight, insert
-    ///    inflight-prefix, stash PendingObservation.
-    /// 4. Return the chosen endpoint + request id + the resolved model + the
-    ///    rewritten `body`, which is empty when the body was left alone (then
-    ///    `grpc::pick` reuses the pushed body).
+    /// The full pick path behind gRPC `Pick()`. A refusal returns from the
+    /// step that found it and writes no state.
     ///
     /// The caller mints `request_id` (see `mint_response_id`), so the same id
     /// flows through pending-observation lookup and log correlation.
@@ -162,358 +151,11 @@ impl KinferenceService {
             Err(out) => return out,
         };
         let scored = self.score_groups(&req, resolved).await;
-        let (group, forced_endpoint, wire, streaming, degraded_reason) =
-            match self.select(&req, scored).await {
-                Ok(Selected::Local {
-                    group,
-                    endpoint,
-                    body,
-                    streaming,
-                    degraded,
-                }) => (group, endpoint, body, streaming, degraded),
-                Ok(Selected::Provider {
-                    pick,
-                    body,
-                    streaming,
-                }) => {
-                    self.observations.record_provider_pick(
-                        req.request_id,
-                        &pick.provider,
-                        &pick.upstream_model,
-                        req.qos,
-                        &req.identity.tenant,
-                        streaming,
-                    );
-                    self.prom.record_routed(
-                        &req.identity.tenant,
-                        &pick.provider.name,
-                        kinference_policy::crd::BackendType::Provider,
-                    );
-                    return PickAndRecordOutcome::Provider {
-                        pick,
-                        response_id: req.request_id,
-                        body,
-                    };
-                }
-                Err(out) => return out,
-            };
-        let ScoredGroup {
-            pool,
-            model,
-            scores,
-            side: score_side,
-        } = group;
-
-        // Derived AFTER the policy may have re-bound `pool`.
-        let predictor_cfg = &pool.predictor;
-        let picker_cfg = &pool.picker;
-        let inflight = &*pool.inflight;
-        let pick_lock = &*pool.pick_lock;
-        let inflight_enabled = picker_cfg.inflight_tracking;
-
-        // 3. Critical section: pick and state mutation.
-        let chosen_endpoint: String;
-        let pending: PendingObservation;
-        {
-            // Recover from poisoning: one panic would otherwise break every
-            // later pick on this pool. The mutex guards `()`, only ordering the
-            // section, and the state it touches is TTL-swept.
-            let _pick_guard = pick_lock.lock().unwrap_or_else(|poisoned| {
-                tracing::warn!(
-                    req = %req.label,
-                    workerset = %pool.name,
-                    "pick_lock was poisoned by an earlier panic; continuing. The lock \
-                     guards ordering only, so this is recoverable — but a panic inside \
-                     the pick critical section is a bug worth chasing"
-                );
-                poisoned.into_inner()
-            });
-
-            let mut scores = scores;
-            let kv_blocks_per_worker: Vec<u32> = scores.iter().map(|s| s.matched_blocks).collect();
-            let expected_overlap_alpha = pool.predictor.expected_overlap_alpha;
-            let dispatches_per_worker: Vec<Vec<kinference_fleet::inflight::DispatchSnapshot>> =
-                scores
-                    .iter()
-                    .map(|s| pool.inflight_prefixes.dispatches_for(&s.endpoint))
-                    .collect();
-            let inflight_workload_per_worker: Vec<
-                Vec<kinference_fleet::inflight::InflightSummary>,
-            > = dispatches_per_worker
-                .iter()
-                .map(|d| d.iter().map(|s| s.summary()).collect())
-                .collect();
-            let per_worker_dispatch_overlap: Vec<Vec<f32>> = scores
-                .iter()
-                .zip(dispatches_per_worker.iter())
-                .map(|(s, dispatches)| {
-                    let query_set: std::collections::HashSet<u64> = score_side
-                        .hashes_by_block_size
-                        .get(&s.block_size)
-                        .map(|v| v.iter().copied().collect())
-                        .unwrap_or_default();
-                    dispatches
-                        .iter()
-                        .map(|d| d.remaining.intersection(&query_set).count() as f32)
-                        .collect()
-                })
-                .collect();
-            let inflight_per_worker: Vec<u32> = if inflight_enabled {
-                scores.iter().map(|s| inflight.get(&s.endpoint)).collect()
-            } else {
-                vec![0; scores.len()]
-            };
-
-            let score_now = Instant::now();
-            let per_worker_dispatch_progress: Vec<Vec<f32>> = dispatches_per_worker
-                .iter()
-                .map(|dispatches| {
-                    let capacity = predictor_cfg.inflight_concurrent_capacity;
-                    dispatches
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, d)| {
-                            let position = (idx as u32).saturating_add(1);
-                            if position > capacity {
-                                return 0.0;
-                            }
-                            let est = crate::router::picker::prefill_ms_for(
-                                predictor_cfg,
-                                d.uncached_at_dispatch,
-                                d.total_at_dispatch,
-                            );
-                            if est <= 0.0 {
-                                return 1.0;
-                            }
-                            let elapsed = score_now
-                                .checked_duration_since(d.dispatched_at)
-                                .map(|d| d.as_millis() as f32)
-                                .unwrap_or(0.0);
-                            (elapsed / est).clamp(0.0, 1.0)
-                        })
-                        .collect()
-                })
-                .collect();
-
-            for (i, s) in scores.iter_mut().enumerate() {
-                let scaled = crate::router::picker::scale_per_dispatch_by_progress(
-                    &per_worker_dispatch_overlap[i],
-                    &per_worker_dispatch_progress[i],
-                );
-                let layered = crate::router::picker::compute_layered_overlap(
-                    &scaled,
-                    kv_blocks_per_worker[i] as f32,
-                    expected_overlap_alpha,
-                );
-                s.matched_blocks = layered.round() as u32;
-            }
-            let inputs = crate::router::picker::PickInputs {
-                scores: &scores,
-                predictor: predictor_cfg,
-                picker: picker_cfg,
-                inflight: &inflight_per_worker,
-                inflight_workload: &inflight_workload_per_worker,
-                kv_blocks: &kv_blocks_per_worker,
-                now: score_now,
-            };
-
-            // The policy already chose, in step 2c.
-            let forced_pick = forced_endpoint.as_deref().and_then(|ep| {
-                let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
-                    crate::router::picker::PickResult {
-                        worker: w,
-                        replication_fired: false,
-                    }
-                });
-                if found.is_none() {
-                    // Should be unreachable, since the endpoint came from
-                    // this group's scores. Warn, since the decision counter
-                    // already recorded `chosen`.
-                    tracing::warn!(
-                        req = %req.label,
-                        model = %model,
-                        worker_set = %pool.name,
-                        endpoint = %ep,
-                        n_scored = scores.len(),
-                        "pick: policy chose an endpoint absent from the scored set; \
-                         falling back to the picker"
-                    );
-                    self.prom.record_policy_decision("forced_endpoint_missing");
-                }
-                found
-            });
-
-            let pick_result = match forced_pick {
-                Some(r) => r,
-                None => match crate::router::picker::pick_endpoint(&inputs) {
-                    Some(r) => r,
-                    None => {
-                        tracing::warn!(
-                            req = %req.label,
-                            model = %model,
-                            n_scored = scores.len(),
-                            "pick: picker returned None (defensive); reporting BadRequest"
-                        );
-                        return PickAndRecordOutcome::BadRequest {
-                            reason: "picker returned no eligible worker".to_string(),
-                            model: model.clone(),
-                        };
-                    }
-                },
-            };
-            let chosen = pick_result.worker;
-            let replication_fired = pick_result.replication_fired;
-
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                tracing::debug!(
-                    "pick: score table for req={}\n{}",
-                    req.label,
-                    crate::router::picker::format_score_table(
-                        &inputs,
-                        expected_overlap_alpha,
-                        Some(&chosen.endpoint),
-                    )
-                );
-            }
-            tracing::info!(
-                req = %req.label,
-                model = %model,
-                chosen_endpoint = %chosen.endpoint,
-                chosen_name = %chosen.name,
-                scored = scores.len(),
-                "pick"
-            );
-
-            let chosen_idx = scores
-                .iter()
-                .position(|s| s.endpoint == chosen.endpoint)
-                .expect("chosen worker must be in scores");
-            let chosen_inflight = inflight_per_worker[chosen_idx];
-            let chosen_kv_blocks = kv_blocks_per_worker[chosen_idx];
-            let chosen_workload: &[kinference_fleet::inflight::InflightSummary] =
-                &inflight_workload_per_worker[chosen_idx];
-            let chosen_q_breakdown = crate::router::picker::compute_queue_cost(
-                chosen,
-                predictor_cfg,
-                chosen_workload,
-                score_now,
-            );
-            let chosen_overlap_per_dispatch: Vec<u32> = per_worker_dispatch_overlap[chosen_idx]
-                .iter()
-                .map(|f| *f as u32)
-                .collect();
-            let prediction = crate::router::picker::predicted_wait_ms(
-                chosen,
-                predictor_cfg,
-                chosen_workload,
-                score_now,
-            );
-            // Prefix-cache outcome for the pick we actually made. Skipped when
-            // the pick was degraded: a tokenize failure would look like a
-            // genuine 0% cache hit, and a prefix-index failure can report
-            // matched blocks against a zero-length prompt. Those picks are
-            // already counted by `kinference_score_degraded_total{reason}`.
-            //
-            // `chosen.matched_blocks` is the layered value (it was overwritten
-            // above with radix match plus in-flight prefill credit), while
-            // `chosen_kv_blocks` is the raw tree match for the same pick.
-            if degraded_reason.is_none() {
-                self.prom.record_prefix_match(
-                    &model,
-                    req.qos.as_label(),
-                    chosen.total_blocks,
-                    chosen.matched_blocks,
-                    chosen_kv_blocks,
-                );
-            }
-
-            let chosen_clone = chosen.clone();
-            pending = PendingObservation {
-                request_id: req.request_id,
-                workerset: pool.name.clone(),
-                profile: pool.profile.clone(),
-                inflight: crate::router::observations::InflightHandles::of(&pool),
-                picked_at: score_now,
-                chosen_worker: chosen_clone,
-                prediction,
-                q_inflight: chosen_inflight,
-                kv_blocks: chosen_kv_blocks,
-                inflight_workload_blocks: chosen_q_breakdown.inflight_workload_blocks,
-                q_ms_constant: chosen_q_breakdown.q_ms_constant,
-                q_ms_workload: chosen_q_breakdown.q_ms_workload,
-                inflight_overlap_blocks: chosen_overlap_per_dispatch,
-                expected_overlap_alpha,
-                predictor_cfg: predictor_cfg.clone(),
-                picker_cfg: picker_cfg.clone(),
-                external_request_id: req.client_request_id.map(|s| s.to_string()),
-                replication_fired,
-                model: model.clone(),
-                streaming,
-                qos: req.qos,
-                tenant: req.identity.tenant.clone(),
-            };
-            // For ReportFinalToken; the record above is consumed earlier, at
-            // ReportFirstToken.
-            self.observations.labels.insert(
-                req.request_id,
-                RequestMeta {
-                    model: model.clone(),
-                    qos: req.qos,
-                    tenant: req.identity.tenant.clone(),
-                    streaming,
-                    picked_at: score_now,
-                    // A local pick, so there is no provider to attribute
-                    // feedback to.
-                    provider: None,
-                },
-            );
-
-            if inflight_enabled {
-                inflight.inc(&chosen.endpoint);
-            }
-            let chosen_hashes_u64 = score_side
-                .hashes_by_block_size
-                .get(&chosen.block_size)
-                .cloned()
-                .unwrap_or_default();
-            let chosen_hashes_set: std::collections::HashSet<u64> =
-                chosen_hashes_u64.into_iter().collect();
-            let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
-            pool.inflight_prefixes.insert(
-                req.request_id,
-                chosen.endpoint.clone(),
-                chosen_hashes_set,
-                chosen_uncached,
-                chosen.total_blocks,
-            );
-
-            chosen_endpoint = chosen.endpoint.clone();
-        }
-
-        self.observations.pending.insert(pending);
-        // The bare name, as `backend.name` spells it; a CRD worker set's
-        // `pool.name` is `namespace/name`.
-        self.prom.record_routed(
-            &req.identity.tenant,
-            &pool.key.name,
-            kinference_policy::crd::BackendType::Local,
-        );
-
-        match degraded_reason {
-            Some(reason) => PickAndRecordOutcome::Degraded {
-                endpoint: chosen_endpoint,
-                response_id: req.request_id,
-                reason,
-                body: wire.into_bytes(),
-                model,
-            },
-            None => PickAndRecordOutcome::Ok {
-                endpoint: chosen_endpoint,
-                response_id: req.request_id,
-                body: wire.into_bytes(),
-                model,
-            },
-        }
+        let selected = match self.select(&req, scored).await {
+            Ok(s) => s,
+            Err(out) => return out,
+        };
+        self.commit(&req, selected)
     }
 
     /// Step 1. `Err` is a `BadRequest`: not JSON, not an object, or no
@@ -991,6 +633,362 @@ impl KinferenceService {
             streaming,
             degraded,
         })
+    }
+
+    /// Step 5. Apply the pick. Local: the critical section under the pool's
+    /// `pick_lock`, then the pending stash and the routed counter. Provider:
+    /// the label stash and the routed counter. Only here is state written.
+    fn commit(&self, req: &PickRequest<'_>, selected: Selected) -> PickAndRecordOutcome {
+        let (group, forced_endpoint, body, streaming, degraded) = match selected {
+            Selected::Local {
+                group,
+                endpoint,
+                body,
+                streaming,
+                degraded,
+            } => (group, endpoint, body, streaming, degraded),
+            Selected::Provider {
+                pick,
+                body,
+                streaming,
+            } => {
+                self.observations.record_provider_pick(
+                    req.request_id,
+                    &pick.provider,
+                    &pick.upstream_model,
+                    req.qos,
+                    &req.identity.tenant,
+                    streaming,
+                );
+                self.prom.record_routed(
+                    &req.identity.tenant,
+                    &pick.provider.name,
+                    kinference_policy::crd::BackendType::Provider,
+                );
+                return PickAndRecordOutcome::Provider {
+                    pick,
+                    response_id: req.request_id,
+                    body,
+                };
+            }
+        };
+        let ScoredGroup {
+            pool,
+            model,
+            scores,
+            side: score_side,
+        } = group;
+
+        // Derived AFTER the policy may have re-bound `pool`.
+        let predictor_cfg = &pool.predictor;
+        let picker_cfg = &pool.picker;
+        let inflight = &*pool.inflight;
+        let pick_lock = &*pool.pick_lock;
+        let inflight_enabled = picker_cfg.inflight_tracking;
+
+        // The critical section: pick and state mutation.
+        let chosen_endpoint: String;
+        let pending: PendingObservation;
+        {
+            // Recover from poisoning: one panic would otherwise break every
+            // later pick on this pool. The mutex guards `()`, only ordering the
+            // section, and the state it touches is TTL-swept.
+            let _pick_guard = pick_lock.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!(
+                    req = %req.label,
+                    workerset = %pool.name,
+                    "pick_lock was poisoned by an earlier panic; continuing. The lock \
+                     guards ordering only, so this is recoverable — but a panic inside \
+                     the pick critical section is a bug worth chasing"
+                );
+                poisoned.into_inner()
+            });
+
+            let mut scores = scores;
+            let kv_blocks_per_worker: Vec<u32> = scores.iter().map(|s| s.matched_blocks).collect();
+            let expected_overlap_alpha = pool.predictor.expected_overlap_alpha;
+            let dispatches_per_worker: Vec<Vec<kinference_fleet::inflight::DispatchSnapshot>> =
+                scores
+                    .iter()
+                    .map(|s| pool.inflight_prefixes.dispatches_for(&s.endpoint))
+                    .collect();
+            let inflight_workload_per_worker: Vec<
+                Vec<kinference_fleet::inflight::InflightSummary>,
+            > = dispatches_per_worker
+                .iter()
+                .map(|d| d.iter().map(|s| s.summary()).collect())
+                .collect();
+            let per_worker_dispatch_overlap: Vec<Vec<f32>> = scores
+                .iter()
+                .zip(dispatches_per_worker.iter())
+                .map(|(s, dispatches)| {
+                    let query_set: std::collections::HashSet<u64> = score_side
+                        .hashes_by_block_size
+                        .get(&s.block_size)
+                        .map(|v| v.iter().copied().collect())
+                        .unwrap_or_default();
+                    dispatches
+                        .iter()
+                        .map(|d| d.remaining.intersection(&query_set).count() as f32)
+                        .collect()
+                })
+                .collect();
+            let inflight_per_worker: Vec<u32> = if inflight_enabled {
+                scores.iter().map(|s| inflight.get(&s.endpoint)).collect()
+            } else {
+                vec![0; scores.len()]
+            };
+
+            let score_now = Instant::now();
+            let per_worker_dispatch_progress: Vec<Vec<f32>> = dispatches_per_worker
+                .iter()
+                .map(|dispatches| {
+                    let capacity = predictor_cfg.inflight_concurrent_capacity;
+                    dispatches
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, d)| {
+                            let position = (idx as u32).saturating_add(1);
+                            if position > capacity {
+                                return 0.0;
+                            }
+                            let est = crate::router::picker::prefill_ms_for(
+                                predictor_cfg,
+                                d.uncached_at_dispatch,
+                                d.total_at_dispatch,
+                            );
+                            if est <= 0.0 {
+                                return 1.0;
+                            }
+                            let elapsed = score_now
+                                .checked_duration_since(d.dispatched_at)
+                                .map(|d| d.as_millis() as f32)
+                                .unwrap_or(0.0);
+                            (elapsed / est).clamp(0.0, 1.0)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            for (i, s) in scores.iter_mut().enumerate() {
+                let scaled = crate::router::picker::scale_per_dispatch_by_progress(
+                    &per_worker_dispatch_overlap[i],
+                    &per_worker_dispatch_progress[i],
+                );
+                let layered = crate::router::picker::compute_layered_overlap(
+                    &scaled,
+                    kv_blocks_per_worker[i] as f32,
+                    expected_overlap_alpha,
+                );
+                s.matched_blocks = layered.round() as u32;
+            }
+            let inputs = crate::router::picker::PickInputs {
+                scores: &scores,
+                predictor: predictor_cfg,
+                picker: picker_cfg,
+                inflight: &inflight_per_worker,
+                inflight_workload: &inflight_workload_per_worker,
+                kv_blocks: &kv_blocks_per_worker,
+                now: score_now,
+            };
+
+            // The policy already chose, in `select`.
+            let forced_pick = forced_endpoint.as_deref().and_then(|ep| {
+                let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
+                    crate::router::picker::PickResult {
+                        worker: w,
+                        replication_fired: false,
+                    }
+                });
+                if found.is_none() {
+                    // Should be unreachable, since the endpoint came from
+                    // this group's scores. Warn, since the decision counter
+                    // already recorded `chosen`.
+                    tracing::warn!(
+                        req = %req.label,
+                        model = %model,
+                        worker_set = %pool.name,
+                        endpoint = %ep,
+                        n_scored = scores.len(),
+                        "pick: policy chose an endpoint absent from the scored set; \
+                         falling back to the picker"
+                    );
+                    self.prom.record_policy_decision("forced_endpoint_missing");
+                }
+                found
+            });
+
+            let pick_result = match forced_pick {
+                Some(r) => r,
+                None => match crate::router::picker::pick_endpoint(&inputs) {
+                    Some(r) => r,
+                    None => {
+                        tracing::warn!(
+                            req = %req.label,
+                            model = %model,
+                            n_scored = scores.len(),
+                            "pick: picker returned None (defensive); reporting BadRequest"
+                        );
+                        return PickAndRecordOutcome::BadRequest {
+                            reason: "picker returned no eligible worker".to_string(),
+                            model: model.clone(),
+                        };
+                    }
+                },
+            };
+            let chosen = pick_result.worker;
+            let replication_fired = pick_result.replication_fired;
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    "pick: score table for req={}\n{}",
+                    req.label,
+                    crate::router::picker::format_score_table(
+                        &inputs,
+                        expected_overlap_alpha,
+                        Some(&chosen.endpoint),
+                    )
+                );
+            }
+            tracing::info!(
+                req = %req.label,
+                model = %model,
+                chosen_endpoint = %chosen.endpoint,
+                chosen_name = %chosen.name,
+                scored = scores.len(),
+                "pick"
+            );
+
+            let chosen_idx = scores
+                .iter()
+                .position(|s| s.endpoint == chosen.endpoint)
+                .expect("chosen worker must be in scores");
+            let chosen_inflight = inflight_per_worker[chosen_idx];
+            let chosen_kv_blocks = kv_blocks_per_worker[chosen_idx];
+            let chosen_workload: &[kinference_fleet::inflight::InflightSummary] =
+                &inflight_workload_per_worker[chosen_idx];
+            let chosen_q_breakdown = crate::router::picker::compute_queue_cost(
+                chosen,
+                predictor_cfg,
+                chosen_workload,
+                score_now,
+            );
+            let chosen_overlap_per_dispatch: Vec<u32> = per_worker_dispatch_overlap[chosen_idx]
+                .iter()
+                .map(|f| *f as u32)
+                .collect();
+            let prediction = crate::router::picker::predicted_wait_ms(
+                chosen,
+                predictor_cfg,
+                chosen_workload,
+                score_now,
+            );
+            // Prefix-cache outcome for the pick we actually made. Skipped when
+            // the pick was degraded: a tokenize failure would look like a
+            // genuine 0% cache hit, and a prefix-index failure can report
+            // matched blocks against a zero-length prompt. Those picks are
+            // already counted by `kinference_score_degraded_total{reason}`.
+            //
+            // `chosen.matched_blocks` is the layered value (it was overwritten
+            // above with radix match plus in-flight prefill credit), while
+            // `chosen_kv_blocks` is the raw tree match for the same pick.
+            if degraded.is_none() {
+                self.prom.record_prefix_match(
+                    &model,
+                    req.qos.as_label(),
+                    chosen.total_blocks,
+                    chosen.matched_blocks,
+                    chosen_kv_blocks,
+                );
+            }
+
+            let chosen_clone = chosen.clone();
+            pending = PendingObservation {
+                request_id: req.request_id,
+                workerset: pool.name.clone(),
+                profile: pool.profile.clone(),
+                inflight: crate::router::observations::InflightHandles::of(&pool),
+                picked_at: score_now,
+                chosen_worker: chosen_clone,
+                prediction,
+                q_inflight: chosen_inflight,
+                kv_blocks: chosen_kv_blocks,
+                inflight_workload_blocks: chosen_q_breakdown.inflight_workload_blocks,
+                q_ms_constant: chosen_q_breakdown.q_ms_constant,
+                q_ms_workload: chosen_q_breakdown.q_ms_workload,
+                inflight_overlap_blocks: chosen_overlap_per_dispatch,
+                expected_overlap_alpha,
+                predictor_cfg: predictor_cfg.clone(),
+                picker_cfg: picker_cfg.clone(),
+                external_request_id: req.client_request_id.map(|s| s.to_string()),
+                replication_fired,
+                model: model.clone(),
+                streaming,
+                qos: req.qos,
+                tenant: req.identity.tenant.clone(),
+            };
+            // For ReportFinalToken; the record above is consumed earlier, at
+            // ReportFirstToken.
+            self.observations.labels.insert(
+                req.request_id,
+                RequestMeta {
+                    model: model.clone(),
+                    qos: req.qos,
+                    tenant: req.identity.tenant.clone(),
+                    streaming,
+                    picked_at: score_now,
+                    // A local pick, so there is no provider to attribute
+                    // feedback to.
+                    provider: None,
+                },
+            );
+
+            if inflight_enabled {
+                inflight.inc(&chosen.endpoint);
+            }
+            let chosen_hashes_u64 = score_side
+                .hashes_by_block_size
+                .get(&chosen.block_size)
+                .cloned()
+                .unwrap_or_default();
+            let chosen_hashes_set: std::collections::HashSet<u64> =
+                chosen_hashes_u64.into_iter().collect();
+            let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
+            pool.inflight_prefixes.insert(
+                req.request_id,
+                chosen.endpoint.clone(),
+                chosen_hashes_set,
+                chosen_uncached,
+                chosen.total_blocks,
+            );
+
+            chosen_endpoint = chosen.endpoint.clone();
+        }
+
+        self.observations.pending.insert(pending);
+        // The bare name, as `backend.name` spells it; a CRD worker set's
+        // `pool.name` is `namespace/name`.
+        self.prom.record_routed(
+            &req.identity.tenant,
+            &pool.key.name,
+            kinference_policy::crd::BackendType::Local,
+        );
+
+        match degraded {
+            Some(reason) => PickAndRecordOutcome::Degraded {
+                endpoint: chosen_endpoint,
+                response_id: req.request_id,
+                reason,
+                body: body.into_bytes(),
+                model,
+            },
+            None => PickAndRecordOutcome::Ok {
+                endpoint: chosen_endpoint,
+                response_id: req.request_id,
+                body: body.into_bytes(),
+                model,
+            },
+        }
     }
 
     /// The named pool and the policy store, when both exist: only then does a

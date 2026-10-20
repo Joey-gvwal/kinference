@@ -15,7 +15,7 @@ pub(crate) struct Scoring {
     /// shared behind an `Arc`, so the set is swapped rather than edited.
     pub(crate) pools: Arc<kinference_fleet::pool::PoolRegistry>,
     /// Which pools serve each model, read on the pick hot path. Several pools
-    /// may serve one model; `pick_and_record` ranks across them.
+    /// may serve one model; the pick path ranks across them.
     pub(crate) models: Arc<ModelIndex>,
     /// The fleet's scrape samples and `/v1/models` answers.
     pub(crate) scrape: Arc<MetricsRegistry>,
