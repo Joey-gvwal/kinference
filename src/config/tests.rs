@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::router::metrics::TenantLabels;
 use kinference_fleet::profile::{PickerConfig, PredictorConfig, TokenizeMode};
+use kinference_router::metrics::TenantLabels;
 
 fn parse(v: Value) -> serde_json::Result<Config> {
     serde_json::from_value(v)

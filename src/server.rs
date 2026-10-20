@@ -14,9 +14,6 @@ use crate::controller::discovery::KubeDiscovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
-use crate::router::body_store::BodyLimits;
-use crate::router::grpc;
-use crate::router::service::{FleetHandles, KinferenceService, PolicyHandles, RouterConfig};
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
@@ -24,6 +21,9 @@ use kinference_fleet::metrics::FleetMetrics;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool;
 use kinference_fleet::scrape::MetricsRegistry;
+use kinference_router::body_store::BodyLimits;
+use kinference_router::grpc;
+use kinference_router::service::{FleetHandles, KinferenceService, PolicyHandles, RouterConfig};
 
 #[derive(Parser, Debug)]
 #[command(

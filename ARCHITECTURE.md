@@ -10,17 +10,20 @@ code goes. Change it in the same pull request as any move.
 
 ## Crates
 
-- `kinference`, this crate. The server. The router and the controller
-  live here as directories today.
+- `kinference`, this crate. The server. The controller lives here as a
+  directory today.
 - `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types, pure
   policy logic and the policy snapshot holder. No client and no runtime.
 - `kinference-fleet`, in `crates/kinference-fleet`. Which workers exist
   and what state they are in. Imports `kinference-policy` only; no `kube`,
   no `anyhow`.
+- `kinference-router`, in `crates/kinference-router`. The request path.
+  Imports `kinference-fleet` and `kinference-policy`; no `kube`, no
+  `axum`, no `anyhow`.
 - `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
   only.
 
-Target: the router and the controller become crates too. The server crate
+Target: the controller becomes a crate too. The server crate
 keeps wiring, config assembly, the admin listener and the metrics
 exposition. The plan is #32.
 
@@ -36,7 +39,7 @@ modules and holds nothing else beyond re-exports.
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
   collector behind the fleet gauges, the fleet's own metric families, and
   its error type.
-- Router, `src/router`. The request path. The service, scoring, the
+- Router, `crates/kinference-router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, the
   request-path metric families, and its error type.
 - Controller, `src/controller`. The Kubernetes control plane. The CRD
@@ -60,7 +63,7 @@ Imports point down, never up or sideways:
 ## Module map
 
 Rows name a module by its group; in code the fleet's are under
-`kinference_fleet::`.
+`kinference_fleet::` and the router's under `kinference_router::`.
 
 | Module | Owns |
 | --- | --- |
@@ -108,7 +111,7 @@ Rows name a module by its group; in code the fleet's are under
 - A new signal for scoring. Collect it in the fleet, in `scrape` or
   `ingest`. Store it in the registry. Read it in the router's scoring.
   The picker stays pure: it takes inputs that are already fetched.
-- A new RPC or proto field. `proto/kinference.proto`, then
+- A new RPC or proto field. `crates/kinference-router/proto/kinference.proto`, then
   `router::grpc` maps it to a service call. No logic in `grpc`.
 - A new metric. Add it to the metrics struct of the group where the
   event happens, through the helpers in `fleet::metrics`. Record it there.

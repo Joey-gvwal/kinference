@@ -34,9 +34,8 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
-COPY proto ./proto
 COPY src ./src
-# The other workspace members: the policy and fleet crates the server depends
+# The other workspace members: the policy, fleet and router crates the server depends
 # on, and `kinfctl`.
 COPY crates ./crates
 

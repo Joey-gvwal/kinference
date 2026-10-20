@@ -1,0 +1,61 @@
+[package]
+name = "kinference-router"
+description = "The request path: the service, scoring, the picker, the body store, the tokenizer, observations and gRPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kinference-policy.workspace = true
+kinference-fleet.workspace = true
+dynamo-kv-router.workspace = true
+tonic.workspace = true
+prost = "0.13"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+# `ReceiverStream`, the `Stream` shape the server-streaming `PullBody`
+# method requires.
+tokio-stream = "0.1"
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+dashmap.workspace = true
+prometheus.workspace = true
+# In-process tokenization. `http` enables `Tokenizer::from_pretrained`'s Hub
+# fetch; `onig` is the regex pre-tokenizer most models need. No default
+# features, which would pull python-binding scaffolding.
+tokenizers = { version = "0.23", default-features = false, features = ["http", "onig"] }
+# Chat templates from `tokenizer_config.json`. `loop_controls` for
+# `{% break %}` (Mistral, some Hermes templates); `json` for the `tojson`
+# filter (Llama 3.2 vision and others).
+minijinja = { version = "2.20", features = ["loop_controls", "json"] }
+# `pycompat` maps Python dict methods such as `.get(key, default)` that
+# Gemma 3/4 templates call.
+minijinja-contrib = { version = "2.20", features = ["pycompat"] }
+# `strftime_now`, which Llama 3.1+ templates call for the date line.
+chrono.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+# `PoolId::from_raw`, for tests that need a specific pool id.
+kinference-policy = { workspace = true, features = ["test-util"] }
+# `test_pool` and friends, for tests that need a pool or a scrape sample.
+kinference-fleet = { workspace = true, features = ["test-util"] }
+# `TcpListener` for the fake `/render` server.
+tokio = { workspace = true, features = ["net"] }
+# The fake `/render` server. tonic already pulls axum, so this adds nothing.
+axum.workspace = true
+# Scoped temp directories for tests that lay out a mounted tokenizer.
+tempfile.workspace = true
+
+[build-dependencies]
+tonic-build = "0.12"
+# Bundled `protoc`, so the build doesn't depend on a system protobuf
+# compiler or its version.
+protoc-bin-vendored = "3"
+
+[lints]
+workspace = true
