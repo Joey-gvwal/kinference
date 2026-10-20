@@ -642,18 +642,6 @@ async fn an_unscraped_worker_has_no_saturation_signals() {
     assert_eq!(endpoint, "10.0.0.1:8000");
 }
 
-/// Names a pick outcome for assertion messages; the enum has no `Debug`.
-fn outcome_name(o: &PickAndRecordOutcome) -> String {
-    match o {
-        PickAndRecordOutcome::Ok { .. } => "Ok".into(),
-        PickAndRecordOutcome::Degraded { reason, .. } => format!("Degraded({reason})"),
-        PickAndRecordOutcome::Provider { .. } => "Provider".into(),
-        PickAndRecordOutcome::NoWorkers { model } => format!("NoWorkers({model})"),
-        PickAndRecordOutcome::PolicyRejected { reason, .. } => format!("PolicyRejected({reason})"),
-        PickAndRecordOutcome::BadRequest { reason, .. } => format!("BadRequest({reason})"),
-    }
-}
-
 /// A service where `qwen` is served by worker set `qwen-ws` and by provider
 /// `cloud`, whose row names it `vendor/qwen`, after two picks for tenant
 /// `acme`: response 1 interactive, which is unmatched and stays local, and
@@ -689,16 +677,14 @@ async fn local_and_cloud_picks() -> (KinferenceService, prometheus::Registry) {
             local,
             PickAndRecordOutcome::Ok { .. } | PickAndRecordOutcome::Degraded { .. }
         ),
-        "{}",
-        outcome_name(&local)
+        "{local:?}"
     );
     let cloud = svc
         .pick_and_record(body, 2, None, Qos::Batch, Some(&pool), &tenant)
         .await;
     assert!(
         matches!(cloud, PickAndRecordOutcome::Provider { .. }),
-        "{}",
-        outcome_name(&cloud)
+        "{cloud:?}"
     );
     (svc, registry)
 }

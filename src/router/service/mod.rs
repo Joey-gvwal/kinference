@@ -704,6 +704,7 @@ pub(crate) enum TokenSource {
 /// the side effects (inflight increment, inflight-prefix insert,
 /// pending-observation stash) have been applied; the error outcomes write no
 /// state.
+#[derive(Debug)]
 pub(crate) enum PickAndRecordOutcome {
     /// Successful pick. The caller dispatches to `endpoint` and later reports
     /// the observed TTFT.
