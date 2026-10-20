@@ -735,13 +735,12 @@ fn a_tier_can_select_by_backend_class() {
 
 #[test]
 fn dropping_by_backend_type_keeps_a_request_in_the_cluster() {
-    // Drop providers for requests tagged with PII.
     let p = policy(json!({
         "rules": [{
-            "name": "pii",
+            "name": "local-only",
             "route": {
                 "exclude": [{
-                    "name": "pii-stays-local",
+                    "name": "stays-local",
                     "drop": { "backend": { "type": "Provider" } }
                 }],
                 "select": [{ "type": "Local", "minimize": "PredictedTTFT" }]
@@ -750,20 +749,20 @@ fn dropping_by_backend_type_keeps_a_request_in_the_cluster() {
     }));
     let out = evaluate(
         route_of(&p),
-        Some("pii"),
+        Some("local-only"),
         &req(),
         vec![cand("h100", "m", 900.0), prov("together", "m", Some(1.0))],
     );
     assert!(
         matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "h100"),
-        "a provider must not win a request whose PII rule dropped it: {out:?}"
+        "a provider must not win a request whose rule dropped it: {out:?}"
     );
 
     // And with only the provider standing, the request is refused rather than
     // leaving the cluster.
     let out = evaluate(
         route_of(&p),
-        Some("pii"),
+        Some("local-only"),
         &req(),
         vec![prov("together", "m", Some(1.0))],
     );

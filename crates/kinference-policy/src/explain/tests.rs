@@ -104,7 +104,7 @@ fn parity_with_a_direct_evaluate_call() {
     // policy-2: matches on model+qos, considers two models, minimizes TTFT.
     let p = policy(serde_json::json!({
         "rules": [{
-            "name": "simple-can-go-to-gemma-if-faster",
+            "name": "interactive-can-go-to-gemma-if-faster",
             "matches": [{ "model": "qwen-2.5", "qos": ["interactive"] }],
             "route": {
                 "consider": [{ "models": { "names": ["gemma-4", "qwen-2.5"] } }],
@@ -175,7 +175,7 @@ fn parity_with_a_direct_evaluate_call() {
 fn a_rule_that_does_not_match_names_the_failing_term() {
     let p = policy(serde_json::json!({
         "rules": [{
-            "name": "simple-goes-to-gemma",
+            "name": "batch-goes-to-gemma",
             "matches": [{ "model": "qwen-2.5", "qos": ["batch"] }],
             "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] }
         }]
