@@ -1,6 +1,6 @@
 //! `Recorded`: the API server over objects the test records up front.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{ApiServer, Object};
@@ -22,6 +22,7 @@ fn kind<K: Object>() -> String {
 pub enum Write {
     Create(Key),
     Replace(Key),
+    PatchStatus { key: Key, status: serde_json::Value },
 }
 
 /// Reads answer from the recording; writes change it and are kept in
@@ -34,6 +35,8 @@ pub struct Recorded(Arc<Mutex<Inner>>);
 #[derive(Default)]
 struct Inner {
     objects: BTreeMap<Key, serde_json::Value>,
+    /// Objects whose writes answer 500.
+    failing: HashSet<Key>,
     writes: Vec<Write>,
     version: u64,
 }
@@ -50,6 +53,15 @@ impl Recorded {
             }
         }
         self
+    }
+
+    /// Writes to this object answer 500 until `heal`.
+    pub fn failing<K: Object>(&self, namespace: &str, name: &str) {
+        self.lock().failing.insert(key::<K>(namespace, name));
+    }
+
+    pub fn heal(&self) {
+        self.lock().failing.clear();
     }
 
     pub fn writes(&self) -> Vec<Write> {
@@ -77,6 +89,13 @@ impl Inner {
         value["metadata"]["resourceVersion"] = serde_json::Value::String(self.version.to_string());
         self.objects.insert(key, value.clone());
         value
+    }
+
+    fn check_failing(&self, key: &Key) -> Result<(), kube::Error> {
+        if self.failing.contains(key) {
+            return Err(api_error(500, format!("{} is failing writes", key.2)));
+        }
+        Ok(())
     }
 }
 
@@ -122,6 +141,7 @@ impl ApiServer for Recorded {
         let name = object.meta().name.clone().unwrap_or_default();
         let key = key::<K>(namespace, &name);
         let mut inner = self.lock();
+        inner.check_failing(&key)?;
         if inner.objects.contains_key(&key) {
             return Err(api_error(409, format!("{} already exists", key.2)));
         }
@@ -139,6 +159,7 @@ impl ApiServer for Recorded {
     ) -> Result<K, kube::Error> {
         let key = key::<K>(namespace, name);
         let mut inner = self.lock();
+        inner.check_failing(&key)?;
         let Some(current) = inner.objects.get(&key) else {
             return Err(not_found(&key));
         };
@@ -156,5 +177,29 @@ impl ApiServer for Recorded {
         }
         inner.writes.push(Write::Replace(key.clone()));
         Ok(decode(inner.store(key, value)))
+    }
+
+    /// Replaces `status` wholesale, which is what a merge patch of a
+    /// complete status does.
+    async fn patch_status<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        status: &serde_json::Value,
+    ) -> Result<(), kube::Error> {
+        let key = key::<K>(namespace, name);
+        let mut inner = self.lock();
+        inner.check_failing(&key)?;
+        let Some(current) = inner.objects.get(&key) else {
+            return Err(not_found(&key));
+        };
+        let mut value = current.clone();
+        value["status"] = status.clone();
+        inner.writes.push(Write::PatchStatus {
+            key: key.clone(),
+            status: status.clone(),
+        });
+        inner.store(key, value);
+        Ok(())
     }
 }

@@ -385,6 +385,7 @@ pub async fn run() -> Result<()> {
         // A conforming gateway won't program a route until the pool reports
         // Accepted=True, so nothing routes until this runs.
         policy::status::spawn(
+            KubeApi::infer().await?,
             policy::status::StatusHandles {
                 store: store.clone(),
                 pools: pool_registry.clone(),
@@ -395,8 +396,7 @@ pub async fn run() -> Result<()> {
                 prom: controller_prom.clone(),
             },
             cancel.clone(),
-        )
-        .await?;
+        );
 
         // `BackendBinding`s let a gateway resolve a route naming an
         // `InferencePool`. Leader-gated like status.

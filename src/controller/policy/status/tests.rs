@@ -1,4 +1,5 @@
 use super::*;
+use crate::controller::api::recorded::{Key, Recorded, Write, key};
 use kinference_policy::compile::CompiledPolicy;
 use kinference_policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
 use kinference_policy::resolve::{Unresolved, UnresolvedReason};
@@ -600,18 +601,29 @@ fn last_transition_time_moves_when_the_condition_flips() {
     );
 }
 
-/// A `StatusWriter` whose client is never used. Needs a runtime, since
-/// `kube::Client::try_from` spawns a tower buffer worker.
-fn writer_with_leader(leader: bool) -> (StatusWriter, watch::Sender<bool>) {
+/// A `StatusWriter` over an empty recording.
+fn writer_with_leader(leader: bool) -> (StatusWriter<Recorded>, watch::Sender<bool>) {
     writer_with_leader_and_registry(leader).0
 }
 
 /// As [`writer_with_leader`], plus the registry its metrics render through.
 fn writer_with_leader_and_registry(
     leader: bool,
-) -> ((StatusWriter, watch::Sender<bool>), prometheus::Registry) {
-    let cfg = kube::Config::new("http://127.0.0.1:1".parse().unwrap());
-    let client = kube::Client::try_from(cfg).expect("dummy client");
+) -> (
+    (StatusWriter<Recorded>, watch::Sender<bool>),
+    prometheus::Registry,
+) {
+    writer_over(Recorded::default(), leader)
+}
+
+/// A leader-gated `StatusWriter` over `api`, reading an empty fleet.
+fn writer_over(
+    api: Recorded,
+    leader: bool,
+) -> (
+    (StatusWriter<Recorded>, watch::Sender<bool>),
+    prometheus::Registry,
+) {
     let (tx, rx) = watch::channel(leader);
     let registry = prometheus::Registry::new();
     let handles = StatusHandles {
@@ -625,8 +637,170 @@ fn writer_with_leader_and_registry(
             &registry,
         )),
     };
-    let w = StatusWriter::new(client, handles);
+    let w = StatusWriter::new(api, handles);
     ((w, tx), registry)
+}
+
+// --- the reconcile loop, over a recorded API server ---------------------
+
+fn cr_meta(name: &str) -> kube::api::ObjectMeta {
+    kube::api::ObjectMeta {
+        name: Some(name.into()),
+        namespace: Some("infra".into()),
+        uid: Some(format!("uid-{name}")),
+        ..Default::default()
+    }
+}
+
+/// One of each kind the writer patches: a pool naming a worker set, a
+/// provider and a policy.
+fn recorded_cluster() -> (Recorded, Arc<kinference_policy::resolve::PolicyIndex>) {
+    use kinference_policy::crd::{
+        BackendObjectRef, Destination, InferencePoolSpec, InferenceProviderSpec,
+        InferenceWorkerSetSpec, PolicyRef, ServiceRef,
+    };
+    let pool = InferencePool {
+        metadata: cr_meta("chat"),
+        spec: InferencePoolSpec {
+            destinations: vec![
+                Destination {
+                    kind: Some("InferenceWorkerSet".into()),
+                    name: Some("workers-h100".into()),
+                    ..Default::default()
+                },
+                Destination {
+                    kind: Some("InferenceProvider".into()),
+                    name: Some("openai".into()),
+                    ..Default::default()
+                },
+            ],
+            policy_ref: Some(PolicyRef {
+                group: None,
+                kind: None,
+                name: "chat-policy".into(),
+            }),
+        },
+        status: None,
+    };
+    let set = InferenceWorkerSet {
+        metadata: cr_meta("workers-h100"),
+        spec: InferenceWorkerSetSpec {
+            service_ref: ServiceRef {
+                name: "vllm-h100".into(),
+                port: None,
+            },
+            profile: Some("h100".into()),
+            kv_block_size: Some(16),
+            ..Default::default()
+        },
+        status: None,
+    };
+    let provider = InferenceProvider {
+        metadata: cr_meta("openai"),
+        spec: InferenceProviderSpec {
+            backend_ref: Some(BackendObjectRef {
+                name: Some("openai-backend".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        status: None,
+    };
+    let policy = InferencePolicy {
+        metadata: cr_meta("chat-policy"),
+        spec: Default::default(),
+        status: None,
+    };
+    let index = kinference_policy::resolve::resolve(
+        &[Arc::new(pool.clone())],
+        &[Arc::new(policy.clone())],
+        &[Arc::new(set.clone())],
+        &[Arc::new(provider.clone())],
+        &[],
+        &[],
+        &Default::default(),
+        &Default::default(),
+    );
+    let api = Recorded::default()
+        .with([pool])
+        .with([set])
+        .with([provider])
+        .with([policy]);
+    (api, Arc::new(index))
+}
+
+fn patched_keys(api: &Recorded) -> Vec<Key> {
+    api.writes()
+        .into_iter()
+        .map(|w| match w {
+            Write::PatchStatus { key, .. } => key,
+            other => panic!("the status writer only patches status, got {other:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_listed_snapshot_patches_every_object_it_describes() {
+    let (api, index) = recorded_cluster();
+    let ((w, _tx), _) = writer_over(api.clone(), true);
+    w.store.publish(index);
+
+    w.reconcile_once().await.unwrap();
+
+    assert_eq!(
+        patched_keys(&api),
+        vec![
+            key::<InferencePool>("infra", "chat"),
+            key::<InferenceProvider>("infra", "openai"),
+            key::<InferenceWorkerSet>("infra", "workers-h100"),
+            key::<InferencePolicy>("infra", "chat-policy"),
+        ]
+    );
+    let pool: InferencePool = api.object("infra", "chat").unwrap();
+    assert!(
+        pool.status.is_some(),
+        "the recording holds what was patched"
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_snapshot_issues_no_second_patch() {
+    let (api, index) = recorded_cluster();
+    let ((w, _tx), _) = writer_over(api.clone(), true);
+    w.store.publish(index);
+
+    w.reconcile_once().await.unwrap();
+    let first = api.writes();
+    w.reconcile_once().await.unwrap();
+    assert_eq!(
+        api.writes(),
+        first,
+        "nothing changed, so nothing is written"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_patch_is_retried_on_the_next_tick() {
+    let (api, index) = recorded_cluster();
+    let ((w, _tx), _) = writer_over(api.clone(), true);
+    w.store.publish(index);
+    api.failing::<InferencePool>("infra", "chat");
+
+    w.reconcile_once().await.unwrap();
+    assert_eq!(
+        patched_keys(&api).len(),
+        3,
+        "the failed patch is not written and not cached"
+    );
+
+    api.heal();
+    w.reconcile_once().await.unwrap();
+    assert_eq!(
+        patched_keys(&api).last(),
+        Some(&key::<InferencePool>("infra", "chat")),
+        "only the failed one is retried"
+    );
+    assert_eq!(patched_keys(&api).len(), 4);
 }
 
 fn render(registry: &prometheus::Registry) -> String {

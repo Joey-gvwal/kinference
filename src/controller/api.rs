@@ -5,7 +5,7 @@ use std::future::Future;
 
 use anyhow::Context as _;
 use kube::Api;
-use kube::api::PostParams;
+use kube::api::{Patch, PatchParams, PostParams};
 use kube::core::NamespaceResourceScope;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -57,6 +57,14 @@ pub trait ApiServer: Clone + Send + Sync + 'static {
         name: &str,
         object: &K,
     ) -> impl Future<Output = Result<K, kube::Error>> + Send;
+
+    /// Merge-patch `{"status": status}` on the status subresource.
+    fn patch_status<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        status: &serde_json::Value,
+    ) -> impl Future<Output = Result<(), kube::Error>> + Send;
 }
 
 /// The API server over a `kube::Client`.
@@ -105,6 +113,19 @@ impl ApiServer for KubeApi {
         self.namespaced::<K>(namespace)
             .replace(name, &PostParams::default(), object)
             .await
+    }
+
+    async fn patch_status<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        status: &serde_json::Value,
+    ) -> Result<(), kube::Error> {
+        let patch = serde_json::json!({ "status": status });
+        self.namespaced::<K>(namespace)
+            .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        Ok(())
     }
 }
 

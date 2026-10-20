@@ -28,11 +28,10 @@ use kinference_policy::provider_health::{FailureKind, ProviderHealth};
 use kinference_policy::resolve::{
     DanglingPolicy, ResolvedPolicy, ResolvedPool, ResolvedWorkerSet, UnresolvedReason,
 };
-use kube::Api;
-use kube::api::{Patch, PatchParams};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::controller::api::{ApiServer, Object};
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_policy::store::PolicyStore;
@@ -864,8 +863,8 @@ pub struct StatusHandles {
 }
 
 /// Patches status onto the CRDs, on a tick, only when something changed.
-pub struct StatusWriter {
-    client: kube::Client,
+pub struct StatusWriter<A: ApiServer> {
+    api: A,
     store: Arc<PolicyStore>,
     pools: Arc<kinference_fleet::pool::PoolRegistry>,
     rejections: Arc<super::worker_sets::RejectionStore>,
@@ -881,8 +880,8 @@ pub struct StatusWriter {
     warned: Mutex<HashSet<String>>,
 }
 
-impl StatusWriter {
-    pub fn new(client: kube::Client, handles: StatusHandles) -> Self {
+impl<A: ApiServer> StatusWriter<A> {
+    pub fn new(api: A, handles: StatusHandles) -> Self {
         let StatusHandles {
             store,
             pools,
@@ -892,8 +891,10 @@ impl StatusWriter {
             leader,
             prom,
         } = handles;
+        // Seed the gauge so a follower reports 0 before its first transition.
+        prom.set_leader(*leader.borrow());
         Self {
-            client,
+            api,
             store,
             pools,
             rejections,
@@ -1169,20 +1170,14 @@ impl StatusWriter {
 
     /// Patch `status` if it differs from what we last wrote. See the module
     /// docs for why this comparison matters.
-    async fn patch<K>(
+    async fn patch<K: Object>(
         &self,
         kind: &'static str,
         ns: &str,
         name: &str,
         uid: Option<&str>,
         desired: &impl serde::Serialize,
-    ) where
-        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
-            + serde::de::DeserializeOwned
-            + Clone
-            + std::fmt::Debug,
-        K::DynamicType: Default,
-    {
+    ) {
         let Ok(value) = serde_json::to_value(desired) else {
             return;
         };
@@ -1193,12 +1188,7 @@ impl StatusWriter {
                 return;
             }
         }
-        let api: Api<K> = Api::namespaced(self.client.clone(), ns);
-        let patch = serde_json::json!({ "status": value });
-        match api
-            .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await
-        {
+        match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
                 tracing::debug!(kind, ns, name, "policy status: patched");
                 self.last
@@ -1214,19 +1204,13 @@ impl StatusWriter {
     }
 }
 
-/// Build the writer with its own client and spawn it.
+/// Build the writer over `api` and spawn it.
 ///
 /// `handles.leader` gates writing; with election disabled, pass a channel
 /// set to `true`.
-pub async fn spawn(handles: StatusHandles, cancel: CancellationToken) -> anyhow::Result<()> {
-    // Honors kubeconfig, like `PolicyWatcher`.
-    let cfg = kube::Config::infer().await?;
-    let client = kube::Client::try_from(cfg)?;
-    // Seed the gauge so a follower reports 0 before its first transition.
-    handles.prom.set_leader(*handles.leader.borrow());
-    let writer = StatusWriter::new(client, handles);
+pub fn spawn<A: ApiServer>(api: A, handles: StatusHandles, cancel: CancellationToken) {
+    let writer = StatusWriter::new(api, handles);
     tokio::spawn(async move { writer.run(cancel).await });
-    Ok(())
 }
 
 #[cfg(test)]
