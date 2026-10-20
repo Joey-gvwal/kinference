@@ -236,18 +236,7 @@ impl KinferenceService {
             req_id,
             ..
         } = req;
-        let local_reg = match self.local_tokenizer.as_ref() {
-            Some(r) => r,
-            None => {
-                // The registry failed to build at startup.
-                tracing::error!(
-                    "tokenize_mode = Local but local_tokenizer registry is None; \
-                     falling through to HTTP /render. This is a wiring bug — check main.rs."
-                );
-                return self.render_via_http(req).await;
-            }
-        };
-
+        let local_reg = &self.local_tokenizer;
         let chat_kwargs = match input {
             TokenizeInput::Chat { kwargs, .. } => kwargs.clone(),
             TokenizeInput::Raw(_) => std::collections::HashMap::new(),
@@ -296,12 +285,10 @@ impl KinferenceService {
     /// compared against it, for the divergence counters.
     async fn tokenize_via_http_with_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let outcome = self.render_via_http(req).await;
-        if let (Some(local_reg), TokenizeOutcome::Ok(http_tokens)) =
-            (self.local_tokenizer.as_ref(), &outcome)
-        {
+        if let TokenizeOutcome::Ok(http_tokens) = &outcome {
             // In the background, so local template rendering doesn't add to
             // pick latency.
-            let local_reg = local_reg.clone();
+            let local_reg = self.local_tokenizer.clone();
             let prom = self.prom.clone();
             let model_owned = req.model.to_string();
             let input_owned = req.input.clone();

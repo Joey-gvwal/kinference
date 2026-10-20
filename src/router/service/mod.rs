@@ -325,9 +325,7 @@ pub struct KinferenceService {
     /// The tokenization mode and render URL are per pool.
     pub(crate) tokenize_client: Arc<reqwest::Client>,
     /// In-process tokenizer registry, keyed by model and shared across pools.
-    /// `None` when it couldn't be built at startup; `local`/`compare` pools
-    /// then fall back to `/render`.
-    pub(crate) local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
+    pub(crate) local_tokenizer: Arc<crate::router::local_tokenize::LocalTokenizerRegistry>,
     /// Warn-once latch for local tokenization falling back to `/render`, per
     /// `(model_name, error_shape)`, since some models fail locally on every
     /// request.
@@ -367,7 +365,7 @@ impl KinferenceService {
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
         tokenize_client: Arc<reqwest::Client>,
-        local_tokenizer: Option<Arc<crate::router::local_tokenize::LocalTokenizerRegistry>>,
+        local_tokenizer: Arc<crate::router::local_tokenize::LocalTokenizerRegistry>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::router::body_store::BodyStore>,
