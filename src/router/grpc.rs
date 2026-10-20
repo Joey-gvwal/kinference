@@ -23,7 +23,7 @@ use crate::router::observations::{FinalTokenReport, Qos};
 use crate::router::service::{KinferenceService, PickAndRecordOutcome};
 
 use crate::router::proto;
-use crate::router::proto::picker_server::Picker;
+use crate::router::proto::picker_server::{Picker, PickerServer};
 use crate::router::proto::{
     AbortRequest, AbortResponse, BodyChunk, PickRequest, PickResponse, PullBodyRequest,
     PushBodyResponse, ReportFinalTokenRequest, ReportFinalTokenResponse, ReportFirstTokenRequest,
@@ -43,6 +43,15 @@ const PULL_CHUNK_BYTES: usize = 64 * 1024;
 /// Outbound chunk queue depth. Bounded, so a slow caller applies
 /// backpressure.
 const PULL_CHANNEL_DEPTH: usize = 4;
+
+/// The tonic service over `service`. The decoding limit is the per-request
+/// body budget plus 1 MiB of framing, above tonic's 4 MiB default, so a body
+/// sent as one chunk hits our own `RESOURCE_EXHAUSTED` rather than an opaque
+/// transport error. Callers should still chunk.
+pub fn server(service: Arc<KinferenceService>) -> PickerServer<KinferenceService> {
+    let limit = service.bodies.store.max_request_bytes() + 1024 * 1024;
+    PickerServer::from_arc(service).max_decoding_message_size(limit as usize)
+}
 
 #[tonic::async_trait]
 impl Picker for KinferenceService {

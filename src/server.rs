@@ -15,9 +15,9 @@ use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::router::body_store;
+use crate::router::grpc;
 use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
-use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::{KinferenceService, Scoring};
 use crate::router::tokenizer;
 use crate::{admin, metrics, version};
@@ -494,13 +494,7 @@ pub async fn run() -> Result<()> {
     }
 
     let server_result = Server::builder()
-        .add_service(
-            PickerServer::from_arc(service)
-                // Above tonic's 4 MiB default, so a body sent as one chunk
-                // hits our own budget (RESOURCE_EXHAUSTED) rather than an
-                // opaque transport error. Callers should still chunk.
-                .max_decoding_message_size((body_max_request_bytes + 1024 * 1024) as usize),
-        )
+        .add_service(grpc::server(service))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
 

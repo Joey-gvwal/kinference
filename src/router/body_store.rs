@@ -108,6 +108,11 @@ impl BodyStore {
         }
     }
 
+    /// The per-request budget, for the gRPC decoding limit.
+    pub fn max_request_bytes(&self) -> u64 {
+        self.max_request_bytes
+    }
+
     /// `(entries, bytes_in_use)`, for `/metrics` gauges and tests.
     pub fn stats(&self) -> (usize, u64) {
         (
