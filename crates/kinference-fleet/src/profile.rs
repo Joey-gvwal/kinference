@@ -300,8 +300,8 @@ fn default_expected_overlap_alpha() -> f32 {
 /// same preprocessing (tools, multimodal, reasoning prefixes) as inference.
 ///
 /// Recommended rollout: start with `Render`, switch to `Compare` and watch
-/// `tokenize_divergence_total` until it stays at zero on real traffic, then
-/// switch to `Local`.
+/// `kinference_tokenize_compare_total{result="divergence"}` until it stays
+/// at zero on real traffic, then switch to `Local`.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TokenizeMode {
