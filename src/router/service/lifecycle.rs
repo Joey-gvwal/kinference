@@ -3,9 +3,8 @@
 //!
 //! `pick_and_record` is long because it is one transaction over a JSON body
 //! that is rewritten and then drained, plus a critical section under the
-//! pool's `pick_lock`. `finalize_observation` and `abort_observation` release
-//! what it reserved, and the sweeps are the backstop for callers that never
-//! report.
+//! pool's `pick_lock`. What it reserves is released by the `Observations`
+//! part, or by `abort_request` when the caller gives up.
 
 use std::time::Instant;
 
@@ -79,7 +78,10 @@ impl KinferenceService {
         let mut force_model: Option<String> = None;
         if model == AUTO_MODEL {
             let messages = obj.get("messages").and_then(|v| v.as_array());
-            match self.choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[])) {
+            match self
+                .scoring
+                .choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[]))
+            {
                 Some(chosen) => {
                     tracing::info!(
                         req = %req_label,
@@ -101,7 +103,7 @@ impl KinferenceService {
 
         // 1b. Resolve the pools serving this model; several are scored and
         //     ranked against each other.
-        let mut serving = self.resolve_pools(&model);
+        let mut serving = self.scoring.resolve_pools(&model);
 
         // 1b-i. Alias fallback. The model index only holds names engines
         //     report, so translate a declared alias via the named pool's worker
@@ -122,7 +124,7 @@ impl KinferenceService {
             // Drives the body rewrite in step 1c, as for `auto`.
             force_model = Some(upstream.clone());
             model = upstream;
-            serving = self.resolve_pools(&model);
+            serving = self.scoring.resolve_pools(&model);
         }
 
         // A model no local pool serves may still be served by a provider in
@@ -152,7 +154,7 @@ impl KinferenceService {
         let mutated =
             crate::router::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
         // Whether the first-byte report will be a real TTFT, for
-        // `finalize_observation`. Uses the same coercion as the body rewrite;
+        // `Observations::finalize`. Uses the same coercion as the body rewrite;
         // see [`crate::router::pick_body::stream_flag`].
         let streaming = crate::router::pick_body::stream_flag(&obj);
         // For `maxTokens` predicates and context-window fitting.
@@ -212,7 +214,9 @@ impl KinferenceService {
         // Skipped when nothing local serves the model.
         if let Some(first) = serving.first() {
             let (outcome, score_side) = self
+                .scoring
                 .score_workers(
+                    &*self.tokenizer,
                     first,
                     &model,
                     Input::Messages(messages),
@@ -267,7 +271,9 @@ impl KinferenceService {
                     None => (Input::Messages(msgs), Some(raw)),
                 };
                 let (outcome, side) = self
+                    .scoring
                     .score_workers(
+                        &*self.tokenizer,
                         pool,
                         &model,
                         input,
@@ -390,7 +396,14 @@ impl KinferenceService {
                         to_model = %pick.upstream_model,
                         "policy: routing off-cluster"
                     );
-                    self.record_provider_pick(request_id, &pick, qos, &identity.tenant, streaming);
+                    self.observations.record_provider_pick(
+                        request_id,
+                        &pick.provider,
+                        &pick.upstream_model,
+                        qos,
+                        &identity.tenant,
+                        streaming,
+                    );
                     self.prom.record_routed(
                         &identity.tenant,
                         &pick.provider.name,
@@ -733,7 +746,7 @@ impl KinferenceService {
             };
             // For ReportFinalToken; the record above is consumed earlier, at
             // ReportFirstToken.
-            self.request_labels.insert(
+            self.observations.labels.insert(
                 request_id,
                 RequestMeta {
                     model: model.clone(),
@@ -769,7 +782,7 @@ impl KinferenceService {
             chosen_endpoint = chosen.endpoint.clone();
         }
 
-        self.pending_observations.insert(pending);
+        self.observations.pending.insert(pending);
         // The bare name, as `backend.name` spells it; a CRD worker set's
         // `pool.name` is `namespace/name`.
         self.prom.record_routed(
@@ -795,106 +808,6 @@ impl KinferenceService {
         }
     }
 
-    /// Release the inflight counter and inflight-prefix entry a pick reserved
-    /// for `record`. The inflight counter has no sweep of its own, so every
-    /// terminal path for a pick (`finalize_observation`, `abort_observation`,
-    /// `sweep_expired_observations`) must come through here.
-    ///
-    /// The pool handles ride on the record, so a pool torn down mid-request
-    /// stays alive until its pending observations are released.
-    fn release_inflight_state(&self, record: &PendingObservation) {
-        // Pick-time config, from the record.
-        if record.picker_cfg.inflight_tracking {
-            record.inflight.inflight.dec(&record.chosen_worker.endpoint);
-        }
-        record.inflight.prefixes.forget(record.request_id);
-    }
-
-    /// Close an observation: release the pick's inflight state and, for a
-    /// streaming request, write the CSV row. Called from `ReportFirstToken()`
-    /// with the caller's observed TTFT.
-    ///
-    /// Returns `false`, changing nothing, when `request_id` is unknown (swept,
-    /// never inserted, or already consumed).
-    pub(crate) fn finalize_observation(
-        &self,
-        request_id: u64,
-        observed_ttft_ms: u32,
-        upstream_status: i32,
-    ) -> bool {
-        let Some(record) = self.pending_observations.take(request_id) else {
-            return false;
-        };
-        // Always release in-flight bookkeeping, streaming or not.
-        self.release_inflight_state(&record);
-
-        let req_label_owned = record
-            .external_request_id
-            .clone()
-            .unwrap_or_else(|| record.request_id.to_string());
-
-        // For non-streaming responses `observed_ttft_ms` is the full response
-        // time, not TTFT, so skip the CSV row and residual log.
-        if !record.streaming {
-            tracing::debug!(
-                req = %req_label_owned,
-                endpoint = %record.chosen_worker.endpoint,
-                status = upstream_status,
-                "observation skipped: non-streaming response (reported time is total latency, not TTFT)"
-            );
-            return true;
-        }
-
-        // Streaming: a real TTFT.
-        self.prom.record_ttft(
-            &record.model,
-            record.qos.as_label(),
-            &record.tenant,
-            observed_ttft_ms,
-        );
-
-        let predicted_ms = record.prediction.total_ms();
-        let residual_ms = observed_ttft_ms as f32 - predicted_ms;
-        tracing::debug!(
-            req = %req_label_owned,
-            endpoint = %record.chosen_worker.endpoint,
-            predicted_ms = format!("{predicted_ms:.1}"),
-            observed_ms = observed_ttft_ms,
-            residual_ms = format!("{residual_ms:+.1}"),
-            status = upstream_status,
-            "observation"
-        );
-
-        self.observation_sink.append_line(&format_csv_row(
-            &record,
-            observed_ttft_ms,
-            residual_ms,
-            upstream_status,
-        ));
-        true
-    }
-
-    /// Drop a `PendingObservation` without writing a CSV row.
-    ///
-    /// For a request that died before its first token: release the inflight
-    /// state, but write no row. Returns `true` if a record was found.
-    pub(crate) fn abort_observation(&self, request_id: u64) -> bool {
-        let Some(record) = self.pending_observations.take(request_id) else {
-            return false;
-        };
-        self.release_inflight_state(&record);
-        let req_label_owned = record
-            .external_request_id
-            .clone()
-            .unwrap_or_else(|| record.request_id.to_string());
-        tracing::debug!(
-            req = %req_label_owned,
-            endpoint = %record.chosen_worker.endpoint,
-            "abort_observation: cleared inflight/inflight-prefix state without CSV emit"
-        );
-        true
-    }
-
     /// Release everything held for `response_id` because the request will never
     /// complete. Backs the `Abort` RPC.
     ///
@@ -905,28 +818,9 @@ impl KinferenceService {
     /// Releases the inflight dispatch for both abort reasons, since after
     /// `PULL_FAILED` no `ReportFirstToken` is coming either.
     pub(crate) fn abort_request(&self, response_id: u64) -> (bool, u64) {
-        let (body_released, bytes) = self.body_store.abort(response_id);
-        let obs_released = self.abort_observation(response_id);
-        self.request_labels.take(response_id);
+        let (body_released, bytes) = self.bodies.store.abort(response_id);
+        let obs_released = self.observations.abort(response_id);
+        self.observations.labels.take(response_id);
         (body_released || obs_released, bytes)
-    }
-
-    /// Reclaim buffered bodies past their TTL, which is much shorter than the
-    /// observation TTL. Returns `(entries, bytes)` freed.
-    pub(crate) fn sweep_expired_bodies(&self) -> (usize, u64) {
-        self.body_store.take_expired()
-    }
-
-    /// Evict pending observations past the TTL, releasing each one's inflight
-    /// state as `abort_observation` would. The backstop for callers that never
-    /// report. Returns the number evicted.
-    pub(crate) fn sweep_expired_observations(&self) -> usize {
-        let evicted = self.pending_observations.take_expired();
-        for record in &evicted {
-            self.release_inflight_state(record);
-        }
-        // Request labels whose ReportFinalToken never arrived.
-        self.request_labels.take_expired();
-        evicted.len()
     }
 }

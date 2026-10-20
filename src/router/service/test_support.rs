@@ -219,21 +219,24 @@ impl ServiceBuilder {
 
         let ttl = Duration::from_secs(30);
         let svc = KinferenceService::new(
-            pool_registry,
-            models,
-            scrape,
+            Scoring::new(pool_registry, models, scrape),
             tokenizer,
-            Arc::new(PendingObservations::new(ttl)),
-            Arc::new(RequestLabels::new(ttl)),
-            Arc::new(crate::router::body_store::BodyStore::new(
-                1 << 20,
-                1 << 20,
+            crate::router::body_store::Bodies::new(
+                Arc::new(crate::router::body_store::BodyStore::new(
+                    1 << 20,
+                    1 << 20,
+                    ttl,
+                )),
                 ttl,
-            )),
+                prom.clone(),
+            ),
+            crate::router::observations::Observations::new(
+                ttl,
+                crate::router::observations::ObservationSink::open(None),
+                Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
+                prom.clone(),
+            ),
             store.clone(),
-            Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
-            ttl,
-            Arc::new(ObservationSink::open(None)),
             prom,
         );
         TestService {

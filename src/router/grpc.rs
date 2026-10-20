@@ -2,7 +2,7 @@
 //!
 //! Implements the `Picker` gRPC service (`PushBody`, `Pick`, `PullBody`,
 //! `ReportFirstToken`, `ReportFinalToken`, `Abort`) by marshaling to and from
-//! `crate::router::service` and `crate::router::body_store`.
+//! the service and its parts.
 //!
 //! Error model, per the proto:
 //! - `Pick` never fails with a `Status` for a routing outcome; `NO_WORKERS`,
@@ -12,14 +12,15 @@
 //!   report failures as gRPC status codes.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::router::metrics::PickOutcome;
-use crate::router::service::{KinferenceService, PickAndRecordOutcome, Qos};
+use crate::router::observations::{FinalTokenReport, Qos};
+use crate::router::service::{KinferenceService, PickAndRecordOutcome};
 
 use crate::router::proto;
 use crate::router::proto::picker_server::Picker;
@@ -36,105 +37,6 @@ const MD_CLIENT_REQUEST_ID: &str = "kinference-client-request-id";
 /// it allows early rejection of an over-budget body, and is the only way to
 /// catch a body truncated by an early half-close.
 pub(crate) const MD_DECLARED_LENGTH: &str = "kinference-declared-length";
-
-/// Why a `PushBody` drain stopped short.
-#[derive(Debug)]
-pub(crate) enum PushFailure {
-    /// No chunk arrived within the inter-chunk budget.
-    Idle(Duration),
-    /// A byte budget was exceeded; carries the metric label.
-    Budget(Status, crate::router::body_store::RejectReason),
-    /// The stream reset before half-close, so the body is incomplete.
-    Transport(Status),
-    /// The caller sent `kinference-declared-length` and delivered a different
-    /// number of bytes, e.g. a body truncated by an early half-close.
-    LengthMismatch { declared: u64, received: u64 },
-}
-
-impl PushFailure {
-    pub(crate) fn reject_reason(&self) -> Option<crate::router::body_store::RejectReason> {
-        match self {
-            PushFailure::Budget(_, reason) => Some(*reason),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn into_status(self) -> Status {
-        match self {
-            PushFailure::Idle(idle) => Status::deadline_exceeded(format!(
-                "no body chunk received within {}s",
-                idle.as_secs()
-            )),
-            PushFailure::Budget(status, _) | PushFailure::Transport(status) => status,
-            PushFailure::LengthMismatch { declared, received } => {
-                Status::invalid_argument(format!(
-                    "body length {received} does not match the declared \
-                     kinference-declared-length of {declared}"
-                ))
-            }
-        }
-    }
-}
-
-/// Drain a client-streaming body into one buffer, enforcing the idle budget and
-/// the byte budgets as chunks arrive.
-///
-/// Generic over the stream so it is testable without a gRPC transport.
-///
-/// The timeout applies per chunk, not to the call, since a push spans the
-/// client's upload. Stream end is a clean half-close: the body is complete. An
-/// `Err` item is a reset stream, and the bytes are discarded.
-///
-/// `declared`, the caller's `kinference-declared-length`, is enforced: a
-/// mismatch either way is rejected.
-pub(crate) async fn accumulate_body<S>(
-    stream: &mut S,
-    reservation: &mut crate::router::body_store::Reservation,
-    idle: Duration,
-    declared: Option<u64>,
-) -> Result<Vec<u8>, PushFailure>
-where
-    S: futures::Stream<Item = Result<BodyChunk, Status>> + Unpin,
-{
-    use futures::StreamExt;
-    // `declared` is only an allocation hint here, clamped.
-    let mut buf: Vec<u8> = Vec::with_capacity(declared.unwrap_or(0).min(1024 * 1024) as usize);
-    loop {
-        match tokio::time::timeout(idle, stream.next()).await {
-            Err(_) => return Err(PushFailure::Idle(idle)),
-            Ok(None) => {
-                // Clean half-close. If a length was declared, this is where a
-                // truncated body is caught.
-                if let Some(declared) = declared
-                    && buf.len() as u64 != declared
-                {
-                    return Err(PushFailure::LengthMismatch {
-                        declared,
-                        received: buf.len() as u64,
-                    });
-                }
-                return Ok(buf);
-            }
-            Ok(Some(Ok(chunk))) => {
-                if let Err((status, reason)) = reservation.charge(chunk.chunk.len() as u64) {
-                    return Err(PushFailure::Budget(status, reason));
-                }
-                buf.extend_from_slice(&chunk.chunk);
-                // Fail fast on an over-long body rather than buffering past
-                // what the caller said it would send.
-                if let Some(declared) = declared
-                    && buf.len() as u64 > declared
-                {
-                    return Err(PushFailure::LengthMismatch {
-                        declared,
-                        received: buf.len() as u64,
-                    });
-                }
-            }
-            Ok(Some(Err(e))) => return Err(PushFailure::Transport(e)),
-        }
-    }
-}
 
 /// Chunk size for `PullBody`, well under gRPC message limits.
 const PULL_CHUNK_BYTES: usize = 64 * 1024;
@@ -169,57 +71,11 @@ impl Picker for KinferenceService {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
 
-        let req_label = client_request_id.clone().unwrap_or_else(|| "-".to_string());
-
-        // Refuse an over-budget body on its declared length alone, before
-        // reading a single chunk.
-        if let Some(declared) = declared_length
-            && let Err((status, reason)) = self.body_store.check_declared_length(declared)
-        {
-            self.prom.record_body_rejected(reason.as_label());
-            tracing::warn!(
-                req = %req_label,
-                declared,
-                "push_body: refused on declared length"
-            );
-            return Err(status);
-        }
-
         let mut inbound = request.into_inner();
-        let mut reservation = self
-            .body_store
-            .reservation()
-            .with_client_request_id(client_request_id);
-        let idle = self.body_idle_timeout();
-        let started = Instant::now();
-
-        let buf = match accumulate_body(&mut inbound, &mut reservation, idle, declared_length).await
-        {
-            Ok(buf) => buf,
-            Err(failure) => {
-                if let Some(reason) = failure.reject_reason() {
-                    self.prom.record_body_rejected(reason.as_label());
-                }
-                let status = failure.into_status();
-                tracing::warn!(
-                    req = %req_label,
-                    code = ?status.code(),
-                    "push_body: aborted before half-close; discarding"
-                );
-                return Err(status);
-            }
-        };
-
-        let total_bytes = buf.len() as u64;
-        let stream_id = self.body_store.commit(reservation, buf);
-        self.prom.record_body_pushed(total_bytes);
-        tracing::debug!(
-            req = %req_label,
-            stream_id,
-            total_bytes,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "push_body: buffered"
-        );
+        let (stream_id, total_bytes) = self
+            .bodies
+            .push(&mut inbound, client_request_id, declared_length)
+            .await?;
         Ok(Response::new(PushBodyResponse {
             stream_id,
             total_bytes,
@@ -237,7 +93,7 @@ impl Picker for KinferenceService {
         let start = Instant::now();
         // Claim the body first: no point minting ids or scoring if the caller
         // named a body we don't have.
-        let handle = self.body_store.begin_pick(req.body_stream_id)?;
+        let handle = self.bodies.store.begin_pick(req.body_stream_id)?;
         let pushed = handle.body().clone();
 
         let response_id = self.mint_response_id();
@@ -279,7 +135,7 @@ impl Picker for KinferenceService {
                 body,
                 model,
             } => (
-                self.commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
+                commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
                     outcome: WireOutcome::Ok as i32,
                     destination: Some(local_destination(endpoint)),
                     response_id,
@@ -296,7 +152,7 @@ impl Picker for KinferenceService {
                 body,
                 model,
             } => (
-                self.commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
+                commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
                     outcome: WireOutcome::Degraded as i32,
                     destination: Some(local_destination(endpoint)),
                     response_id,
@@ -315,7 +171,7 @@ impl Picker for KinferenceService {
             } => {
                 let canonical = pick.canonical_model.clone();
                 (
-                    self.commit_picked_body(handle, response_id, body, &pushed, |total| {
+                    commit_picked_body(handle, response_id, body, &pushed, |total| {
                         PickResponse {
                             outcome: WireOutcome::Ok as i32,
                             destination: Some(provider_destination(&pick)),
@@ -393,7 +249,7 @@ impl Picker for KinferenceService {
         request: Request<PullBodyRequest>,
     ) -> Result<Response<Self::PullBodyStream>, Status> {
         let req = request.into_inner();
-        let lease = self.body_store.take_outbound(req.response_id)?;
+        let lease = self.bodies.store.take_outbound(req.response_id)?;
         let total = lease.len();
         tracing::debug!(
             response_id = req.response_id,
@@ -441,7 +297,7 @@ impl Picker for KinferenceService {
         let req = request.into_inner();
         // Before releasing, which clears the label this is attributed by. A
         // no-op for a local pick.
-        let was_provider = self.record_provider_first_token(
+        let was_provider = self.observations.record_provider_first_token(
             req.response_id,
             req.observed_ttft_ms,
             req.upstream_status,
@@ -455,11 +311,12 @@ impl Picker for KinferenceService {
             let (released, _) = self.abort_request(req.response_id);
             released
         } else {
-            self.finalize_observation(req.response_id, req.observed_ttft_ms, req.upstream_status)
+            self.observations
+                .finalize(req.response_id, req.observed_ttft_ms, req.upstream_status)
         };
         Ok(Response::new(ReportFirstTokenResponse {
             // A provider pick is known even though it holds no pending
-            // observation for `finalize_observation` to find.
+            // observation for `Observations::finalize` to find.
             acknowledged: acknowledged || was_provider,
         }))
     }
@@ -478,58 +335,18 @@ impl Picker for KinferenceService {
         request: Request<ReportFinalTokenRequest>,
     ) -> Result<Response<ReportFinalTokenResponse>, Status> {
         let req = request.into_inner();
-        let meta = self.request_labels.take(req.response_id);
-        // An unknown or expired `response_id` leaves nothing to attribute this
-        // to. The empty tenant maps to the default bucket.
-        let (model, qos, tenant) = match &meta {
-            Some(m) => (m.model.clone(), m.qos, m.tenant.clone()),
-            // `Unknown`, rather than a guess.
-            None => (req.model.clone(), Qos::Unknown, String::new()),
+        let report = FinalTokenReport {
+            model: req.model,
+            prompt_tokens: req.prompt_tokens,
+            completion_tokens: req.completion_tokens,
+            cached_tokens: req.cached_tokens,
+            itl_bucket_layout: req.itl_bucket_layout,
+            itl_bucket_counts: req.itl_bucket_counts,
         };
-        if meta.is_none() {
-            self.prom.record_orphaned_report();
-        }
-        let qos_label = qos.as_label();
-        tracing::debug!(
-            response_id = req.response_id,
-            model = %model,
-            qos = qos_label,
-            prompt_tokens = req.prompt_tokens,
-            completion_tokens = req.completion_tokens,
-            itl_layout = req.itl_bucket_layout,
-            itl_buckets = req.itl_bucket_counts.len(),
-            known = meta.is_some(),
-            "report_final_token"
-        );
-        // End-to-end duration, when we know when the pick happened.
-        if let Some(m) = &meta {
-            self.prom.record_request_duration(
-                &model,
-                qos_label,
-                &tenant,
-                m.picked_at.elapsed().as_millis() as u64,
-            );
-        }
-        self.prom.record_usage(
-            &model,
-            qos_label,
-            &tenant,
-            req.prompt_tokens,
-            req.completion_tokens,
-        );
-        // Engine-measured prefix-cache hit; `None` is counted as unknown.
-        self.prom
-            .record_cached_prompt_tokens(&model, qos_label, &tenant, req.cached_tokens);
-        self.prom.record_itl(
-            &model,
-            qos_label,
-            &tenant,
-            req.itl_bucket_layout,
-            &req.itl_bucket_counts,
-        );
-        Ok(Response::new(ReportFinalTokenResponse {
-            acknowledged: meta.is_some(),
-        }))
+        let acknowledged = self
+            .observations
+            .record_final_token(req.response_id, &report);
+        Ok(Response::new(ReportFinalTokenResponse { acknowledged }))
     }
 
     /// Release state for a request that will never complete.
@@ -546,7 +363,10 @@ impl Picker for KinferenceService {
         let reason = proto::abort_request::Reason::try_from(req.reason)
             .unwrap_or(proto::abort_request::Reason::Unspecified);
         // Before releasing, which clears the label this is attributed by.
-        self.record_provider_abort(req.response_id, reason, &req.detail);
+        if let Some(kind) = abort_failure_kind(reason) {
+            self.observations
+                .record_provider_abort(req.response_id, kind, &req.detail);
+        }
         let (released, bytes_released) = self.abort_request(req.response_id);
         self.prom.record_body_aborted(abort_reason_label(reason));
         tracing::debug!(
@@ -562,33 +382,41 @@ impl Picker for KinferenceService {
     }
 }
 
-impl KinferenceService {
-    /// Configured idle budget between `PushBody` chunks.
-    fn body_idle_timeout(&self) -> Duration {
-        self.body_idle_timeout
-    }
+/// Re-key a successfully-picked body to `response_id` and build the response
+/// with the exact outbound length.
+///
+/// `wire` is `pick_and_record`'s rewritten body, or empty when unchanged, in
+/// which case the pushed body is reused.
+fn commit_picked_body(
+    handle: crate::router::body_store::PickHandle,
+    response_id: u64,
+    wire: Vec<u8>,
+    pushed: &Arc<Vec<u8>>,
+    build: impl FnOnce(u64) -> PickResponse,
+) -> PickResponse {
+    let outbound = if wire.is_empty() {
+        pushed.clone()
+    } else {
+        Arc::new(wire)
+    };
+    let total = outbound.len() as u64;
+    handle.commit(response_id, outbound);
+    build(total)
+}
 
-    /// Re-key a successfully-picked body to `response_id` and build the
-    /// response with the exact outbound length.
-    ///
-    /// `wire` is `pick_and_record`'s rewritten body, or empty when unchanged,
-    /// in which case the pushed body is reused.
-    fn commit_picked_body(
-        &self,
-        handle: crate::router::body_store::PickHandle,
-        response_id: u64,
-        wire: Vec<u8>,
-        pushed: &Arc<Vec<u8>>,
-        build: impl FnOnce(u64) -> PickResponse,
-    ) -> PickResponse {
-        let outbound = if wire.is_empty() {
-            pushed.clone()
-        } else {
-            Arc::new(wire)
-        };
-        let total = outbound.len() as u64;
-        handle.commit(response_id, outbound);
-        build(total)
+/// The provider failure an abort reason reports, if any.
+///
+/// `NOT_DISPATCHED` (the caller changed its mind) and `PULL_FAILED`
+/// (kinference's body stream broke) are not provider failures.
+fn abort_failure_kind(
+    reason: proto::abort_request::Reason,
+) -> Option<kinference_policy::provider_health::FailureKind> {
+    use kinference_policy::provider_health::FailureKind;
+    use proto::abort_request::Reason;
+    match reason {
+        Reason::BackendUnresolved => Some(FailureKind::Unresolved),
+        Reason::BackendUnauthorized => Some(FailureKind::Unauthorized),
+        Reason::Unspecified | Reason::NotDispatched | Reason::PullFailed => None,
     }
 }
 

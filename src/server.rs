@@ -18,7 +18,7 @@ use crate::router::body_store;
 use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
-use crate::router::service::KinferenceService;
+use crate::router::service::{KinferenceService, Scoring};
 use crate::router::tokenizer;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
@@ -119,14 +119,6 @@ pub async fn run() -> Result<()> {
     // inflight counter + inflight-prefix entry). Must exceed worst-case
     // *full* response time; see `Config::observation_ttl_secs`.
     let observation_ttl = std::time::Duration::from_secs(cfg.observation_ttl_secs.unwrap_or(600));
-
-    // Pending-observation stash, inserted at pick and consumed at report.
-    // Its TTL sweep, which also releases each evicted pick's inflight
-    // state, is spawned below once the service exists.
-    let pending_observations = observations::shared(observation_ttl);
-    // Per-request metric labels (model + qos), same TTL/lifecycle as the
-    // pending-observation stash; taken at ReportFinalToken, TTL-swept.
-    let request_labels = observations::shared_request_labels(observation_ttl);
 
     // Buffered bodies for PushBody, Pick, PullBody. A much shorter TTL than
     // `observation_ttl`: bodies are large and consumed immediately.
@@ -313,9 +305,7 @@ pub async fn run() -> Result<()> {
 
     // The observation CSV sink is shared across pools; rows carry their
     // pool and config snapshot.
-    let observation_sink = Arc::new(observations::ObservationSink::open(
-        cfg.observations_csv.clone(),
-    ));
+    let observation_sink = observations::ObservationSink::open(cfg.observations_csv.clone());
 
     // Optional CRD-driven routing policy, sharing the snapshot cell the
     // pick path reads. When disabled, a pool-naming Pick falls back to
@@ -429,17 +419,16 @@ pub async fn run() -> Result<()> {
         ),
     };
     let service = Arc::new(KinferenceService::new(
-        pool_registry.clone(),
-        models.clone(),
-        metrics.clone(),
+        Scoring::new(pool_registry.clone(), models.clone(), metrics.clone()),
         tokenizer,
-        pending_observations.clone(),
-        request_labels.clone(),
-        body_store.clone(),
+        body_store::Bodies::new(body_store, body_idle_timeout, router_prom.clone()),
+        observations::Observations::new(
+            observation_ttl,
+            observation_sink,
+            provider_health,
+            router_prom.clone(),
+        ),
         policy_store,
-        provider_health,
-        body_idle_timeout,
-        observation_sink,
         router_prom,
     ));
 
@@ -455,17 +444,14 @@ pub async fn run() -> Result<()> {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let (reaped, bytes) = service.sweep_expired_bodies();
+                        let (reaped, bytes) = service.bodies.sweep();
                         if reaped > 0 {
-                            service.prom.record_bodies_reaped(reaped as u64);
                             tracing::debug!(
                                 reaped,
                                 bytes,
                                 "body_store sweep: reclaimed buffered bodies past TTL"
                             );
                         }
-                        let (entries, in_use) = service.body_store.stats();
-                        service.prom.set_body_buffer(entries as u64, in_use);
                     }
                 }
             }
@@ -483,7 +469,7 @@ pub async fn run() -> Result<()> {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let evicted = service.sweep_expired_observations();
+                        let evicted = service.observations.sweep_expired();
                         if evicted > 0 {
                             tracing::debug!(
                                 evicted,
@@ -491,7 +477,7 @@ pub async fn run() -> Result<()> {
                             );
                         }
                         // So a deleted provider's entry doesn't linger.
-                        let dropped = service.provider_health.sweep();
+                        let dropped = service.observations.provider_health.sweep();
                         if dropped > 0 {
                             tracing::debug!(
                                 dropped,

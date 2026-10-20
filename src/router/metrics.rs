@@ -216,7 +216,7 @@ pub struct RouterMetrics {
     /// `kinference_provider_ttft_ms{provider,model}`: time-to-first-token for
     /// off-cluster picks, in milliseconds, from the caller's `ReportFirstToken`.
     /// A separate family because provider picks never reach
-    /// `finalize_observation`, where `record_ttft` is called.
+    /// `Observations::finalize`, where `record_ttft` is called.
     ///
     /// The router's own p95 (used by `EstimatedTTFT` and
     /// `backend.observedTTFTP95`) is not published; `histogram_quantile` over

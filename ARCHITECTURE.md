@@ -57,12 +57,9 @@ Imports point down, never up or sideways:
   router.
 - The operator surface imports all of the above.
 
-Today the tree breaks this rule in two places:
-
-- The router imports the controller's policy store to read the snapshot.
-  #49 moves the snapshot holder into `kinference-policy`.
-- One pair inside the router imports each other: `service` and
-  `observations` (#45).
+Today the tree breaks this rule in one place: the router imports the
+controller's policy store to read the snapshot. #49 moves the snapshot
+holder into `kinference-policy`.
 
 ## Module map
 
@@ -85,14 +82,14 @@ Rows name a module by its group; in code the fleet's are under
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
-| `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
+| `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the `PushBody` drain with its idle budget, and the buffer metrics |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
 | `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
-| `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
+| `router::observations` | `Observations`, the service's part: per-pick state kept until the caller reports, request labels, the CSV row and the CSV sink, and the provider feedback the caller reports |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
-| `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
+| `router::service` | `KinferenceService` and its parts: `Scoring` (the pools, the model index and the scrape reads), `Bodies`, `Observations`, the pick path and the policy driver |
 | `router::tokenizer` | the `Tokenizer` trait, the request and outcome types, the `tokenize` config, and `ByMode`, which picks a backend by the pool's mode and records the tokenize metrics |
 | `router::tokenizer::compare` | `Compare`: `/render` is authoritative; the local result is compared in the background for the divergence counters |
 | `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |

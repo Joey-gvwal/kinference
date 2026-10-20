@@ -1,10 +1,10 @@
 //! `KinferenceService`: the scoring and pick state behind the gRPC handlers in
 //! `crate::router::grpc`.
 //!
-//! This module owns the service struct, `score_workers` (tokenize, query the
-//! indexer, assemble `WorkerScore` rows), and the value types passed through
-//! it. The pick lifecycle is in `lifecycle`; tokenize/render HTTP plumbing is
-//! in [`crate::router::tokenizer`].
+//! This module owns the service struct and the value types passed through
+//! it. Scoring (the pools, the model index, the scrape reads) is the
+//! `Scoring` part in `scoring`; the pick lifecycle is in `lifecycle`;
+//! tokenizing is [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,9 +14,7 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::AUTO_MODEL;
 
-use crate::router::observations::{
-    ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
-};
+use crate::router::observations::{Observations, Qos, RequestMeta};
 use crate::router::picker::WorkerScore;
 use crate::router::tokenizer::TokenizeInput;
 use kinference_fleet::models::ModelIndex;
@@ -24,53 +22,13 @@ use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
 
-/// Quality-of-service class for a request, mapped from the proto
-/// `PickRequest.QosClass`. Used as the `qos` label on `/metrics` series.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Qos {
-    /// Latency-sensitive / interactive (the proto zero value / default).
-    Interactive,
-    /// Throughput-oriented; tolerant of higher TTFT.
-    Batch,
-    /// Lowest priority; may be deferred under load.
-    Deferrable,
-    /// The class could not be determined, so none is asserted.
-    ///
-    /// Only on the terminal-report path, when `report_final_token` gets a
-    /// `response_id` it never issued or whose labels expired. Never from
-    /// [`Qos::from_proto`], since policy matches on QoS at pick time.
-    Unknown,
-}
-
-impl Qos {
-    /// Map the proto `QosClass` i32 (INTERACTIVE=0, BATCH=1, DEFERRABLE=2).
-    /// Unknown values fall back to `Interactive` (the proto zero value).
-    pub(crate) fn from_proto(v: i32) -> Self {
-        match v {
-            1 => Qos::Batch,
-            2 => Qos::Deferrable,
-            _ => Qos::Interactive,
-        }
-    }
-
-    /// Stable lowercase value for the Prometheus `qos=…` label.
-    pub(crate) fn as_label(self) -> &'static str {
-        match self {
-            Qos::Interactive => "interactive",
-            Qos::Batch => "batch",
-            Qos::Deferrable => "deferrable",
-            Qos::Unknown => "unknown",
-        }
-    }
-}
-
 /// The scores from `score_workers`, held in `ScoreOutcome`.
 #[derive(Debug, Clone)]
 pub struct ScoreResponse {
     pub scores: Vec<WorkerScore>,
 }
 
-/// Outcome of [`KinferenceService::score_workers`].
+/// Outcome of [`Scoring::score_workers`].
 pub(crate) enum ScoreOutcome {
     Ok(ScoreResponse),
     /// No workers in the registry serve the requested model name.
@@ -313,72 +271,35 @@ pub(crate) struct ScoreSideData {
 }
 
 pub struct KinferenceService {
-    /// The pools this fleet manages. Each owns its own predictor, picker,
-    /// block size, indexer and registry. Pools come and go, and the service is
-    /// shared behind an `Arc`, so the set is swapped rather than edited.
-    pub(crate) pools: Arc<kinference_fleet::pool::PoolRegistry>,
-    /// Which pools serve each model, read on the pick hot path. Several pools
-    /// may serve one model; `pick_and_record` ranks across them.
-    pub(crate) models: Arc<ModelIndex>,
-    pub(crate) metrics: Arc<MetricsRegistry>,
+    pub(crate) scoring: Scoring,
     /// The tokenizer. The mode and render URL are per pool, on the request.
     pub(crate) tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
-    /// Per-pick observation stash. Inserted by `pick_and_record`, consumed by
-    /// `finalize_observation` (CSV row) or `abort_observation`, and TTL-swept.
-    pub(crate) pending_observations: Arc<PendingObservations>,
-    /// Per-request metric labels (model + qos), keyed by `response_id`.
-    /// Inserted at pick; taken at `ReportFinalToken` to label the token +
-    /// ITL metrics (the `PendingObservation` is gone by then). TTL-swept.
-    pub(crate) request_labels: Arc<RequestLabels>,
-    /// Predicted-vs-observed CSV sink.
-    pub(crate) observation_sink: Arc<ObservationSink>,
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
-    /// See [`crate::router::body_store`].
-    pub(crate) body_store: Arc<crate::router::body_store::BodyStore>,
+    pub(crate) bodies: crate::router::body_store::Bodies,
+    /// What each pick leaves behind until the caller reports.
+    pub(crate) observations: Observations,
     /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
     pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
-    /// What the caller has reported back about off-cluster destinations.
-    ///
-    /// Always present, even with policy disabled, so the feedback handlers
-    /// needn't check.
-    pub(crate) provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-    /// Maximum silence between two `PushBody` chunks before the push is
-    /// abandoned. The push itself has no deadline, since it spans the client's
-    /// upload.
-    pub(crate) body_idle_timeout: std::time::Duration,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<crate::router::metrics::RouterMetrics>,
 }
 
 impl KinferenceService {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pools: Arc<kinference_fleet::pool::PoolRegistry>,
-        models: Arc<ModelIndex>,
-        metrics: Arc<MetricsRegistry>,
+        scoring: Scoring,
         tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
-        pending_observations: Arc<PendingObservations>,
-        request_labels: Arc<RequestLabels>,
-        body_store: Arc<crate::router::body_store::BodyStore>,
+        bodies: crate::router::body_store::Bodies,
+        observations: Observations,
         policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
-        provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-        body_idle_timeout: std::time::Duration,
-        observation_sink: Arc<ObservationSink>,
         prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
         Self {
-            pools,
-            models,
-            metrics,
+            scoring,
             tokenizer,
-            pending_observations,
-            request_labels,
-            body_store,
+            bodies,
+            observations,
             policy,
-            provider_health,
-            body_idle_timeout,
-            observation_sink,
             prom,
         }
     }
@@ -458,7 +379,9 @@ impl KinferenceService {
         let resolved = snapshot.lookup(&pref.namespace, &pref.name)?;
         let local: Vec<&kinference_policy::resolve::ResolvedWorkerSet> =
             resolved.local_destinations().collect();
-        first_served_upstream(&local, canonical, |m| !self.resolve_pools(m).is_empty())
+        first_served_upstream(&local, canonical, |m| {
+            !self.scoring.resolve_pools(m).is_empty()
+        })
     }
 
     /// Whether any provider in the named pool declares this canonical model.
@@ -482,49 +405,10 @@ impl KinferenceService {
             .filter_map(|d| d.as_provider())
             .any(|p| !p.upstreams_for(model).is_empty())
     }
-
-    /// Every pool currently serving `model`, in stable id order.
-    ///
-    /// Empty when no pool has claimed the model yet, or every claiming pool has
-    /// since been removed (ids that resolve to nothing are dropped). The
-    /// returned handles keep their pools alive.
-    pub(crate) fn resolve_pools(&self, model: &str) -> Vec<Arc<Pool>> {
-        let ids = self.models.pools_for(model);
-        if ids.is_empty() {
-            return Vec::new();
-        }
-        let snapshot = self.pools.snapshot();
-        ids.into_iter()
-            .filter_map(|id| snapshot.get(id).cloned())
-            .collect()
-    }
-
-    /// Resolve the `"auto"` pseudo-model to a concrete model for this prompt.
-    ///
-    /// For now, uniform random among the models any pool serves; `messages` is
-    /// passed for future prompt-aware selection. `None` when no model is known
-    /// yet, which the caller treats like an unknown model.
-    pub(crate) fn choose_model_for_auto(&self, _messages: &[serde_json::Value]) -> Option<String> {
-        let models = self.models.models();
-        // Never route "auto" to itself.
-        let candidates: Vec<&String> = models.iter().filter(|m| m.as_str() != AUTO_MODEL).collect();
-        match candidates.len() {
-            0 => None,
-            1 => Some(candidates[0].clone()),
-            n => {
-                let mut buf = [0u8; 8];
-                let idx = match getrandom::getrandom(&mut buf) {
-                    Ok(()) => (u64::from_le_bytes(buf) as usize) % n,
-                    Err(_) => 0,
-                };
-                Some(candidates[idx].clone())
-            }
-        }
-    }
 }
 
 /// Project a scraped sample onto a [`WorkerScore`], for both `score_workers`
-/// and [`KinferenceService::degraded_response`].
+/// and [`Scoring::degraded_response`].
 ///
 /// The prefix-cache values are parameters because the degraded path zeroes
 /// them while still reporting real load.
@@ -741,8 +625,9 @@ pub(crate) enum PickAndRecordOutcome {
 
 mod lifecycle;
 mod policy_driver;
-mod provider_feedback;
 mod scoring;
+
+pub(crate) use scoring::Scoring;
 
 #[cfg(test)]
 pub(crate) mod test_support;
