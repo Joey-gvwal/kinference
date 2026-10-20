@@ -40,6 +40,47 @@ struct BodyFacts {
     classifier_text: Option<String>,
 }
 
+/// The body as `PullBody` will serve it. `None`: the pushed body goes out
+/// unchanged, which the outcome spells as an empty body.
+struct WireBody {
+    rewritten: Option<Vec<u8>>,
+}
+
+impl WireBody {
+    /// What `/render` and the engine see.
+    fn bytes<'a>(&'a self, pushed: &'a [u8]) -> &'a [u8] {
+        self.rewritten.as_deref().unwrap_or(pushed)
+    }
+
+    /// Name `model` in the body. `false` when the bytes are not a JSON
+    /// object, which a body `parse` accepted cannot be.
+    fn name_model(&mut self, pushed: &[u8], model: &str) -> bool {
+        match crate::router::pick_body::rewrite_model(self.bytes(pushed), model) {
+            Some(bytes) => {
+                self.rewritten = Some(bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// For the outcome: the rewritten bytes, or empty.
+    fn into_bytes(self) -> Vec<u8> {
+        self.rewritten.unwrap_or_default()
+    }
+}
+
+/// Step 2. The upstream model, the pools serving it, the body as the engine
+/// will see it, and what scoring consumes.
+struct Resolved {
+    model: String,
+    /// Empty when only a provider in the named pool serves the model.
+    serving: Vec<Arc<Pool>>,
+    body: WireBody,
+    facts: BodyFacts,
+    inputs: ScoreInput,
+}
+
 impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
@@ -79,12 +120,18 @@ impl KinferenceService {
             identity,
         };
 
-        let Parsed {
-            mut obj,
-            mut model,
-            facts,
-        } = match Self::parse(&req) {
+        let parsed = match Self::parse(&req) {
             Ok(p) => p,
+            Err(out) => return out,
+        };
+        let Resolved {
+            mut model,
+            serving,
+            body: mut wire,
+            facts,
+            inputs: input,
+        } = match self.resolve_model(&req, parsed) {
+            Ok(r) => r,
             Err(out) => return out,
         };
         let BodyFacts {
@@ -93,132 +140,9 @@ impl KinferenceService {
             classifier_text,
         } = facts;
 
-        // 1a. "auto" pseudo-model: choose a concrete model, then route
-        //     normally. `force_model` drives the body rewrite in step 1c. With
-        //     no models known yet, fall through to NoWorkers.
-        let mut force_model: Option<String> = None;
-        if model == AUTO_MODEL {
-            let messages = obj.get("messages").and_then(|v| v.as_array());
-            match self
-                .scoring
-                .choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[]))
-            {
-                Some(chosen) => {
-                    tracing::info!(
-                        req = %req.label,
-                        chosen_model = %chosen,
-                        "auto: resolved pseudo-model to concrete model"
-                    );
-                    model = chosen.clone();
-                    force_model = Some(chosen);
-                }
-                None => {
-                    tracing::info!(
-                        req = %req.label,
-                        "auto: no candidate models available yet (cold start?)"
-                    );
-                    return PickAndRecordOutcome::NoWorkers { model };
-                }
-            }
-        }
-
-        // 1b. Resolve the pools serving this model; several are scored and
-        //     ranked against each other.
-        let mut serving = self.scoring.resolve_pools(&model);
-
-        // 1b-i. Alias fallback. The model index only holds names engines
-        //     report, so translate a declared alias via the named pool's worker
-        //     sets (requires policy and a named pool).
-        //
-        //     Limitation: takes the first served upstream, so interchangeable
-        //     upstream models always route to the same one rather than being
-        //     ranked by the policy.
-        if serving.is_empty()
-            && let Some(upstream) = self.resolve_alias(req.pool_ref, &model)
-        {
-            tracing::info!(
-                req = %req.label,
-                alias = %model,
-                upstream_model = %upstream,
-                "pick: resolved declared alias to an upstream model"
-            );
-            // Drives the body rewrite in step 1c, as for `auto`.
-            force_model = Some(upstream.clone());
-            model = upstream;
-            serving = self.scoring.resolve_pools(&model);
-        }
-
-        // A model no local pool serves may still be served by a provider in
-        // the named pool, so check before refusing.
-        if serving.is_empty() {
-            if !self.provider_serves(req.pool_ref, &model) {
-                tracing::info!(
-                    req = %req.label,
-                    model = %model,
-                    "pick: no pool serves model (unknown model or cold-start before /v1/models)"
-                );
-                return PickAndRecordOutcome::NoWorkers { model };
-            }
-            tracing::debug!(
-                req = %req.label,
-                model = %model,
-                "pick: no local worker set serves this model, but a provider declares it"
-            );
-        }
-        // Per-pool config and handles are bound only once the winning pool is
-        // known, below.
-
-        // 1c. Apply the Pick-time body rewrites (model="auto" → concrete,
-        //     and stream_options.include_usage for streaming requests). When
-        //     something changed, the re-serialized bytes are both sent to
-        //     /render and returned; otherwise `wire_body` is empty.
-        let mutated =
-            crate::router::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
-        let outbound = if mutated {
-            serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
-        } else {
-            req.body.to_vec()
-        };
-        let mut wire_body = if mutated {
-            outbound.clone()
-        } else {
-            Vec::new()
-        };
-        // The model `wire_body` currently names, in case a policy later picks
-        // another.
-        let body_model = model.clone();
-
-        // 2. Score. Take the chat-template inputs out of the tree, and pass the
-        //    outbound body so /render sees what the engine will.
-        let messages = match obj.get_mut("messages").map(serde_json::Value::take) {
-            Some(serde_json::Value::Array(v)) => v,
-            _ => Vec::new(),
-        };
-        let tools = match obj.get_mut("tools").map(serde_json::Value::take) {
-            Some(serde_json::Value::Array(v)) => v,
-            _ => Vec::new(),
-        };
-        let tool_choice = obj
-            .get_mut("tool_choice")
-            .map(serde_json::Value::take)
-            .filter(|v| !v.is_null());
-        let add_generation_prompt = obj
-            .get("add_generation_prompt")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        let chat_extras = ChatExtras {
-            tools,
-            tool_choice,
-            add_generation_prompt,
-        };
-        // Scoring consumes these, but a second pool or a policy may need them
-        // again; only clone in that case.
+        // Scoring consumes the inputs, but a second pool or a policy may need
+        // them again; only clone in that case.
         let policy_active = req.pool_ref.is_some() && self.policy.is_some();
-        let input = ScoreInput {
-            input: Input::Messages(messages),
-            chat_extras,
-            raw_body: Some(outbound),
-        };
         let spare = (policy_active || serving.len() > 1).then(|| input.clone());
         let mut degraded_reason: Option<String> = None;
         let mut groups: Vec<ScoredGroup> = Vec::new();
@@ -373,17 +297,10 @@ impl KinferenceService {
                 // pool-scoped critical section: rewrite the body to the vendor's
                 // model name and hold an observation for the reported TTFT.
                 Ok(PolicySelection::Provider(pick)) => {
-                    let base = if wire_body.is_empty() {
-                        req.body
-                    } else {
-                        &wire_body
-                    };
-                    let Some(rewritten) =
-                        crate::router::pick_body::rewrite_model(base, &pick.upstream_model)
-                    else {
+                    if !wire.name_model(req.body, &pick.upstream_model) {
                         tracing::error!(
                             req = %req.label,
-                            from_model = %body_model,
+                            from_model = %model,
                             to_model = %pick.upstream_model,
                             provider = %pick.provider.label(),
                             "policy: chose a provider but the body could not be rewritten; \
@@ -394,12 +311,12 @@ impl KinferenceService {
                                 .to_string(),
                             model,
                         };
-                    };
+                    }
                     tracing::info!(
                         req = %req.label,
                         provider = %pick.provider.label(),
                         backend = %pick.backend_ref.label(),
-                        from_model = %body_model,
+                        from_model = %model,
                         to_model = %pick.upstream_model,
                         "policy: routing off-cluster"
                     );
@@ -419,7 +336,7 @@ impl KinferenceService {
                     return PickAndRecordOutcome::Provider {
                         pick,
                         response_id: req.request_id,
-                        body: rewritten,
+                        body: wire.into_bytes(),
                     };
                 }
                 Ok(sel) => {
@@ -439,48 +356,36 @@ impl KinferenceService {
                         );
                         return PickAndRecordOutcome::NoWorkers { model };
                     };
+                    // The policy may have chosen a different model than the
+                    // body names, so rewrite it.
+                    if group.model != model {
+                        if !wire.name_model(req.body, &group.model) {
+                            // Unreachable for a body we already parsed once.
+                            // Refuse rather than forward a body naming a
+                            // model the chosen endpoint does not serve.
+                            tracing::error!(
+                                req = %req.label,
+                                from_model = %model,
+                                to_model = %group.model,
+                                "policy: chose a different model but the body could not be \
+                                 rewritten; refusing rather than sending a mismatched model"
+                            );
+                            return PickAndRecordOutcome::BadRequest {
+                                reason: "could not rewrite body model for the chosen candidate"
+                                    .to_string(),
+                                model: group.model,
+                            };
+                        }
+                        tracing::debug!(
+                            req = %req.label,
+                            from_model = %model,
+                            to_model = %group.model,
+                            "policy: rewriting the body's model to the chosen one"
+                        );
+                    }
                     model = group.model.clone();
                     selected = Some(group);
                     forced_endpoint = chosen;
-
-                    // The policy may have chosen a different model than the
-                    // body names, so rewrite it. Not via `obj`, whose `messages`
-                    // were taken for scoring.
-                    if model != body_model {
-                        let base = if wire_body.is_empty() {
-                            req.body
-                        } else {
-                            &wire_body
-                        };
-                        match crate::router::pick_body::rewrite_model(base, &model) {
-                            Some(rewritten) => {
-                                tracing::debug!(
-                                    req = %req.label,
-                                    from_model = %body_model,
-                                    to_model = %model,
-                                    "policy: rewriting the body's model to the chosen one"
-                                );
-                                wire_body = rewritten;
-                            }
-                            None => {
-                                // Unreachable for a body we already parsed once.
-                                // Refuse rather than forward a body naming a
-                                // model the chosen endpoint does not serve.
-                                tracing::error!(
-                                    req = %req.label,
-                                    from_model = %body_model,
-                                    to_model = %model,
-                                    "policy: chose a different model but the body could not be \
-                                     rewritten; refusing rather than sending a mismatched model"
-                                );
-                                return PickAndRecordOutcome::BadRequest {
-                                    reason: "could not rewrite body model for the chosen candidate"
-                                        .to_string(),
-                                    model,
-                                };
-                            }
-                        }
-                    }
                 }
                 Err(outcome) => return outcome,
             }
@@ -803,13 +708,13 @@ impl KinferenceService {
                 endpoint: chosen_endpoint,
                 response_id: req.request_id,
                 reason,
-                body: wire_body,
+                body: wire.into_bytes(),
                 model,
             },
             None => PickAndRecordOutcome::Ok {
                 endpoint: chosen_endpoint,
                 response_id: req.request_id,
-                body: wire_body,
+                body: wire.into_bytes(),
                 model,
             },
         }
@@ -867,6 +772,143 @@ impl KinferenceService {
             model: model.to_string(),
             facts,
             obj,
+        })
+    }
+
+    /// Step 2. Resolve `auto` or a declared alias to the upstream model and
+    /// the pools serving it, write it into the body, and take the chat inputs
+    /// out of the tree. `Err` is `NoWorkers`: no model known for `auto`, or
+    /// no pool and no provider serves the model.
+    fn resolve_model(
+        &self,
+        req: &PickRequest<'_>,
+        parsed: Parsed,
+    ) -> Result<Resolved, PickAndRecordOutcome> {
+        let Parsed {
+            mut obj,
+            mut model,
+            facts,
+        } = parsed;
+
+        // `auto`: choose a concrete model, then route normally. `force_model`
+        // drives the body rewrite below. With no models known yet, fall through
+        // to NoWorkers.
+        let mut force_model: Option<String> = None;
+        if model == AUTO_MODEL {
+            let messages = obj.get("messages").and_then(|v| v.as_array());
+            match self
+                .scoring
+                .choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[]))
+            {
+                Some(chosen) => {
+                    tracing::info!(
+                        req = %req.label,
+                        chosen_model = %chosen,
+                        "auto: resolved pseudo-model to concrete model"
+                    );
+                    model = chosen.clone();
+                    force_model = Some(chosen);
+                }
+                None => {
+                    tracing::info!(
+                        req = %req.label,
+                        "auto: no candidate models available yet (cold start?)"
+                    );
+                    return Err(PickAndRecordOutcome::NoWorkers { model });
+                }
+            }
+        }
+
+        // Several pools may serve the model; they are scored and ranked against
+        // each other.
+        let mut serving = self.scoring.resolve_pools(&model);
+
+        // Alias fallback. The model index only holds names engines report, so
+        // translate a declared alias via the named pool's worker sets (requires
+        // policy and a named pool).
+        //
+        // Limitation: takes the first served upstream, so interchangeable
+        // upstream models always route to the same one rather than being
+        // ranked by the policy.
+        if serving.is_empty()
+            && let Some(upstream) = self.resolve_alias(req.pool_ref, &model)
+        {
+            tracing::info!(
+                req = %req.label,
+                alias = %model,
+                upstream_model = %upstream,
+                "pick: resolved declared alias to an upstream model"
+            );
+            // Drives the body rewrite below, as for `auto`.
+            force_model = Some(upstream.clone());
+            model = upstream;
+            serving = self.scoring.resolve_pools(&model);
+        }
+
+        // A model no local pool serves may still be served by a provider in
+        // the named pool, so check before refusing.
+        if serving.is_empty() {
+            if !self.provider_serves(req.pool_ref, &model) {
+                tracing::info!(
+                    req = %req.label,
+                    model = %model,
+                    "pick: no pool serves model (unknown model or cold-start before /v1/models)"
+                );
+                return Err(PickAndRecordOutcome::NoWorkers { model });
+            }
+            tracing::debug!(
+                req = %req.label,
+                model = %model,
+                "pick: no local worker set serves this model, but a provider declares it"
+            );
+        }
+
+        // The Pick-time body rewrites: the resolved model, and
+        // `stream_options.include_usage` for streaming requests. Only a changed
+        // body is re-serialized.
+        let mutated =
+            crate::router::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
+        let body = WireBody {
+            rewritten: mutated.then(|| {
+                serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
+            }),
+        };
+
+        // The chat-template inputs, taken out of the tree now that it is
+        // serialized. `/render` gets the outbound bytes so it sees what the
+        // engine will.
+        let messages = match obj.get_mut("messages").map(serde_json::Value::take) {
+            Some(serde_json::Value::Array(v)) => v,
+            _ => Vec::new(),
+        };
+        let tools = match obj.get_mut("tools").map(serde_json::Value::take) {
+            Some(serde_json::Value::Array(v)) => v,
+            _ => Vec::new(),
+        };
+        let tool_choice = obj
+            .get_mut("tool_choice")
+            .map(serde_json::Value::take)
+            .filter(|v| !v.is_null());
+        let add_generation_prompt = obj
+            .get("add_generation_prompt")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let chat_extras = ChatExtras {
+            tools,
+            tool_choice,
+            add_generation_prompt,
+        };
+        let inputs = ScoreInput {
+            input: Input::Messages(messages),
+            chat_extras,
+            raw_body: Some(body.bytes(req.body).to_vec()),
+        };
+        Ok(Resolved {
+            model,
+            serving,
+            body,
+            facts,
+            inputs,
         })
     }
 
