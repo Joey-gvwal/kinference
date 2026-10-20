@@ -81,6 +81,19 @@ struct Resolved {
     inputs: ScoreInput,
 }
 
+/// Step 3. The groups to choose among.
+struct Scored {
+    model: String,
+    body: WireBody,
+    facts: BodyFacts,
+    groups: Vec<ScoredGroup>,
+    /// Why the first pool's pick lost its prefix signal, for the outcome.
+    degraded: Option<String>,
+    /// The inputs again, for the policy to score more groups. `None` when
+    /// nothing could need them.
+    spare: Option<ScoreInput>,
+}
+
 impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
@@ -124,115 +137,23 @@ impl KinferenceService {
             Ok(p) => p,
             Err(out) => return out,
         };
-        let Resolved {
-            mut model,
-            serving,
-            body: mut wire,
-            facts,
-            inputs: input,
-        } = match self.resolve_model(&req, parsed) {
+        let resolved = match self.resolve_model(&req, parsed) {
             Ok(r) => r,
             Err(out) => return out,
         };
+        let Scored {
+            mut model,
+            body: mut wire,
+            facts,
+            groups,
+            degraded: degraded_reason,
+            spare,
+        } = self.score_groups(&req, resolved).await;
         let BodyFacts {
             streaming,
             max_tokens,
             classifier_text,
         } = facts;
-
-        // Scoring consumes the inputs, but a second pool or a policy may need
-        // them again; only clone in that case.
-        let policy_active = req.pool_ref.is_some() && self.policy.is_some();
-        let spare = (policy_active || serving.len() > 1).then(|| input.clone());
-        let mut degraded_reason: Option<String> = None;
-        let mut groups: Vec<ScoredGroup> = Vec::new();
-        // Skipped when nothing local serves the model.
-        if let Some(first) = serving.first() {
-            let (outcome, score_side) = self
-                .scoring
-                .score_workers(
-                    &*self.tokenizer,
-                    first,
-                    &model,
-                    input,
-                    HashMap::new(),
-                    Some(&req.label),
-                )
-                .await;
-            match outcome {
-                ScoreOutcome::Ok(resp) => groups.push(ScoredGroup {
-                    pool: first.clone(),
-                    model: model.clone(),
-                    scores: resp.scores,
-                    side: score_side,
-                }),
-                ScoreOutcome::Unavailable(resp, why) => {
-                    tracing::warn!(
-                        req = %req.label,
-                        model = %model,
-                        pool = %first.name,
-                        reason = why.as_label(),
-                        "pick: no prefix-cache signal; picking on load metrics only"
-                    );
-                    self.prom.record_score_degraded(why.as_label());
-                    degraded_reason = Some(why.reason().to_string());
-                    groups.push(ScoredGroup {
-                        pool: first.clone(),
-                        model: model.clone(),
-                        scores: resp.scores,
-                        side: score_side,
-                    });
-                }
-                // Not fatal: another pool or a provider may serve the model.
-                ScoreOutcome::NoWorkers => {}
-            }
-        }
-
-        // 2a. The remaining pools serving this model, reusing the first
-        //     group's tokens.
-        if serving.len() > 1 {
-            let reuse = groups
-                .first()
-                .map(|g| g.side.tokens.clone())
-                .filter(|t| !t.is_empty());
-            for pool in &serving[1..] {
-                let Some(spare) = spare.as_ref() else {
-                    continue;
-                };
-                let input = match reuse.clone() {
-                    Some(t) => ScoreInput::tokens(t),
-                    None => spare.clone(),
-                };
-                let (outcome, side) = self
-                    .scoring
-                    .score_workers(
-                        &*self.tokenizer,
-                        pool,
-                        &model,
-                        input,
-                        HashMap::new(),
-                        Some(&req.label),
-                    )
-                    .await;
-                let scores = match outcome {
-                    ScoreOutcome::Ok(r) => r.scores,
-                    ScoreOutcome::Unavailable(r, why) => {
-                        self.prom.record_score_degraded(why.as_label());
-                        r.scores
-                    }
-                    ScoreOutcome::NoWorkers => continue,
-                };
-                if scores.is_empty() {
-                    continue;
-                }
-                groups.push(ScoredGroup {
-                    pool: pool.clone(),
-                    model: model.clone(),
-                    scores,
-                    side,
-                });
-            }
-        }
 
         // 2b. Rank across the pools serving this model, choosing the pool; the
         //     picker chooses the endpoint under that pool's lock. `None` isn't
@@ -249,14 +170,6 @@ impl KinferenceService {
             &req.label,
             (!policy_will_rank).then_some(&*self.prom),
         );
-        if winner.is_none() && serving.is_empty() {
-            // Normal for a provider-only model.
-            tracing::debug!(
-                req = %req.label,
-                model = %model,
-                "pick: no local group to score; the decision rests entirely with the policy"
-            );
-        }
 
         // 2c. Policy. Candidates may span pools, each with its own `pick_lock`,
         //     so ranking is lock-free (avoiding lock-order deadlocks) and the
@@ -910,6 +823,127 @@ impl KinferenceService {
             facts,
             inputs,
         })
+    }
+
+    /// Step 3. Score the first serving pool, then the rest with the first's
+    /// tokens. Records `score_degraded`. Never refuses: a pool with no ready
+    /// worker yields no group, and a policy may still place the request.
+    async fn score_groups(&self, req: &PickRequest<'_>, resolved: Resolved) -> Scored {
+        let Resolved {
+            model,
+            serving,
+            body,
+            facts,
+            inputs,
+        } = resolved;
+
+        // Scoring consumes the inputs, but a second pool or a policy may need
+        // them again; only clone in that case.
+        let policy_active = req.pool_ref.is_some() && self.policy.is_some();
+        let spare = (policy_active || serving.len() > 1).then(|| inputs.clone());
+        let mut degraded: Option<String> = None;
+        let mut groups: Vec<ScoredGroup> = Vec::new();
+        if let Some(first) = serving.first() {
+            let (outcome, score_side) = self
+                .scoring
+                .score_workers(
+                    &*self.tokenizer,
+                    first,
+                    &model,
+                    inputs,
+                    HashMap::new(),
+                    Some(&req.label),
+                )
+                .await;
+            match outcome {
+                ScoreOutcome::Ok(resp) => groups.push(ScoredGroup {
+                    pool: first.clone(),
+                    model: model.clone(),
+                    scores: resp.scores,
+                    side: score_side,
+                }),
+                ScoreOutcome::Unavailable(resp, why) => {
+                    tracing::warn!(
+                        req = %req.label,
+                        model = %model,
+                        pool = %first.name,
+                        reason = why.as_label(),
+                        "pick: no prefix-cache signal; picking on load metrics only"
+                    );
+                    self.prom.record_score_degraded(why.as_label());
+                    degraded = Some(why.reason().to_string());
+                    groups.push(ScoredGroup {
+                        pool: first.clone(),
+                        model: model.clone(),
+                        scores: resp.scores,
+                        side: score_side,
+                    });
+                }
+                // Not fatal: another pool or a provider may serve the model.
+                ScoreOutcome::NoWorkers => {}
+            }
+        } else {
+            // Normal for a provider-only model.
+            tracing::debug!(
+                req = %req.label,
+                model = %model,
+                "pick: no local group to score; the decision rests entirely with the policy"
+            );
+        }
+
+        // The remaining pools serving this model, reusing the first group's
+        // tokens.
+        if serving.len() > 1 {
+            let reuse = groups
+                .first()
+                .map(|g| g.side.tokens.clone())
+                .filter(|t| !t.is_empty());
+            for pool in &serving[1..] {
+                let Some(spare) = spare.as_ref() else {
+                    continue;
+                };
+                let input = match reuse.clone() {
+                    Some(t) => ScoreInput::tokens(t),
+                    None => spare.clone(),
+                };
+                let (outcome, side) = self
+                    .scoring
+                    .score_workers(
+                        &*self.tokenizer,
+                        pool,
+                        &model,
+                        input,
+                        HashMap::new(),
+                        Some(&req.label),
+                    )
+                    .await;
+                let scores = match outcome {
+                    ScoreOutcome::Ok(r) => r.scores,
+                    ScoreOutcome::Unavailable(r, why) => {
+                        self.prom.record_score_degraded(why.as_label());
+                        r.scores
+                    }
+                    ScoreOutcome::NoWorkers => continue,
+                };
+                if scores.is_empty() {
+                    continue;
+                }
+                groups.push(ScoredGroup {
+                    pool: pool.clone(),
+                    model: model.clone(),
+                    scores,
+                    side,
+                });
+            }
+        }
+        Scored {
+            model,
+            body,
+            facts,
+            groups,
+            degraded,
+            spare,
+        }
     }
 
     /// Release everything held for `response_id` because the request will never
