@@ -1,0 +1,115 @@
+//! The one door to the API server. `KubeApi` is the live implementation;
+//! `Recorded`, in tests, answers from objects the test supplies.
+
+use std::future::Future;
+
+use anyhow::Context as _;
+use kube::Api;
+use kube::api::PostParams;
+use kube::core::NamespaceResourceScope;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+/// A namespaced object the control plane reads or writes.
+pub trait Object:
+    kube::Resource<Scope = NamespaceResourceScope, DynamicType = ()>
+    + Clone
+    + std::fmt::Debug
+    + Serialize
+    + DeserializeOwned
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<K> Object for K where
+    K: kube::Resource<Scope = NamespaceResourceScope, DynamicType = ()>
+        + Clone
+        + std::fmt::Debug
+        + Serialize
+        + DeserializeOwned
+        + Send
+        + Sync
+        + 'static
+{
+}
+
+/// What the control plane asks of the API server. Errors are `kube::Error`:
+/// the loops read a 404 as "absent" and a 409 as "lost the race".
+pub trait ApiServer: Clone + Send + Sync + 'static {
+    fn get<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<K, kube::Error>> + Send;
+
+    fn create<K: Object>(
+        &self,
+        namespace: &str,
+        object: &K,
+    ) -> impl Future<Output = Result<K, kube::Error>> + Send;
+
+    /// Optimistic: `object`'s `resourceVersion` must be current.
+    fn replace<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        object: &K,
+    ) -> impl Future<Output = Result<K, kube::Error>> + Send;
+}
+
+/// The API server over a `kube::Client`.
+#[derive(Clone)]
+pub struct KubeApi {
+    client: kube::Client,
+}
+
+impl KubeApi {
+    /// In-cluster credentials, else `~/.kube/config`, so the control plane
+    /// can run against a local cluster.
+    pub async fn infer() -> anyhow::Result<Self> {
+        let cfg = kube::Config::infer().await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to build a Kubernetes client (kubernetes.enabled or policy.enabled is \
+                 set): no in-cluster service-account token and no usable kubeconfig. Turn both \
+                 off to run without a cluster. ({e})"
+            )
+        })?;
+        let client = kube::Client::try_from(cfg).context("failed to build Kubernetes client")?;
+        Ok(Self { client })
+    }
+
+    fn namespaced<K: Object>(&self, namespace: &str) -> Api<K> {
+        Api::namespaced(self.client.clone(), namespace)
+    }
+}
+
+impl ApiServer for KubeApi {
+    async fn get<K: Object>(&self, namespace: &str, name: &str) -> Result<K, kube::Error> {
+        self.namespaced::<K>(namespace).get(name).await
+    }
+
+    async fn create<K: Object>(&self, namespace: &str, object: &K) -> Result<K, kube::Error> {
+        self.namespaced::<K>(namespace)
+            .create(&PostParams::default(), object)
+            .await
+    }
+
+    async fn replace<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        object: &K,
+    ) -> Result<K, kube::Error> {
+        self.namespaced::<K>(namespace)
+            .replace(name, &PostParams::default(), object)
+            .await
+    }
+}
+
+#[cfg(test)]
+pub mod recorded;
+
+#[cfg(test)]
+mod tests;

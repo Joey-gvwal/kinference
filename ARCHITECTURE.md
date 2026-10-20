@@ -42,10 +42,10 @@ modules and holds nothing else beyond re-exports.
 - Router, `crates/kinference-router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, the
   request-path metric families, and its error type.
-- Controller, `src/controller`. The Kubernetes control plane. The CRD
-  watch and its snapshot, the status and binding writers, the worker-set
-  reconcile, leader election, EndpointSlice discovery, and the control
-  plane's metric families.
+- Controller, `src/controller`. The Kubernetes control plane. The API
+  server trait and its client, the CRD watch and its snapshot, the status
+  and binding writers, the worker-set reconcile, leader election,
+  EndpointSlice discovery, and the control plane's metric families.
 - Operator surface, the top of `src`. Config, wiring, the admin
   listener, the Prometheus exposition, and the version string.
 
@@ -94,6 +94,7 @@ Rows name a module by its group; in code the fleet's are under
 | `router::tokenizer::compare` | `Compare`: `/render` is authoritative; the local result is compared in the background for the divergence counters |
 | `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |
 | `router::tokenizer::local` | `LocalTokenizer`: in-process tokenizers, chat templates, the warm-up that follows the model index, and the fallback to `/render` |
+| `controller::api` | `ApiServer`, the one door to the API server: get, create, replace; `KubeApi` over a `kube::Client`, and in tests `Recorded`, the same over objects the test supplies |
 | `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
@@ -126,8 +127,8 @@ Rows name a module by its group; in code the fleet's are under
   `ingest`.
 - A new admin endpoint. `admin`. It reads snapshots. It never writes
   router state.
-- Anything that talks to the API server. The controller, through the
-  client it already has.
+- Anything that talks to the API server. The controller, through
+  `controller::api::ApiServer`; never a `kube::Api` of its own.
 
 ## Rules for a move
 

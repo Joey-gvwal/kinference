@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
+use crate::controller::api::KubeApi;
 use crate::controller::discovery::KubeDiscovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
@@ -357,9 +358,7 @@ pub async fn run() -> Result<()> {
                 .unwrap_or_else(|| "default".to_string());
             let identity = cfg.leader_election.identity.clone();
             let params = leader::LeaseParams::from(&cfg.leader_election);
-            // `Config::infer`, like the status writer.
-            let kube_cfg = kube::Config::infer().await?;
-            let client = kube::Client::try_from(kube_cfg)?;
+            let api = KubeApi::infer().await?;
             tracing::info!(
                 lease = %params.name,
                 namespace = %ns,
@@ -372,7 +371,7 @@ pub async fn run() -> Result<()> {
                 async move { cancel.cancelled().await }
             };
             leader_task = Some(tokio::spawn(async move {
-                leader::run(client, &ns, identity, params, tx, shutdown).await;
+                leader::run(api, &ns, identity, params, tx, shutdown).await;
             }));
             rx
         } else {
