@@ -1,4 +1,4 @@
-//! The CRD watch and the resolved snapshot the pick path reads.
+//! The CRD watch, which publishes the resolved snapshot the pick path reads.
 //!
 //! Six reflectors feed [`resolve`]: `InferencePool`, `InferencePolicy`,
 //! `InferenceWorkerSet`, `InferenceProvider`, and (read-only) `HTTPRoute` and
@@ -10,7 +10,7 @@
 //! attached to the published snapshot ([`PolicyIndex::services`]) so pools and
 //! Service ports are read from one consistent instant.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Service;
@@ -18,34 +18,14 @@ use kinference_policy::crd::{
     HTTPRoute, InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet,
     ReferenceGrant,
 };
-use kinference_policy::resolve::{PolicyIndex, PoolIndex, rejection_index, resolve};
+use kinference_policy::resolve::{PoolIndex, rejection_index, resolve};
 use kinference_policy::services::ServiceIndex;
+use kinference_policy::store::PolicyStore;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector;
 use kube::runtime::watcher::{self, watcher as start_watcher};
 use kube::{Api, Resource};
 use tokio_util::sync::CancellationToken;
-
-/// The published snapshot. Read on the pick hot path: take the read lock, clone
-/// the `Arc`, release.
-#[derive(Default)]
-pub struct PolicyStore {
-    current: RwLock<Arc<PolicyIndex>>,
-}
-
-impl PolicyStore {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    pub fn snapshot(&self) -> Arc<PolicyIndex> {
-        self.current.read().expect("policy store poisoned").clone()
-    }
-
-    pub fn publish(&self, index: Arc<PolicyIndex>) {
-        *self.current.write().expect("policy store poisoned") = index;
-    }
-}
 
 /// Build the identity index from a live pool snapshot.
 pub fn pool_index(pools: &kinference_fleet::pool::PoolMap) -> PoolIndex {

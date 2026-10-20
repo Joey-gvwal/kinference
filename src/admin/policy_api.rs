@@ -38,10 +38,10 @@ use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::controller::policy::store::PolicyStore;
-use crate::router::picker::{self, WorkerScore};
 use kinference_fleet::pool::PoolRegistry;
 use kinference_fleet::scrape::MetricsRegistry;
+use kinference_policy::store::PolicyStore;
+use kinference_router::picker::{self, WorkerScore};
 
 // ── limits ───────────────────────────────────────────────────────────────────
 
@@ -915,7 +915,7 @@ fn model_attr_set(
     // `resolve_alias`'s ordering rule. When nothing is served, fall back to
     // the raw table so simulation works against a cold fleet.
     let map = st.pools.snapshot();
-    let upstream = crate::router::service::first_served_upstream(&refs, requested, |u| {
+    let upstream = kinference_router::service::first_served_upstream(&refs, requested, |u| {
         map.iter().any(|p| {
             p.registry
                 .iter_snapshot()
@@ -923,7 +923,7 @@ fn model_attr_set(
                 .any(|(_, e)| e.current_models.iter().any(|m| m == u))
         })
     })
-    .or_else(|| crate::router::service::first_served_upstream(&refs, requested, |_| true))
+    .or_else(|| kinference_router::service::first_served_upstream(&refs, requested, |_| true))
     .unwrap_or_else(|| requested.to_string());
 
     // Upstream first, then aliases sorted, as `lifecycle.rs` builds it.

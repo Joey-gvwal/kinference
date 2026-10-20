@@ -9,12 +9,12 @@ use serde::Deserialize;
 use crate::controller::leader::{self, LeaderElectionConfig};
 use crate::controller::policy::PolicyConfig;
 use crate::controller::policy::worker_sets::KubernetesConfig;
-use crate::router::metrics::MetricsConfig;
-use crate::router::tokenizer::TokenizeConfig;
 use kinference_fleet::discovery::DiscoveryConfig;
 use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
+use kinference_router::metrics::MetricsConfig;
+use kinference_router::tokenizer::TokenizeConfig;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -58,7 +58,7 @@ pub struct Config {
     /// swept mid-flight. Defaults to 600.
     #[serde(default)]
     pub observation_ttl_secs: Option<u64>,
-    /// Server-wide ceiling on buffered request bodies (see `crate::router::body_store`),
+    /// Server-wide ceiling on buffered request bodies (see `kinference_router::body_store`),
     /// including uploads in progress. Once full, pushes are refused with
     /// `RESOURCE_EXHAUSTED`; keep it well under the container memory limit.
     /// Defaults to 262144 KB (256 MiB).
@@ -89,7 +89,7 @@ pub struct Config {
     pub tokenize: TokenizeConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
-    /// Labelling of the metrics kinference *publishes* (`crate::router::metrics`). Not to
+    /// Labelling of the metrics kinference *publishes* (`kinference_router::metrics`). Not to
     /// be confused with `metrics_poll_ms` and friends, which concern scraping
     /// the engines.
     #[serde(default)]

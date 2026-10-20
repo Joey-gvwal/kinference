@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
@@ -14,12 +14,6 @@ use crate::controller::discovery::KubeDiscovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
-use crate::router::body_store;
-use crate::router::metrics::RouterMetrics;
-use crate::router::observations;
-use crate::router::proto::picker_server::PickerServer;
-use crate::router::service::{KinferenceService, Scoring};
-use crate::router::tokenizer;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
@@ -27,6 +21,9 @@ use kinference_fleet::metrics::FleetMetrics;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool;
 use kinference_fleet::scrape::MetricsRegistry;
+use kinference_router::body_store::BodyLimits;
+use kinference_router::grpc;
+use kinference_router::service::{FleetHandles, KinferenceService, PolicyHandles, RouterConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -86,7 +83,6 @@ pub async fn run() -> Result<()> {
     // One Prometheus registry; each group registers its families, and
     // the admin listener renders it on `/metrics`.
     let registry = metrics::registry();
-    let router_prom = Arc::new(RouterMetrics::new(&registry, &cfg.metrics));
     let fleet_prom = Arc::new(FleetMetrics::new(&registry));
     let controller_prom = Arc::new(ControllerMetrics::new(&registry));
     let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
@@ -136,7 +132,12 @@ pub async fn run() -> Result<()> {
         .body_max_total_kb
         .unwrap_or(256 * 1024)
         .saturating_mul(KB);
-    let body_store = body_store::shared(body_max_total_bytes, body_max_request_bytes, body_ttl);
+    let bodies = BodyLimits {
+        max_total_bytes: body_max_total_bytes,
+        max_request_bytes: body_max_request_bytes,
+        ttl: body_ttl,
+        idle_timeout: body_idle_timeout,
+    };
     tracing::info!(
         max_total_bytes = body_max_total_bytes,
         max_request_bytes = body_max_request_bytes,
@@ -145,15 +146,37 @@ pub async fn run() -> Result<()> {
         "Body buffer configured"
     );
 
-    let tokenizer = tokenizer::build(
-        &cfg.tokenize,
-        metrics.clone(),
-        router_prom.clone(),
-        pool_registry.clone(),
-        &models,
+    // One `PolicyStore` for the process, made before anything reads it.
+    // `None` when policy is off, which `/readyz` treats as nothing to wait
+    // for. Provider health exists even with policy off, so the feedback RPCs
+    // needn't check; the status writer publishes what the service records.
+    let policy_store = cfg
+        .policy
+        .enabled
+        .then(kinference_policy::store::PolicyStore::new);
+    let provider_health = Arc::new(kinference_policy::provider_health::ProviderHealthStore::new());
+
+    let service = KinferenceService::start(
+        RouterConfig {
+            tokenize: cfg.tokenize.clone(),
+            metrics: cfg.metrics.clone(),
+            bodies,
+            observation_ttl,
+            observations_csv: cfg.observations_csv.clone(),
+        },
+        FleetHandles {
+            pools: pool_registry.clone(),
+            models: models.clone(),
+            scrape: metrics.clone(),
+        },
+        PolicyHandles {
+            store: policy_store.clone(),
+            provider_health: provider_health.clone(),
+        },
+        &registry,
         cancel.clone(),
     )
-    .map_err(|e| anyhow::anyhow!("failed to build the tokenizer: {e}"))?;
+    .context("starting the router")?;
 
     // In-cluster credentials, acquired once here so pool creation stays
     // synchronous and infallible. Required (fatal) when the config declares
@@ -266,17 +289,12 @@ pub async fn run() -> Result<()> {
     }
     tokio::spawn(coordinator.run(inbox));
 
-    // One `PolicyStore` for the process, made before anything reads it.
-    // `None` when policy is off, which `/readyz` treats as nothing to wait
-    // for.
-    let policy_store_cell = cfg.policy.enabled.then(policy::store::PolicyStore::new);
-
     // Admin listener, when configured.
     if let Some(dash_addr) = cfg.admin_listen {
         // `/readyz` gates on the policy store being listed, so picks don't
         // bypass policy at startup.
         let dash_pools = pool_registry.clone();
-        let dash_policy = policy_store_cell.clone();
+        let dash_policy = policy_store.clone();
         let dash_metrics = metrics.clone();
         let dash_registry = registry.clone();
         let dash_cancel = cancel.clone();
@@ -303,14 +321,10 @@ pub async fn run() -> Result<()> {
         "READY: gRPC accepting connections"
     );
 
-    // The observation CSV sink is shared across pools; rows carry their
-    // pool and config snapshot.
-    let observation_sink = observations::ObservationSink::open(cfg.observations_csv.clone());
-
     // Optional CRD-driven routing policy, sharing the snapshot cell the
     // pick path reads. When disabled, a pool-naming Pick falls back to
     // model-based routing.
-    let policy_bits = if cfg.policy.enabled {
+    if let Some(store) = policy_store.clone() {
         if !cfg.kubernetes.enabled {
             tracing::warn!(
                 "policy.enabled is set but kubernetes.enabled is not, so no pool has a \
@@ -319,13 +333,6 @@ pub async fn run() -> Result<()> {
                  sets that the CRs themselves define; set kubernetes.enabled = true."
             );
         }
-        let store = policy_store_cell
-            .clone()
-            .expect("created whenever policy.enabled is set");
-        // Shared: the service writes it from the feedback handlers and the
-        // status writer publishes it.
-        let provider_health =
-            Arc::new(kinference_policy::provider_health::ProviderHealthStore::new());
         let watcher = policy::store::PolicyWatcher::new(
             cfg.policy.namespace.clone(),
             pool_registry.clone(),
@@ -404,100 +411,10 @@ pub async fn run() -> Result<()> {
             )
             .await?;
         }
-        Some((store, provider_health))
-    } else {
-        None
-    };
-
-    // Provider health exists even with policy off, so the feedback RPCs
-    // needn't check.
-    let (policy_store, provider_health) = match policy_bits {
-        Some((store, health)) => (Some(store), health),
-        None => (
-            None,
-            Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
-        ),
-    };
-    let service = Arc::new(KinferenceService::new(
-        Scoring::new(pool_registry.clone(), models.clone(), metrics.clone()),
-        tokenizer,
-        body_store::Bodies::new(body_store, body_idle_timeout, router_prom.clone()),
-        observations::Observations::new(
-            observation_ttl,
-            observation_sink,
-            provider_health,
-            router_prom.clone(),
-        ),
-        policy_store,
-        router_prom,
-    ));
-
-    // Body-buffer reaper, separate from the observation sweep since the TTLs
-    // differ greatly. It guarantees release (`Abort` only shortens the
-    // window) and refreshes the occupancy gauges.
-    {
-        let service = service.clone();
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        let (reaped, bytes) = service.bodies.sweep();
-                        if reaped > 0 {
-                            tracing::debug!(
-                                reaped,
-                                bytes,
-                                "body_store sweep: reclaimed buffered bodies past TTL"
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // Pending-observation TTL sweep. Releases each expired pick's inflight
-    // state, which has no sweep of its own, and bounds the stash.
-    {
-        let service = service.clone();
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        let evicted = service.observations.sweep_expired();
-                        if evicted > 0 {
-                            tracing::debug!(
-                                evicted,
-                                "pending_observations sweep: evicted entries past TTL (inflight state released)"
-                            );
-                        }
-                        // So a deleted provider's entry doesn't linger.
-                        let dropped = service.observations.provider_health.sweep();
-                        if dropped > 0 {
-                            tracing::debug!(
-                                dropped,
-                                "provider health sweep: dropped providers with no live samples or failures"
-                            );
-                        }
-                    }
-                }
-            }
-        });
     }
 
     let server_result = Server::builder()
-        .add_service(
-            PickerServer::from_arc(service)
-                // Above tonic's 4 MiB default, so a body sent as one chunk
-                // hits our own budget (RESOURCE_EXHAUSTED) rather than an
-                // opaque transport error. Callers should still chunk.
-                .max_decoding_message_size((body_max_request_bytes + 1024 * 1024) as usize),
-        )
+        .add_service(grpc::server(service))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
 

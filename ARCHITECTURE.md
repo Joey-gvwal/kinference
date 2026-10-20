@@ -10,17 +10,20 @@ code goes. Change it in the same pull request as any move.
 
 ## Crates
 
-- `kinference`, this crate. The server. The router and the controller
-  live here as directories today.
-- `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types and
-  pure policy logic. No client and no runtime.
+- `kinference`, this crate. The server. The controller lives here as a
+  directory today.
+- `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types, pure
+  policy logic and the policy snapshot holder. No client and no runtime.
 - `kinference-fleet`, in `crates/kinference-fleet`. Which workers exist
   and what state they are in. Imports `kinference-policy` only; no `kube`,
   no `anyhow`.
+- `kinference-router`, in `crates/kinference-router`. The request path.
+  Imports `kinference-fleet` and `kinference-policy`; no `kube`, no
+  `axum`, no `anyhow`.
 - `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
   only.
 
-Target: the router and the controller become crates too. The server crate
+Target: the controller becomes a crate too. The server crate
 keeps wiring, config assembly, the admin listener and the metrics
 exposition. The plan is #32.
 
@@ -36,9 +39,9 @@ modules and holds nothing else beyond re-exports.
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
   collector behind the fleet gauges, the fleet's own metric families, and
   its error type.
-- Router, `src/router`. The request path. The service, scoring, the
-  picker, the body store, the tokenizer, observations, the gRPC glue, and
-  the request-path metric families.
+- Router, `crates/kinference-router`. The request path. The service, scoring, the
+  picker, the body store, the tokenizer, observations, the gRPC glue, the
+  request-path metric families, and its error type.
 - Controller, `src/controller`. The Kubernetes control plane. The CRD
   watch and its snapshot, the status and binding writers, the worker-set
   reconcile, leader election, EndpointSlice discovery, and the control
@@ -57,14 +60,10 @@ Imports point down, never up or sideways:
   router.
 - The operator surface imports all of the above.
 
-Today the tree breaks this rule in one place: the router imports the
-controller's policy store to read the snapshot. #49 moves the snapshot
-holder into `kinference-policy`.
-
 ## Module map
 
 Rows name a module by its group; in code the fleet's are under
-`kinference_fleet::`.
+`kinference_fleet::` and the router's under `kinference_router::`.
 
 | Module | Owns |
 | --- | --- |
@@ -83,13 +82,14 @@ Rows name a module by its group; in code the fleet's are under
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the `PushBody` drain with its idle budget, and the buffer metrics |
-| `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
+| `router::error` | `Error`, the router's error type |
+| `router::grpc` | the `Picker` gRPC service and `server`, the tonic service over it; maps proto types to service calls |
 | `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
 | `router::observations` | `Observations`, the service's part: per-pick state kept until the caller reports, request labels, the CSV row and the CSV sink, and the provider feedback the caller reports |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
-| `router::service` | `KinferenceService` and its parts: `Scoring` (the pools, the model index and the scrape reads), `Bodies`, `Observations`, the pick path and the policy driver |
+| `router::service` | `KinferenceService` and its parts: `Scoring` (the pools, the model index and the scrape reads), `Bodies`, `Observations`, the pick path and the policy driver; `start`, which builds the service from the server's settings and handles and runs its sweeps |
 | `router::tokenizer` | the `Tokenizer` trait, the request and outcome types, the `tokenize` config, and `ByMode`, which picks a backend by the pool's mode and records the tokenize metrics |
 | `router::tokenizer::compare` | `Compare`: `/render` is authoritative; the local result is compared in the background for the divergence counters |
 | `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |
@@ -97,7 +97,7 @@ Rows name a module by its group; in code the fleet's are under
 | `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
-| `controller::policy` | the CRD watch and snapshot, the status writer, the binding writer, the worker-set reconcile |
+| `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile |
 | `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
@@ -111,7 +111,7 @@ Rows name a module by its group; in code the fleet's are under
 - A new signal for scoring. Collect it in the fleet, in `scrape` or
   `ingest`. Store it in the registry. Read it in the router's scoring.
   The picker stays pure: it takes inputs that are already fetched.
-- A new RPC or proto field. `proto/kinference.proto`, then
+- A new RPC or proto field. `crates/kinference-router/proto/kinference.proto`, then
   `router::grpc` maps it to a service call. No logic in `grpc`.
 - A new metric. Add it to the metrics struct of the group where the
   event happens, through the helpers in `fleet::metrics`. Record it there.

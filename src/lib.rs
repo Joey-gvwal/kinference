@@ -8,7 +8,6 @@ mod admin;
 mod config;
 mod controller;
 mod metrics;
-mod router;
 mod version;
 
 pub mod server;

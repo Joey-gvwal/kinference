@@ -615,7 +615,7 @@ fn writer_with_leader_and_registry(
     let (tx, rx) = watch::channel(leader);
     let registry = prometheus::Registry::new();
     let handles = StatusHandles {
-        store: crate::controller::policy::store::PolicyStore::new(),
+        store: kinference_policy::store::PolicyStore::new(),
         pools: kinference_fleet::pool::PoolRegistry::new(),
         rejections: crate::controller::policy::worker_sets::RejectionStore::new(),
         metrics: Arc::new(MetricsRegistry::new()),

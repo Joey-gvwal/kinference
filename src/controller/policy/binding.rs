@@ -55,7 +55,7 @@ use kube::{Api, Resource, ResourceExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::store::PolicyStore;
+use kinference_policy::store::PolicyStore;
 
 /// Server-side-apply field manager. A field this writer stops setting is
 /// removed on the next apply.

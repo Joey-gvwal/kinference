@@ -22,7 +22,7 @@
 //!
 //! This crate holds the resource types and everything that can be computed
 //! without a cluster. `kinfctl` builds on it, and the router imports it; the
-//! router's own `policy` module holds the watchers and status writers.
+//! controller holds the watchers and status writers.
 //!
 //! - [`crd`]: the resource types. `charts/kinference-crds/templates/*.yaml` is
 //!   the source of truth.
@@ -34,6 +34,7 @@
 //! - `explain`: a rendered trace of what `engine` decided and why.
 //! - `resolve`: the CRDs to the resolved snapshot, as a pure function.
 //! - `services`: the router's view of `Service`s, for port numbers.
+//! - `store`: the holder of the resolved snapshot the controller publishes.
 //! - `rejection`: why a worker set produced no pool.
 //! - `provider_health`: what callers report about off-cluster destinations.
 //! - `lint` and `warning`: name checks against the pools a policy serves, and
@@ -53,6 +54,7 @@ pub mod provider_health;
 pub mod rejection;
 pub mod resolve;
 pub mod services;
+pub mod store;
 pub mod warning;
 
 use std::sync::atomic::{AtomicU64, Ordering};
