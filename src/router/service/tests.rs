@@ -1,5 +1,6 @@
 use super::*;
 use crate::router::service::test_support::{Render, ServiceBuilder, TestService};
+use std::time::Duration;
 
 use kinference_fleet::pool::test_pool;
 
@@ -1013,4 +1014,37 @@ async fn two_pools_serving_one_model_pick_the_less_loaded() {
     assert!(t.metrics().contains(
         r#"kinference_routed_requests_total{destination="idle-ws",tenant="default",type="Local"} 1"#
     ));
+}
+
+/// `start` builds the service from empty handles, and `grpc::server`
+/// serves it.
+#[tokio::test]
+async fn start_builds_from_empty_handles() {
+    let registry = prometheus::Registry::new();
+    let config = RouterConfig {
+        tokenize: TokenizeConfig::default(),
+        metrics: MetricsConfig::default(),
+        bodies: BodyLimits {
+            max_total_bytes: 1024,
+            max_request_bytes: 512,
+            ttl: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(1),
+        },
+        observation_ttl: Duration::from_secs(1),
+        observations_csv: None,
+    };
+    let fleet = FleetHandles {
+        pools: PoolRegistry::new(),
+        models: Arc::new(ModelIndex::new()),
+        scrape: Arc::new(MetricsRegistry::new()),
+    };
+    let policy = PolicyHandles {
+        store: None,
+        provider_health: Arc::new(ProviderHealthStore::new()),
+    };
+    let service =
+        KinferenceService::start(config, fleet, policy, &registry, CancellationToken::new())
+            .expect("a service");
+    assert!(service.policy.is_none());
+    let _server = crate::router::grpc::server(service);
 }

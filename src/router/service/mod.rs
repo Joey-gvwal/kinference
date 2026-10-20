@@ -7,20 +7,28 @@
 //! `lifecycle`; tokenizing is [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::AUTO_MODEL;
 
-use crate::router::observations::{Observations, Qos, RequestMeta};
+use crate::router::body_store::{self, Bodies, BodyLimits};
+use crate::router::error::Error;
+use crate::router::metrics::{MetricsConfig, RouterMetrics};
+use crate::router::observations::{ObservationSink, Observations, Qos, RequestMeta};
 use crate::router::picker::WorkerScore;
-use crate::router::tokenizer::TokenizeInput;
+use crate::router::tokenizer::{self, TokenizeConfig, TokenizeInput};
 use kinference_fleet::models::ModelIndex;
-use kinference_fleet::pool::Pool;
+use kinference_fleet::pool::{Pool, PoolRegistry};
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
+use kinference_policy::provider_health::ProviderHealthStore;
+use kinference_policy::store::PolicyStore;
+use prometheus::Registry;
+use tokio_util::sync::CancellationToken;
 
 /// The scores from `score_workers`, held in `ScoreOutcome`.
 #[derive(Debug, Clone)]
@@ -273,26 +281,59 @@ pub(crate) struct ScoreSideData {
 pub struct KinferenceService {
     pub(crate) scoring: Scoring,
     /// The tokenizer. The mode and render URL are per pool, on the request.
-    pub(crate) tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
+    pub(crate) tokenizer: Arc<dyn tokenizer::Tokenizer>,
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
-    pub(crate) bodies: crate::router::body_store::Bodies,
+    pub(crate) bodies: Bodies,
     /// What each pick leaves behind until the caller reports.
     pub(crate) observations: Observations,
     /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
-    pub(crate) policy: Option<Arc<kinference_policy::store::PolicyStore>>,
+    pub(crate) policy: Option<Arc<PolicyStore>>,
     /// The metrics kinference publishes on its own `/metrics`.
-    pub(crate) prom: Arc<crate::router::metrics::RouterMetrics>,
+    pub(crate) prom: Arc<RouterMetrics>,
 }
 
+/// What the router reads from the fleet.
+pub struct FleetHandles {
+    pub pools: Arc<PoolRegistry>,
+    pub models: Arc<ModelIndex>,
+    pub scrape: Arc<MetricsRegistry>,
+}
+
+/// What the control plane publishes and the router reads.
+pub struct PolicyHandles {
+    /// `None` when policy is off: a request naming a pool falls back to
+    /// model-based routing.
+    pub store: Option<Arc<PolicyStore>>,
+    /// Shared with the status writer, which publishes what the feedback
+    /// RPCs record here.
+    pub provider_health: Arc<ProviderHealthStore>,
+}
+
+/// The router's settings, resolved by the server from its config.
+pub struct RouterConfig {
+    pub tokenize: TokenizeConfig,
+    pub metrics: MetricsConfig,
+    pub bodies: BodyLimits,
+    /// How long a pick's bookkeeping waits for the caller's report. Must
+    /// exceed the worst-case full response time, since a non-streaming
+    /// caller only reports at completion.
+    pub observation_ttl: Duration,
+    /// Where the predicted-vs-observed CSV appends; `None` disables it.
+    pub observations_csv: Option<PathBuf>,
+}
+
+/// How often the body and observation sweeps run.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
 impl KinferenceService {
-    pub fn new(
+    pub(crate) fn new(
         scoring: Scoring,
-        tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
-        bodies: crate::router::body_store::Bodies,
+        tokenizer: Arc<dyn tokenizer::Tokenizer>,
+        bodies: Bodies,
         observations: Observations,
-        policy: Option<Arc<kinference_policy::store::PolicyStore>>,
-        prom: Arc<crate::router::metrics::RouterMetrics>,
+        policy: Option<Arc<PolicyStore>>,
+        prom: Arc<RouterMetrics>,
     ) -> Self {
         Self {
             scoring,
@@ -302,6 +343,101 @@ impl KinferenceService {
             policy,
             prom,
         }
+    }
+
+    /// Build the service and start what runs beside it: the tokenizer
+    /// warm-up and the body and observation sweeps, all until `cancel`.
+    /// Registers the router's metric families in `registry`. Call it before
+    /// the fleet starts, so the warm-up sees every model claim.
+    pub fn start(
+        config: RouterConfig,
+        fleet: FleetHandles,
+        policy: PolicyHandles,
+        registry: &Registry,
+        cancel: CancellationToken,
+    ) -> Result<Arc<Self>, Error> {
+        let prom = Arc::new(RouterMetrics::new(registry, &config.metrics));
+        let limits = config.bodies;
+        let store =
+            body_store::shared(limits.max_total_bytes, limits.max_request_bytes, limits.ttl);
+        let tokenizer = tokenizer::build(
+            &config.tokenize,
+            fleet.scrape.clone(),
+            prom.clone(),
+            fleet.pools.clone(),
+            &fleet.models,
+            cancel.clone(),
+        )?;
+        let service = Arc::new(Self::new(
+            Scoring::new(fleet.pools, fleet.models, fleet.scrape),
+            tokenizer,
+            Bodies::new(store, limits.idle_timeout, prom.clone()),
+            Observations::new(
+                config.observation_ttl,
+                ObservationSink::open(config.observations_csv),
+                policy.provider_health,
+                prom.clone(),
+            ),
+            policy.store,
+            prom,
+        ));
+        service.clone().spawn_body_sweep(cancel.clone());
+        service.clone().spawn_observation_sweep(cancel);
+        Ok(service)
+    }
+
+    /// Reclaim buffered bodies past their TTL and refresh the occupancy
+    /// gauges. Separate from the observation sweep since the TTLs differ
+    /// greatly; it guarantees release, `Abort` only shortens the window.
+    fn spawn_body_sweep(self: Arc<Self>, cancel: CancellationToken) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let (reaped, bytes) = self.bodies.sweep();
+                        if reaped > 0 {
+                            tracing::debug!(
+                                reaped,
+                                bytes,
+                                "body_store sweep: reclaimed buffered bodies past TTL"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Evict pending observations past their TTL, which releases each
+    /// expired pick's inflight state (it has no sweep of its own) and bounds
+    /// the stash, and drop providers with no live samples or failures.
+    fn spawn_observation_sweep(self: Arc<Self>, cancel: CancellationToken) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let evicted = self.observations.sweep_expired();
+                        if evicted > 0 {
+                            tracing::debug!(
+                                evicted,
+                                "pending_observations sweep: evicted entries past TTL (inflight state released)"
+                            );
+                        }
+                        let dropped = self.observations.provider_health.sweep();
+                        if dropped > 0 {
+                            tracing::debug!(
+                                dropped,
+                                "provider health sweep: dropped providers with no live samples or failures"
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Mint a fresh `response_id` for a new pick.

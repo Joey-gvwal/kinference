@@ -524,7 +524,7 @@ pub struct ObservationSink {
 impl ObservationSink {
     /// Open the sink at `path` (`KINFERENCE_OBSERVATIONS_CSV`, read once at
     /// startup by `Config::load`); see the type docs for the cases.
-    pub fn open(path: Option<PathBuf>) -> Self {
+    pub(crate) fn open(path: Option<PathBuf>) -> Self {
         let Some(path) = path else {
             return Self { inner: None };
         };

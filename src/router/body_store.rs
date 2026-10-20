@@ -637,6 +637,17 @@ where
     }
 }
 
+/// The budgets the server resolves from its config, in bytes and seconds.
+#[derive(Debug, Clone, Copy)]
+pub struct BodyLimits {
+    pub max_total_bytes: u64,
+    pub max_request_bytes: u64,
+    pub ttl: Duration,
+    /// Maximum silence between two `PushBody` chunks before the push is
+    /// abandoned.
+    pub idle_timeout: Duration,
+}
+
 /// The service's part for bodies: the store, the push drain with its idle
 /// budget, and the buffer metrics.
 pub(crate) struct Bodies {
@@ -738,8 +749,12 @@ impl Bodies {
     }
 }
 
-/// `Arc` constructor.
-pub fn shared(max_total_bytes: u64, max_request_bytes: u64, ttl: Duration) -> Arc<BodyStore> {
+/// A store behind an `Arc`, for the service and the tests.
+pub(crate) fn shared(
+    max_total_bytes: u64,
+    max_request_bytes: u64,
+    ttl: Duration,
+) -> Arc<BodyStore> {
     Arc::new(BodyStore::new(max_total_bytes, max_request_bytes, ttl))
 }
 
