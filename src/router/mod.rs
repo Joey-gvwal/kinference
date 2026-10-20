@@ -2,6 +2,7 @@
 //! tokenizer, observations and gRPC.
 
 pub mod body_store;
+pub mod error;
 pub mod grpc;
 pub mod metrics;
 pub mod observations;

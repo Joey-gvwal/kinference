@@ -11,12 +11,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use futures::future::BoxFuture;
 
 use super::{ChatTemplateKwargs, TokenizeInput, TokenizeOutcome, TokenizeRequest, Tokenizer};
+use crate::router::error::Error;
 use kinference_fleet::scrape::MetricsRegistry;
 
 /// Maximum number of workers tried in sequence, freshest metrics first, so
@@ -46,7 +46,10 @@ impl HttpRender {
     /// concurrency with a single `render_url`). `pool_idle_timeout = 90s`
     /// matches the EPP and AWS NLB idle tolerance; `tcp_keepalive` detects
     /// half-closed connections.
-    pub(crate) fn new(pool_max_idle_per_host: usize, scrape: Arc<MetricsRegistry>) -> Result<Self> {
+    pub(crate) fn new(
+        pool_max_idle_per_host: usize,
+        scrape: Arc<MetricsRegistry>,
+    ) -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .pool_idle_timeout(Duration::from_secs(90))
@@ -55,7 +58,10 @@ impl HttpRender {
             .tcp_nodelay(true)
             .http1_only()
             .build()
-            .context("building the tokenize HTTP client")?;
+            .map_err(|source| Error::HttpClient {
+                what: "the tokenize HTTP client",
+                source,
+            })?;
         Ok(Self { client, scrape })
     }
 
@@ -96,7 +102,7 @@ impl HttpRender {
                     return TokenizeOutcome::Ok(tokens);
                 }
                 Err(e) => {
-                    let err = format!("{e:#}");
+                    let err = e.chain();
                     tracing::warn!(
                         tokenize_url = url,
                         render_ms = format_args!("{render_ms:.1}"),
@@ -157,7 +163,7 @@ impl HttpRender {
                         return Ok(tokens);
                     }
                     Err(e) => {
-                        let err_string = format!("{e:#}");
+                        let err_string = e.chain();
                         tracing::warn!(
                             worker_id = %worker_id_str,
                             http_url = %url,
@@ -236,25 +242,25 @@ fn build_chat_render_body(
 
 /// Parse vLLM's `/render` response into a token-id list: a single object for
 /// chat, an array for completions.
-fn parse_render_response(json: &[u8]) -> Result<Vec<u32>> {
+fn parse_render_response(json: &[u8]) -> Result<Vec<u32>, Error> {
+    let decode = |what: &'static str| move |source| Error::RenderDecode { what, source };
     let value: serde_json::Value =
-        serde_json::from_slice(json).context("decoding /render response as JSON")?;
+        serde_json::from_slice(json).map_err(decode("decoding /render response as JSON"))?;
     let obj: RenderResponseObject = match value {
-        serde_json::Value::Object(_) => {
-            serde_json::from_value(value).context("/render response missing `token_ids` field")?
-        }
+        serde_json::Value::Object(_) => serde_json::from_value(value)
+            .map_err(decode("/render response missing `token_ids` field"))?,
         serde_json::Value::Array(mut arr) => {
             let first = arr
                 .drain(..)
                 .next()
-                .ok_or_else(|| anyhow!("/render returned an empty array"))?;
+                .ok_or_else(|| Error::RenderShape("/render returned an empty array".into()))?;
             serde_json::from_value(first)
-                .context("/render response[0] missing `token_ids` field")?
+                .map_err(decode("/render response[0] missing `token_ids` field"))?
         }
         other => {
-            return Err(anyhow!(
+            return Err(Error::RenderShape(format!(
                 "/render response was neither object nor array: {other}"
-            ));
+            )));
         }
     };
     Ok(obj.token_ids)
@@ -265,7 +271,7 @@ async fn render_via_vllm_raw(
     client: &reqwest::Client,
     base: &str,
     raw_body: &[u8],
-) -> Result<Vec<u32>> {
+) -> Result<Vec<u32>, Error> {
     let url = format!("{}/v1/chat/completions/render", base.trim_end_matches('/'));
     render_post_raw_at_url(client, &url, raw_body).await
 }
@@ -276,23 +282,27 @@ async fn render_post_raw_at_url(
     client: &reqwest::Client,
     url: &str,
     raw_body: &[u8],
-) -> Result<Vec<u32>> {
+) -> Result<Vec<u32>, Error> {
+    let render = |source| Error::Render {
+        url: url.to_string(),
+        source,
+    };
     let resp = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(raw_body.to_vec())
         .send()
         .await
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(render)?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("/render returned {}: {}", status, text.trim()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::RenderStatus {
+            status,
+            body: body.trim().to_string(),
+        });
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .context("reading /render response body")?;
+    let bytes = resp.bytes().await.map_err(render)?;
     parse_render_response(&bytes)
 }
 
@@ -303,7 +313,11 @@ async fn render_structured_at_url(
     url: &str,
     model: &str,
     input: &TokenizeInput,
-) -> Result<Vec<u32>> {
+) -> Result<Vec<u32>, Error> {
+    let render = |source| Error::Render {
+        url: url.to_string(),
+        source,
+    };
     let body = match input {
         TokenizeInput::Raw(prompt) => serde_json::json!({
             "model": model,
@@ -324,21 +338,16 @@ async fn render_structured_at_url(
             *add_generation_prompt,
         ),
     };
-    let resp = client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
+    let resp = client.post(url).json(&body).send().await.map_err(render)?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("/render returned {}: {}", status, text.trim()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::RenderStatus {
+            status,
+            body: body.trim().to_string(),
+        });
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .context("reading /render response body")?;
+    let bytes = resp.bytes().await.map_err(render)?;
     parse_render_response(&bytes)
 }
 
@@ -351,7 +360,7 @@ async fn render_via_vllm_structured(
     base: &str,
     model: &str,
     input: &TokenizeInput,
-) -> Result<Vec<u32>> {
+) -> Result<Vec<u32>, Error> {
     let base = base.trim_end_matches('/');
     let (url, body) = match input {
         TokenizeInput::Raw(prompt) => (
@@ -379,21 +388,20 @@ async fn render_via_vllm_structured(
             ),
         ),
     };
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
+    let render = |source| Error::Render {
+        url: url.clone(),
+        source,
+    };
+    let resp = client.post(&url).json(&body).send().await.map_err(render)?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("/render returned {}: {}", status, text.trim()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::RenderStatus {
+            status,
+            body: body.trim().to_string(),
+        });
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .context("reading /render response body")?;
+    let bytes = resp.bytes().await.map_err(render)?;
     parse_render_response(&bytes)
 }
 
