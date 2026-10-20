@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tonic::Status;
 
+use crate::router::metrics::RouterMetrics;
+
 /// Reason a push was refused, for the `kinference_body_rejected_total{reason}`
 /// counter. Kept alongside the `Status` so the caller-facing message and the
 /// metric label can't drift apart.
@@ -527,6 +529,43 @@ impl BodyLease {
 
     pub fn len(&self) -> usize {
         self.body.len()
+    }
+}
+
+/// The service's part for bodies: the store, the push idle budget and the
+/// buffer metrics.
+pub(crate) struct Bodies {
+    pub(crate) store: Arc<BodyStore>,
+    /// Maximum silence between two `PushBody` chunks before the push is
+    /// abandoned. The push itself has no deadline, since it spans the client's
+    /// upload.
+    pub(crate) idle_timeout: Duration,
+    prom: Arc<RouterMetrics>,
+}
+
+impl Bodies {
+    pub(crate) fn new(
+        store: Arc<BodyStore>,
+        idle_timeout: Duration,
+        prom: Arc<RouterMetrics>,
+    ) -> Self {
+        Self {
+            store,
+            idle_timeout,
+            prom,
+        }
+    }
+
+    /// Reclaim buffered bodies past their TTL, count them, and refresh the
+    /// buffer gauges. Returns `(entries, bytes)` freed.
+    pub(crate) fn sweep(&self) -> (usize, u64) {
+        let (reaped, bytes) = self.store.take_expired();
+        if reaped > 0 {
+            self.prom.record_bodies_reaped(reaped as u64);
+        }
+        let (entries, in_use) = self.store.stats();
+        self.prom.set_body_buffer(entries as u64, in_use);
+        (reaped, bytes)
     }
 }
 

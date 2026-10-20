@@ -433,10 +433,9 @@ pub async fn run() -> Result<()> {
         tokenizer,
         pending_observations.clone(),
         request_labels.clone(),
-        body_store.clone(),
+        body_store::Bodies::new(body_store, body_idle_timeout, router_prom.clone()),
         policy_store,
         provider_health,
-        body_idle_timeout,
         observation_sink,
         router_prom,
     ));
@@ -453,17 +452,14 @@ pub async fn run() -> Result<()> {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let (reaped, bytes) = service.sweep_expired_bodies();
+                        let (reaped, bytes) = service.bodies.sweep();
                         if reaped > 0 {
-                            service.prom.record_bodies_reaped(reaped as u64);
                             tracing::debug!(
                                 reaped,
                                 bytes,
                                 "body_store sweep: reclaimed buffered bodies past TTL"
                             );
                         }
-                        let (entries, in_use) = service.body_store.stats();
-                        service.prom.set_body_buffer(entries as u64, in_use);
                     }
                 }
             }

@@ -912,16 +912,10 @@ impl KinferenceService {
     /// Releases the inflight dispatch for both abort reasons, since after
     /// `PULL_FAILED` no `ReportFirstToken` is coming either.
     pub(crate) fn abort_request(&self, response_id: u64) -> (bool, u64) {
-        let (body_released, bytes) = self.body_store.abort(response_id);
+        let (body_released, bytes) = self.bodies.store.abort(response_id);
         let obs_released = self.abort_observation(response_id);
         self.request_labels.take(response_id);
         (body_released || obs_released, bytes)
-    }
-
-    /// Reclaim buffered bodies past their TTL, which is much shorter than the
-    /// observation TTL. Returns `(entries, bytes)` freed.
-    pub(crate) fn sweep_expired_bodies(&self) -> (usize, u64) {
-        self.body_store.take_expired()
     }
 
     /// Evict pending observations past the TTL, releasing each one's inflight

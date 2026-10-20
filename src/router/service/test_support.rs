@@ -223,14 +223,17 @@ impl ServiceBuilder {
             tokenizer,
             Arc::new(PendingObservations::new(ttl)),
             Arc::new(RequestLabels::new(ttl)),
-            Arc::new(crate::router::body_store::BodyStore::new(
-                1 << 20,
-                1 << 20,
+            crate::router::body_store::Bodies::new(
+                Arc::new(crate::router::body_store::BodyStore::new(
+                    1 << 20,
+                    1 << 20,
+                    ttl,
+                )),
                 ttl,
-            )),
+                prom.clone(),
+            ),
             store.clone(),
             Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
-            ttl,
             Arc::new(ObservationSink::open(None)),
             prom,
         );

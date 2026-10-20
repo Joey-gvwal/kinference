@@ -286,8 +286,7 @@ pub struct KinferenceService {
     /// Predicted-vs-observed CSV sink.
     pub(crate) observation_sink: Arc<ObservationSink>,
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
-    /// See [`crate::router::body_store`].
-    pub(crate) body_store: Arc<crate::router::body_store::BodyStore>,
+    pub(crate) bodies: crate::router::body_store::Bodies,
     /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
     pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
@@ -296,10 +295,6 @@ pub struct KinferenceService {
     /// Always present, even with policy disabled, so the feedback handlers
     /// needn't check.
     pub(crate) provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-    /// Maximum silence between two `PushBody` chunks before the push is
-    /// abandoned. The push itself has no deadline, since it spans the client's
-    /// upload.
-    pub(crate) body_idle_timeout: std::time::Duration,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<crate::router::metrics::RouterMetrics>,
 }
@@ -311,10 +306,9 @@ impl KinferenceService {
         tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
-        body_store: Arc<crate::router::body_store::BodyStore>,
+        bodies: crate::router::body_store::Bodies,
         policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-        body_idle_timeout: std::time::Duration,
         observation_sink: Arc<ObservationSink>,
         prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
@@ -323,10 +317,9 @@ impl KinferenceService {
             tokenizer,
             pending_observations,
             request_labels,
-            body_store,
+            bodies,
             policy,
             provider_health,
-            body_idle_timeout,
             observation_sink,
             prom,
         }

@@ -175,7 +175,7 @@ impl Picker for KinferenceService {
         // Refuse an over-budget body on its declared length alone, before
         // reading a single chunk.
         if let Some(declared) = declared_length
-            && let Err((status, reason)) = self.body_store.check_declared_length(declared)
+            && let Err((status, reason)) = self.bodies.store.check_declared_length(declared)
         {
             self.prom.record_body_rejected(reason.as_label());
             tracing::warn!(
@@ -188,10 +188,11 @@ impl Picker for KinferenceService {
 
         let mut inbound = request.into_inner();
         let mut reservation = self
-            .body_store
+            .bodies
+            .store
             .reservation()
             .with_client_request_id(client_request_id);
-        let idle = self.body_idle_timeout();
+        let idle = self.bodies.idle_timeout;
         let started = Instant::now();
 
         let buf = match accumulate_body(&mut inbound, &mut reservation, idle, declared_length).await
@@ -212,7 +213,7 @@ impl Picker for KinferenceService {
         };
 
         let total_bytes = buf.len() as u64;
-        let stream_id = self.body_store.commit(reservation, buf);
+        let stream_id = self.bodies.store.commit(reservation, buf);
         self.prom.record_body_pushed(total_bytes);
         tracing::debug!(
             req = %req_label,
@@ -238,7 +239,7 @@ impl Picker for KinferenceService {
         let start = Instant::now();
         // Claim the body first: no point minting ids or scoring if the caller
         // named a body we don't have.
-        let handle = self.body_store.begin_pick(req.body_stream_id)?;
+        let handle = self.bodies.store.begin_pick(req.body_stream_id)?;
         let pushed = handle.body().clone();
 
         let response_id = self.mint_response_id();
@@ -280,7 +281,7 @@ impl Picker for KinferenceService {
                 body,
                 model,
             } => (
-                self.commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
+                commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
                     outcome: WireOutcome::Ok as i32,
                     destination: Some(local_destination(endpoint)),
                     response_id,
@@ -297,7 +298,7 @@ impl Picker for KinferenceService {
                 body,
                 model,
             } => (
-                self.commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
+                commit_picked_body(handle, response_id, body, &pushed, |total| PickResponse {
                     outcome: WireOutcome::Degraded as i32,
                     destination: Some(local_destination(endpoint)),
                     response_id,
@@ -316,7 +317,7 @@ impl Picker for KinferenceService {
             } => {
                 let canonical = pick.canonical_model.clone();
                 (
-                    self.commit_picked_body(handle, response_id, body, &pushed, |total| {
+                    commit_picked_body(handle, response_id, body, &pushed, |total| {
                         PickResponse {
                             outcome: WireOutcome::Ok as i32,
                             destination: Some(provider_destination(&pick)),
@@ -394,7 +395,7 @@ impl Picker for KinferenceService {
         request: Request<PullBodyRequest>,
     ) -> Result<Response<Self::PullBodyStream>, Status> {
         let req = request.into_inner();
-        let lease = self.body_store.take_outbound(req.response_id)?;
+        let lease = self.bodies.store.take_outbound(req.response_id)?;
         let total = lease.len();
         tracing::debug!(
             response_id = req.response_id,
@@ -563,34 +564,26 @@ impl Picker for KinferenceService {
     }
 }
 
-impl KinferenceService {
-    /// Configured idle budget between `PushBody` chunks.
-    fn body_idle_timeout(&self) -> Duration {
-        self.body_idle_timeout
-    }
-
-    /// Re-key a successfully-picked body to `response_id` and build the
-    /// response with the exact outbound length.
-    ///
-    /// `wire` is `pick_and_record`'s rewritten body, or empty when unchanged,
-    /// in which case the pushed body is reused.
-    fn commit_picked_body(
-        &self,
-        handle: crate::router::body_store::PickHandle,
-        response_id: u64,
-        wire: Vec<u8>,
-        pushed: &Arc<Vec<u8>>,
-        build: impl FnOnce(u64) -> PickResponse,
-    ) -> PickResponse {
-        let outbound = if wire.is_empty() {
-            pushed.clone()
-        } else {
-            Arc::new(wire)
-        };
-        let total = outbound.len() as u64;
-        handle.commit(response_id, outbound);
-        build(total)
-    }
+/// Re-key a successfully-picked body to `response_id` and build the response
+/// with the exact outbound length.
+///
+/// `wire` is `pick_and_record`'s rewritten body, or empty when unchanged, in
+/// which case the pushed body is reused.
+fn commit_picked_body(
+    handle: crate::router::body_store::PickHandle,
+    response_id: u64,
+    wire: Vec<u8>,
+    pushed: &Arc<Vec<u8>>,
+    build: impl FnOnce(u64) -> PickResponse,
+) -> PickResponse {
+    let outbound = if wire.is_empty() {
+        pushed.clone()
+    } else {
+        Arc::new(wire)
+    };
+    let total = outbound.len() as u64;
+    handle.commit(response_id, outbound);
+    build(total)
 }
 
 fn abort_reason_label(reason: proto::abort_request::Reason) -> &'static str {
