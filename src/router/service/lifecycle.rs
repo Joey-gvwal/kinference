@@ -94,6 +94,26 @@ struct Scored {
     spare: Option<ScoreInput>,
 }
 
+/// Step 4. What `commit` applies.
+enum Selected {
+    /// A group, and the policy's endpoint in it when it chose one; otherwise
+    /// the picker chooses, under the pool's lock.
+    Local {
+        group: ScoredGroup,
+        endpoint: Option<String>,
+        body: WireBody,
+        streaming: bool,
+        degraded: Option<String>,
+    },
+    /// An off-cluster provider. The body names the vendor's model; nothing
+    /// pool-scoped applies.
+    Provider {
+        pick: ProviderPick,
+        body: Vec<u8>,
+        streaming: bool,
+    },
+}
+
 impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
@@ -141,98 +161,21 @@ impl KinferenceService {
             Ok(r) => r,
             Err(out) => return out,
         };
-        let Scored {
-            mut model,
-            body: mut wire,
-            facts,
-            groups,
-            degraded: degraded_reason,
-            spare,
-        } = self.score_groups(&req, resolved).await;
-        let BodyFacts {
-            streaming,
-            max_tokens,
-            classifier_text,
-        } = facts;
-
-        // 2b. Rank across the pools serving this model, choosing the pool; the
-        //     picker chooses the endpoint under that pool's lock. `None` isn't
-        //     yet fatal, since a policy may still find something.
-        //
-        // Predictions are recorded by exactly one ranker per request: the
-        // policy's `candidates_for` when a policy is in play, otherwise this.
-        // Recording in both would double-count. A request naming an unresolved
-        // pool records none, but is counted under
-        // `kinference_policy_decisions_total`.
-        let policy_will_rank = req.pool_ref.is_some() && self.policy.is_some();
-        let winner = best_group(
-            groups,
-            &req.label,
-            (!policy_will_rank).then_some(&*self.prom),
-        );
-
-        // 2c. Policy. Candidates may span pools, each with its own `pick_lock`,
-        //     so ranking is lock-free (avoiding lock-order deadlocks) and the
-        //     winner commits under its own lock below. The ranking input may be
-        //     one concurrent pick stale.
-        let mut forced_endpoint: Option<String> = None;
-        let selected: Option<ScoredGroup>;
-        if let (Some(pref), Some(store)) = (req.pool_ref, self.policy.as_ref()) {
-            let attrs = kinference_policy::predicate::RequestAttrs {
-                // Upstream first, then its declared aliases.
-                model: {
-                    let mut names = vec![model.clone()];
-                    names.extend(self.declared_aliases(req.pool_ref, &model));
-                    names
-                },
-                // Block-granular, from scoring. `None` when nothing local was
-                // scored, so `inputTokens` predicates and context-window fitting
-                // don't apply.
-                input_tokens: winner.as_ref().and_then(|w| {
-                    w.scores
-                        .first()
-                        .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
-                }),
-                max_tokens,
-                qos: Some(req.qos.as_label().to_string()),
-                tenant: req.identity.tenant.clone(),
-                // See `kinference_policy::classify`.
-                tag: kinference_policy::classify::tags_for_request(
-                    &req.label,
-                    classifier_text.as_deref(),
-                ),
-            };
-            match self
-                .policy_select(pref, store, winner, &model, spare, attrs, &req.label)
-                .await
-            {
-                // An off-cluster destination. Returns here, skipping the
-                // pool-scoped critical section: rewrite the body to the vendor's
-                // model name and hold an observation for the reported TTFT.
-                Ok(PolicySelection::Provider(pick)) => {
-                    if !wire.name_model(req.body, &pick.upstream_model) {
-                        tracing::error!(
-                            req = %req.label,
-                            from_model = %model,
-                            to_model = %pick.upstream_model,
-                            provider = %pick.provider.label(),
-                            "policy: chose a provider but the body could not be rewritten; \
-                             refusing rather than sending a model the vendor does not know"
-                        );
-                        return PickAndRecordOutcome::BadRequest {
-                            reason: "could not rewrite body model for the chosen provider"
-                                .to_string(),
-                            model,
-                        };
-                    }
-                    tracing::info!(
-                        req = %req.label,
-                        provider = %pick.provider.label(),
-                        backend = %pick.backend_ref.label(),
-                        from_model = %model,
-                        to_model = %pick.upstream_model,
-                        "policy: routing off-cluster"
-                    );
+        let scored = self.score_groups(&req, resolved).await;
+        let (group, forced_endpoint, wire, streaming, degraded_reason) =
+            match self.select(&req, scored).await {
+                Ok(Selected::Local {
+                    group,
+                    endpoint,
+                    body,
+                    streaming,
+                    degraded,
+                }) => (group, endpoint, body, streaming, degraded),
+                Ok(Selected::Provider {
+                    pick,
+                    body,
+                    streaming,
+                }) => {
                     self.observations.record_provider_pick(
                         req.request_id,
                         &pick.provider,
@@ -249,77 +192,17 @@ impl KinferenceService {
                     return PickAndRecordOutcome::Provider {
                         pick,
                         response_id: req.request_id,
-                        body: wire.into_bytes(),
+                        body,
                     };
                 }
-                Ok(sel) => {
-                    // Re-bind to the winning group, whose pool's scores and
-                    // prefix hashes the critical section uses.
-                    let (group, chosen) = match sel {
-                        PolicySelection::Local { group, endpoint } => (Some(group), Some(endpoint)),
-                        PolicySelection::Picker { group } => (group, None),
-                        PolicySelection::Provider(_) => unreachable!("handled above"),
-                    };
-                    let Some(group) = group else {
-                        // Nothing local was scored and no provider chosen.
-                        tracing::info!(
-                            req = %req.label,
-                            model = %model,
-                            "pick: no local group and no provider chosen"
-                        );
-                        return PickAndRecordOutcome::NoWorkers { model };
-                    };
-                    // The policy may have chosen a different model than the
-                    // body names, so rewrite it.
-                    if group.model != model {
-                        if !wire.name_model(req.body, &group.model) {
-                            // Unreachable for a body we already parsed once.
-                            // Refuse rather than forward a body naming a
-                            // model the chosen endpoint does not serve.
-                            tracing::error!(
-                                req = %req.label,
-                                from_model = %model,
-                                to_model = %group.model,
-                                "policy: chose a different model but the body could not be \
-                                 rewritten; refusing rather than sending a mismatched model"
-                            );
-                            return PickAndRecordOutcome::BadRequest {
-                                reason: "could not rewrite body model for the chosen candidate"
-                                    .to_string(),
-                                model: group.model,
-                            };
-                        }
-                        tracing::debug!(
-                            req = %req.label,
-                            from_model = %model,
-                            to_model = %group.model,
-                            "policy: rewriting the body's model to the chosen one"
-                        );
-                    }
-                    model = group.model.clone();
-                    selected = Some(group);
-                    forced_endpoint = chosen;
-                }
-                Err(outcome) => return outcome,
-            }
-        } else {
-            // No pool named, or policy disabled: the ranking above decided, and
-            // providers are unreachable.
-            selected = winner;
-        }
-
-        // Everything below is bound to whichever pool won.
-        let Some(group) = selected else {
-            tracing::info!(
-                req = %req.label,
-                model = %model,
-                "pick: no workers serve model"
-            );
-            return PickAndRecordOutcome::NoWorkers { model };
-        };
-        let pool = group.pool;
-        let scores = group.scores;
-        let score_side = group.side;
+                Err(out) => return out,
+            };
+        let ScoredGroup {
+            pool,
+            model,
+            scores,
+            side: score_side,
+        } = group;
 
         // Derived AFTER the policy may have re-bound `pool`.
         let predictor_cfg = &pool.predictor;
@@ -839,8 +722,7 @@ impl KinferenceService {
 
         // Scoring consumes the inputs, but a second pool or a policy may need
         // them again; only clone in that case.
-        let policy_active = req.pool_ref.is_some() && self.policy.is_some();
-        let spare = (policy_active || serving.len() > 1).then(|| inputs.clone());
+        let spare = (self.policy_for(req).is_some() || serving.len() > 1).then(|| inputs.clone());
         let mut degraded: Option<String> = None;
         let mut groups: Vec<ScoredGroup> = Vec::new();
         if let Some(first) = serving.first() {
@@ -944,6 +826,183 @@ impl KinferenceService {
             degraded,
             spare,
         }
+    }
+
+    /// Step 4. Rank the groups, run the policy when one applies, and name the
+    /// chosen model in the body when it differs. `Err` is `NoWorkers`,
+    /// `PolicyRejected` or a `BadRequest` for a body that could not be
+    /// rewritten; no state is written.
+    async fn select(
+        &self,
+        req: &PickRequest<'_>,
+        scored: Scored,
+    ) -> Result<Selected, PickAndRecordOutcome> {
+        let Scored {
+            model,
+            mut body,
+            facts,
+            groups,
+            degraded,
+            spare,
+        } = scored;
+        let streaming = facts.streaming;
+
+        // Rank across the pools serving this model, choosing the pool; the
+        // picker chooses the endpoint under that pool's lock. `None` isn't yet
+        // fatal, since a policy may still find something.
+        //
+        // Predictions are recorded by exactly one ranker per request: the
+        // policy's `candidates_for` when a policy is in play, otherwise this.
+        // Recording in both would double-count. A request naming an unresolved
+        // pool records none, but is counted under
+        // `kinference_policy_decisions_total`.
+        let policy = self.policy_for(req);
+        let winner = best_group(groups, &req.label, policy.is_none().then_some(&*self.prom));
+
+        // No pool named, or policy disabled: the ranking decided, and providers
+        // are unreachable.
+        let Some((pref, store)) = policy else {
+            let Some(group) = winner else {
+                tracing::info!(
+                    req = %req.label,
+                    model = %model,
+                    "pick: no workers serve model"
+                );
+                return Err(PickAndRecordOutcome::NoWorkers { model });
+            };
+            return Ok(Selected::Local {
+                group,
+                endpoint: None,
+                body,
+                streaming,
+                degraded,
+            });
+        };
+
+        // Policy. Candidates may span pools, each with its own `pick_lock`, so
+        // ranking is lock-free (avoiding lock-order deadlocks) and the winner
+        // commits under its own lock. The ranking input may be one concurrent
+        // pick stale.
+        let attrs = kinference_policy::predicate::RequestAttrs {
+            // Upstream first, then its declared aliases.
+            model: {
+                let mut names = vec![model.clone()];
+                names.extend(self.declared_aliases(req.pool_ref, &model));
+                names
+            },
+            // Block-granular, from scoring. `None` when nothing local was
+            // scored, so `inputTokens` predicates and context-window fitting
+            // don't apply.
+            input_tokens: winner.as_ref().and_then(|w| {
+                w.scores
+                    .first()
+                    .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
+            }),
+            max_tokens: facts.max_tokens,
+            qos: Some(req.qos.as_label().to_string()),
+            tenant: req.identity.tenant.clone(),
+            // See `kinference_policy::classify`.
+            tag: kinference_policy::classify::tags_for_request(
+                &req.label,
+                facts.classifier_text.as_deref(),
+            ),
+        };
+        // Re-bind to the winning group, whose pool's scores and prefix hashes
+        // the critical section uses.
+        let (group, endpoint) = match self
+            .policy_select(pref, store, winner, &model, spare, attrs, &req.label)
+            .await
+        {
+            // An off-cluster destination: nothing pool-scoped applies. Rewrite
+            // the body to the vendor's model name; `commit` holds an observation
+            // for the reported TTFT.
+            Ok(PolicySelection::Provider(pick)) => {
+                if !body.name_model(req.body, &pick.upstream_model) {
+                    tracing::error!(
+                        req = %req.label,
+                        from_model = %model,
+                        to_model = %pick.upstream_model,
+                        provider = %pick.provider.label(),
+                        "policy: chose a provider but the body could not be rewritten; \
+                         refusing rather than sending a model the vendor does not know"
+                    );
+                    return Err(PickAndRecordOutcome::BadRequest {
+                        reason: "could not rewrite body model for the chosen provider".to_string(),
+                        model,
+                    });
+                }
+                tracing::info!(
+                    req = %req.label,
+                    provider = %pick.provider.label(),
+                    backend = %pick.backend_ref.label(),
+                    from_model = %model,
+                    to_model = %pick.upstream_model,
+                    "policy: routing off-cluster"
+                );
+                return Ok(Selected::Provider {
+                    pick,
+                    body: body.into_bytes(),
+                    streaming,
+                });
+            }
+            Ok(PolicySelection::Local { group, endpoint }) => (group, Some(endpoint)),
+            Ok(PolicySelection::Picker { group: Some(group) }) => (group, None),
+            Ok(PolicySelection::Picker { group: None }) => {
+                // Nothing local was scored and no provider chosen.
+                tracing::info!(
+                    req = %req.label,
+                    model = %model,
+                    "pick: no local group and no provider chosen"
+                );
+                return Err(PickAndRecordOutcome::NoWorkers { model });
+            }
+            Err(outcome) => return Err(outcome),
+        };
+        // The policy may have chosen a different model than the body names, so
+        // rewrite it.
+        if group.model != model {
+            if !body.name_model(req.body, &group.model) {
+                // Unreachable for a body we already parsed once. Refuse rather
+                // than forward a body naming a model the chosen endpoint does
+                // not serve.
+                tracing::error!(
+                    req = %req.label,
+                    from_model = %model,
+                    to_model = %group.model,
+                    "policy: chose a different model but the body could not be \
+                     rewritten; refusing rather than sending a mismatched model"
+                );
+                return Err(PickAndRecordOutcome::BadRequest {
+                    reason: "could not rewrite body model for the chosen candidate".to_string(),
+                    model: group.model,
+                });
+            }
+            tracing::debug!(
+                req = %req.label,
+                from_model = %model,
+                to_model = %group.model,
+                "policy: rewriting the body's model to the chosen one"
+            );
+        }
+        Ok(Selected::Local {
+            group,
+            endpoint,
+            body,
+            streaming,
+            degraded,
+        })
+    }
+
+    /// The named pool and the policy store, when both exist: only then does a
+    /// policy rank.
+    fn policy_for<'a>(
+        &'a self,
+        req: &PickRequest<'a>,
+    ) -> Option<(
+        &'a kinference_policy::PoolRef,
+        &'a Arc<crate::controller::policy::store::PolicyStore>,
+    )> {
+        Some((req.pool_ref?, self.policy.as_ref()?))
     }
 
     /// Release everything held for `response_id` because the request will never
