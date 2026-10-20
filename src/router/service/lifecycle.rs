@@ -24,6 +24,22 @@ struct PickRequest<'a> {
     identity: &'a kinference_policy::RequestIdentity,
 }
 
+/// Step 1. The body as a JSON tree, with what the later steps read from it.
+struct Parsed {
+    obj: serde_json::Value,
+    /// The body's `model`, non-empty.
+    model: String,
+    facts: BodyFacts,
+}
+
+/// What the policy and the observation read from the body.
+struct BodyFacts {
+    streaming: bool,
+    max_tokens: Option<i64>,
+    /// The last user turn, or the completions `prompt`, for the classifiers.
+    classifier_text: Option<String>,
+}
+
 impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
@@ -63,35 +79,19 @@ impl KinferenceService {
             identity,
         };
 
-        // 1. Parse the body into a JSON tree, rewritten in place (see
-        //    `crate::router::pick_body`). Not a typed struct, which would drop unknown
-        //    fields.
-        let mut obj: serde_json::Value = match serde_json::from_slice(req.body) {
-            Ok(v) => v,
-            Err(e) => {
-                return PickAndRecordOutcome::BadRequest {
-                    reason: format!("body is not a valid OpenAI ChatCompletionRequest: {e}"),
-                    model: String::new(),
-                };
-            }
+        let Parsed {
+            mut obj,
+            mut model,
+            facts,
+        } = match Self::parse(&req) {
+            Ok(p) => p,
+            Err(out) => return out,
         };
-        if !obj.is_object() {
-            return PickAndRecordOutcome::BadRequest {
-                reason: "body is not a valid OpenAI ChatCompletionRequest: expected a JSON object"
-                    .to_string(),
-                model: String::new(),
-            };
-        }
-
-        // The body is the only source for `model`.
-        let body_model = obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
-        if body_model.is_empty() {
-            return PickAndRecordOutcome::BadRequest {
-                reason: "request body has an empty or absent `model`".to_string(),
-                model: String::new(),
-            };
-        }
-        let mut model = body_model.to_string();
+        let BodyFacts {
+            streaming,
+            max_tokens,
+            classifier_text,
+        } = facts;
 
         // 1a. "auto" pseudo-model: choose a concrete model, then route
         //     normally. `force_model` drives the body rewrite in step 1c. With
@@ -174,12 +174,6 @@ impl KinferenceService {
         //     /render and returned; otherwise `wire_body` is empty.
         let mutated =
             crate::router::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
-        // Whether the first-byte report will be a real TTFT, for
-        // `Observations::finalize`. Uses the same coercion as the body rewrite;
-        // see [`crate::router::pick_body::stream_flag`].
-        let streaming = crate::router::pick_body::stream_flag(&obj);
-        // For `maxTokens` predicates and context-window fitting.
-        let parsed_max_tokens = obj.get("max_tokens").and_then(serde_json::Value::as_i64);
         let outbound = if mutated {
             serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
         } else {
@@ -217,14 +211,6 @@ impl KinferenceService {
             tool_choice,
             add_generation_prompt,
         };
-        // Captured before scoring consumes `messages`, falling back to the
-        // completions-API `prompt`.
-        let classifier_text =
-            kinference_policy::classify::last_user_text(&messages).or_else(|| {
-                obj.get("prompt")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            });
         // Scoring consumes these, but a second pool or a policy may need them
         // again; only clone in that case.
         let policy_active = req.pool_ref.is_some() && self.policy.is_some();
@@ -370,7 +356,7 @@ impl KinferenceService {
                         .first()
                         .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
                 }),
-                max_tokens: parsed_max_tokens,
+                max_tokens,
                 qos: Some(req.qos.as_label().to_string()),
                 tenant: req.identity.tenant.clone(),
                 // See `kinference_policy::classify`.
@@ -827,6 +813,61 @@ impl KinferenceService {
                 model,
             },
         }
+    }
+
+    /// Step 1. `Err` is a `BadRequest`: not JSON, not an object, or no
+    /// `model`.
+    fn parse(req: &PickRequest<'_>) -> Result<Parsed, PickAndRecordOutcome> {
+        // A JSON tree, rewritten in place later (see `crate::router::pick_body`).
+        // Not a typed struct, which would drop unknown fields.
+        let obj: serde_json::Value = match serde_json::from_slice(req.body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(PickAndRecordOutcome::BadRequest {
+                    reason: format!("body is not a valid OpenAI ChatCompletionRequest: {e}"),
+                    model: String::new(),
+                });
+            }
+        };
+        if !obj.is_object() {
+            return Err(PickAndRecordOutcome::BadRequest {
+                reason: "body is not a valid OpenAI ChatCompletionRequest: expected a JSON object"
+                    .to_string(),
+                model: String::new(),
+            });
+        }
+
+        // The body is the only source for `model`.
+        let model = obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        if model.is_empty() {
+            return Err(PickAndRecordOutcome::BadRequest {
+                reason: "request body has an empty or absent `model`".to_string(),
+                model: String::new(),
+            });
+        }
+        let messages = obj
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let facts = BodyFacts {
+            // Whether the first-byte report will be a real TTFT, for
+            // `Observations::finalize`. The same coercion as the body rewrite;
+            // see [`crate::router::pick_body::stream_flag`].
+            streaming: crate::router::pick_body::stream_flag(&obj),
+            // For `maxTokens` predicates and context-window fitting.
+            max_tokens: obj.get("max_tokens").and_then(serde_json::Value::as_i64),
+            classifier_text: kinference_policy::classify::last_user_text(messages).or_else(|| {
+                obj.get("prompt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            }),
+        };
+        Ok(Parsed {
+            model: model.to_string(),
+            facts,
+            obj,
+        })
     }
 
     /// Release everything held for `response_id` because the request will never
