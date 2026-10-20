@@ -888,7 +888,7 @@ fn orphaned_reports_are_counted_directly() {
 /// An orphan is labelled `unknown`, not folded into `interactive`.
 #[test]
 fn unknown_qos_is_its_own_label_value() {
-    use crate::router::service::Qos;
+    use crate::router::observations::Qos;
     assert_eq!(Qos::Unknown.as_label(), "unknown");
     // The four are distinct: nothing silently aliases onto another class.
     let labels =
@@ -914,7 +914,7 @@ fn unknown_qos_is_its_own_label_value() {
 /// Policy matches on QoS, so declassifying there would change routing.
 #[test]
 fn from_proto_never_yields_unknown() {
-    use crate::router::service::Qos;
+    use crate::router::observations::Qos;
     for wire in [-1i32, 0, 1, 2, 3, 99] {
         assert_ne!(
             Qos::from_proto(wire).as_label(),

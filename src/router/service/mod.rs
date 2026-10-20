@@ -15,7 +15,7 @@ use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::AUTO_MODEL;
 
 use crate::router::observations::{
-    ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
+    ObservationSink, PendingObservations, Qos, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
 use crate::router::tokenizer::TokenizeInput;
@@ -23,46 +23,6 @@ use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
-
-/// Quality-of-service class for a request, mapped from the proto
-/// `PickRequest.QosClass`. Used as the `qos` label on `/metrics` series.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Qos {
-    /// Latency-sensitive / interactive (the proto zero value / default).
-    Interactive,
-    /// Throughput-oriented; tolerant of higher TTFT.
-    Batch,
-    /// Lowest priority; may be deferred under load.
-    Deferrable,
-    /// The class could not be determined, so none is asserted.
-    ///
-    /// Only on the terminal-report path, when `report_final_token` gets a
-    /// `response_id` it never issued or whose labels expired. Never from
-    /// [`Qos::from_proto`], since policy matches on QoS at pick time.
-    Unknown,
-}
-
-impl Qos {
-    /// Map the proto `QosClass` i32 (INTERACTIVE=0, BATCH=1, DEFERRABLE=2).
-    /// Unknown values fall back to `Interactive` (the proto zero value).
-    pub(crate) fn from_proto(v: i32) -> Self {
-        match v {
-            1 => Qos::Batch,
-            2 => Qos::Deferrable,
-            _ => Qos::Interactive,
-        }
-    }
-
-    /// Stable lowercase value for the Prometheus `qos=…` label.
-    pub(crate) fn as_label(self) -> &'static str {
-        match self {
-            Qos::Interactive => "interactive",
-            Qos::Batch => "batch",
-            Qos::Deferrable => "deferrable",
-            Qos::Unknown => "unknown",
-        }
-    }
-}
 
 /// The scores from `score_workers`, held in `ScoreOutcome`.
 #[derive(Debug, Clone)]

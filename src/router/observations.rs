@@ -20,8 +20,47 @@ use dashmap::DashMap;
 
 use crate::router::picker::WaitPrediction;
 use crate::router::picker::WorkerScore;
-use crate::router::service::Qos;
 use kinference_fleet::profile::{PickerConfig, PredictorConfig};
+
+/// Quality-of-service class for a request, mapped from the proto
+/// `PickRequest.QosClass`. Used as the `qos` label on `/metrics` series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Qos {
+    /// Latency-sensitive / interactive (the proto zero value / default).
+    Interactive,
+    /// Throughput-oriented; tolerant of higher TTFT.
+    Batch,
+    /// Lowest priority; may be deferred under load.
+    Deferrable,
+    /// The class could not be determined, so none is asserted.
+    ///
+    /// Only on the terminal-report path, when `report_final_token` gets a
+    /// `response_id` it never issued or whose labels expired. Never from
+    /// [`Qos::from_proto`], since policy matches on QoS at pick time.
+    Unknown,
+}
+
+impl Qos {
+    /// Map the proto `QosClass` i32 (INTERACTIVE=0, BATCH=1, DEFERRABLE=2).
+    /// Unknown values fall back to `Interactive` (the proto zero value).
+    pub(crate) fn from_proto(v: i32) -> Self {
+        match v {
+            1 => Qos::Batch,
+            2 => Qos::Deferrable,
+            _ => Qos::Interactive,
+        }
+    }
+
+    /// Stable lowercase value for the Prometheus `qos=…` label.
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Qos::Interactive => "interactive",
+            Qos::Batch => "batch",
+            Qos::Deferrable => "deferrable",
+            Qos::Unknown => "unknown",
+        }
+    }
+}
 
 /// The per-pool state a completed pick must release: decrement the endpoint's
 /// shadow count, and forget its in-flight prefix.

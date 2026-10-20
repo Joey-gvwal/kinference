@@ -57,12 +57,9 @@ Imports point down, never up or sideways:
   router.
 - The operator surface imports all of the above.
 
-Today the tree breaks this rule in two places:
-
-- The router imports the controller's policy store to read the snapshot.
-  #49 moves the snapshot holder into `kinference-policy`.
-- One pair inside the router imports each other: `service` and
-  `observations` (#45).
+Today the tree breaks this rule in one place: the router imports the
+controller's policy store to read the snapshot. #49 moves the snapshot
+holder into `kinference-policy`.
 
 ## Module map
 

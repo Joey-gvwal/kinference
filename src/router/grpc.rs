@@ -19,7 +19,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::router::metrics::PickOutcome;
-use crate::router::service::{KinferenceService, PickAndRecordOutcome, Qos};
+use crate::router::observations::Qos;
+use crate::router::service::{KinferenceService, PickAndRecordOutcome};
 
 use crate::router::proto;
 use crate::router::proto::picker_server::Picker;
