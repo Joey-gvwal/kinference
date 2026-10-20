@@ -28,6 +28,11 @@ reqwest = { version = "0.12", default-features = false }
 dashmap = "6"
 prometheus-parse = "0.2"
 prometheus = { version = "0.13", default-features = false }
+tonic = "0.12"
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+axum = "0.7"
+tempfile = "3"
 
 [workspace.lints.clippy]
 # Service-facing functions return `tonic::Status` (and `(Status, RejectReason)`)
@@ -47,7 +52,7 @@ license.workspace = true
 kinference-policy.workspace = true
 kinference-fleet.workspace = true
 dynamo-kv-router.workspace = true
-tonic = "0.12"
+tonic.workspace = true
 prost = "0.13"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
@@ -68,7 +73,7 @@ dashmap.workspace = true
 # The exposition side: the typed registry and counters behind our own
 # /metrics endpoint. The scrape side, `prometheus-parse`, is the fleet's.
 prometheus.workspace = true
-axum = "0.7"
+axum.workspace = true
 # K8s discovery and the kinference.buoyant.io CRD
 # watch/status writer. Two client-construction policies live in the tree
 # deliberately: `Config::incluster_env()` in `controller::discovery` (kubeconfig
@@ -77,7 +82,7 @@ axum = "0.7"
 # testable against a local cluster.
 kube = { workspace = true, features = ["client", "runtime", "rustls-tls"] }
 k8s-openapi.workspace = true
-futures = "0.3"
+futures.workspace = true
 # Scout-mode in-process tokenization. `http` feature enables
 # `Tokenizer::from_pretrained` Hub fetch; `onig` provides the regex
 # pre-tokenizer most modern models need. Skip default features to
@@ -103,7 +108,7 @@ minijinja-contrib = { version = "2.20", features = ["pycompat"] }
 # the system message's date line). Already transitively pulled in by
 # `k8s-openapi` so this adds nothing to compile time. Default features
 # (clock, std) give us `chrono::Utc::now()` + `.format(strftime_str)`.
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono.workspace = true
 getrandom.workspace = true
 
 [lints]
@@ -120,7 +125,7 @@ tower = { version = "0.5", features = ["util"] }
 # Scoped temp directories for tests that need to lay out a mounted
 # tokenizer directory on disk (Gemma 3/4 sibling-file chat template
 # fallback).
-tempfile = "3"
+tempfile.workspace = true
 
 [build-dependencies]
 tonic-build = "0.12"
