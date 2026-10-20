@@ -644,17 +644,6 @@ pub struct RequestPredicate {
     /// rather than failing deserialization of the whole policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<RawPredicateValue>,
-    /// Classifier output, as a set of opaque tags. A scalar means contains, an
-    /// array means intersects, `{containsAll: [...]}` means all of them, and
-    /// `{not: t}` means `t` is absent.
-    ///
-    /// The tag's prefix selects which classifier runs, so a rule referencing
-    /// `pii-*` pays the PII classifier's latency.
-    ///
-    /// The emittable tags are listed in [`super::classify::CLASSIFIERS`];
-    /// `compile` warns on a tag none of them produces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag: Option<RawPredicateValue>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]

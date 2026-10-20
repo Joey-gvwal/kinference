@@ -26,7 +26,6 @@ fn all_lists_each_code_once() {
             WarningCode::InvalidTerm
             | WarningCode::EmptyPredicate
             | WarningCode::ShadowedRule
-            | WarningCode::UnemittableTag
             | WarningCode::ConsiderModelChoice
             | WarningCode::PartialWeights
             | WarningCode::DuplicateName
@@ -46,7 +45,7 @@ fn all_lists_each_code_once() {
             | WarningCode::UnknownModel => {}
         }
     }
-    assert_eq!(seen.len(), 21, "update this count with the match above");
+    assert_eq!(seen.len(), 20, "update this count with the match above");
 }
 
 #[test]

@@ -29,7 +29,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use kinference_policy::PoolId;
-use kinference_policy::classify;
 use kinference_policy::crd::{OnEmpty, Unmatched};
 use kinference_policy::engine::{Candidate, CandidateTarget, ObjectKey};
 use kinference_policy::explain::{self, Explanation, RuleStep};
@@ -50,7 +49,6 @@ use kinference_router::picker::{self, WorkerScore};
 pub(super) const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_CANDIDATES: usize = 256;
 const MAX_MODELS: usize = 32;
-const MAX_TAGS: usize = 64;
 const MAX_RUNS: u32 = 500;
 /// Bounds token counts so the block arithmetic in [`predict`] can't overflow.
 const MAX_TOKENS: i64 = 10_000_000;
@@ -496,7 +494,7 @@ fn policy_ref_json(pool: &ResolvedPool) -> Value {
 
 /// `GET /api/policy/context`: everything a caller needs to write a simulation:
 /// every policy with its findings, every pool with its destinations and live
-/// candidates, and the closed vocabularies (`qos`, `tags`).
+/// candidates, and the closed `qos` vocabulary.
 pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
     let snap = match snapshot_or_reason(&st) {
         Ok(s) => s,
@@ -530,7 +528,6 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
                     // Entries in `matches`, not requests matched. Zero means
                     // a catch-all.
                     "matchEntries": r.matches.len(),
-                    "requiresClassifiers": r.requires_classifiers,
                     "onEmpty": on_empty_str(r.route.on_empty),
                 })).collect::<Vec<_>>(),
                 "nondeterminism": explain::nondeterminism(&p.policy),
@@ -556,19 +553,11 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
         })
         .collect();
 
-    // From the classifier registry, so the list matches what can be emitted.
-    let mut tags: Vec<&str> = classify::CLASSIFIERS
-        .iter()
-        .flat_map(|c| c.emits.iter().copied())
-        .collect();
-    tags.sort_unstable();
-
     Json(json!({
         "state": "ok",
         "policies": policies,
         "pools": pools,
         "qos": QOS_VALUES,
-        "tags": tags,
     }))
     .into_response()
 }
@@ -643,8 +632,6 @@ pub(super) struct SimRequest {
     #[serde(default)]
     qos: Option<String>,
     #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
     tenant: String,
     #[serde(default)]
     input_tokens: Option<i64>,
@@ -684,12 +671,6 @@ impl SimRequest {
             return Err(ApiError::invalid(
                 "model",
                 format!("at most {MAX_MODELS} names"),
-            ));
-        }
-        if self.tags.len() > MAX_TAGS {
-            return Err(ApiError::invalid(
-                "tags",
-                format!("at most {MAX_TAGS} tags"),
             ));
         }
         if self.candidates.len() > MAX_CANDIDATES {
@@ -1188,7 +1169,6 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
         max_tokens: req.max_tokens,
         tenant: req.tenant.clone(),
         qos: req.qos.clone(),
-        tag: req.tags.clone(),
     };
 
     // `evaluate` never dereferences the pool id. A fixed placeholder, since

@@ -100,10 +100,10 @@ kind: InferencePolicy
 metadata: {name: policy-1, namespace: default}
 spec:
   rules:
-  - name: simple-goes-to-gemma
+  - name: batch-goes-to-gemma
     matches:
     - model: qwen-2.5
-      tag: complexity-low
+      qos: [batch]
     route:
       consider:
       - models: {names: [gemma-4]}
@@ -316,10 +316,10 @@ kind: InferencePolicy
 metadata: {name: policy-2, namespace: default}
 spec:
   rules:
-  - name: simple-can-go-to-gemma-if-faster
+  - name: batch-can-go-to-gemma-if-faster
     matches:
     - model: qwen-2.5
-      tag: complexity-low
+      qos: [batch]
     route:
       consider:
       - models: {names: [gemma-4, qwen-2.5]}
@@ -359,7 +359,7 @@ kind: InferencePolicy
 metadata: {name: policy-4, namespace: default}
 spec:
   rules:
-  - name: local-first-with-provider-no-pii
+  - name: local-first-with-provider
     matches:
       - tenant: ""
     route:
@@ -368,9 +368,6 @@ spec:
         drop:
           backend:       {type: Local}
           queuedPrompts: {greaterThan: 4}
-      - name: pii-never-leaves-cluster
-        if:   { tag: [pii-confirmed, pii-unknown] }
-        drop: { backend: {type: Provider} }
       select:
       - {type: Local,    minimize: PredictedTTFT}
       - {type: Provider, order: [databricks]}

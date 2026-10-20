@@ -29,7 +29,6 @@
 //! - `predicate`: the predicate grammar, compiled to a typed AST once per
 //!   policy revision.
 //! - `compile`: `InferencePolicy` to `CompiledPolicy`, collecting warnings.
-//! - `classify`: the classifier registry and the tags each request carries.
 //! - `engine`: candidate generation, exclusion, selection.
 //! - `explain`: a rendered trace of what `engine` decided and why.
 //! - `resolve`: the CRDs to the resolved snapshot, as a pure function.
@@ -43,7 +42,6 @@
 //!   `kinfctl check`.
 
 pub mod check;
-pub mod classify;
 pub mod compile;
 pub mod crd;
 pub mod engine;
