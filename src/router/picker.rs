@@ -379,6 +379,8 @@ pub fn compute_queue_cost(
 /// cache-replication override replaced the normal pick (see
 /// [`cache_replication_override`]); recorded in the CSV.
 pub struct PickResult<'a> {
+    /// The position of `worker` in the `scores` the pick ran over.
+    pub index: usize,
     pub worker: &'a WorkerScore,
     pub replication_fired: bool,
 }
@@ -492,6 +494,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
     let final_idx = cache_replication_override(scores, picker, kv_blocks, chosen_idx, &scored);
 
     Some(PickResult {
+        index: final_idx,
         worker: &scores[final_idx],
         replication_fired: final_idx != chosen_idx,
     })

@@ -794,9 +794,10 @@ impl KinferenceService {
 
             // The policy already chose, in `select`.
             let forced_pick = forced_endpoint.as_deref().and_then(|ep| {
-                let found = scores.iter().find(|s| s.endpoint == ep).map(|w| {
+                let found = scores.iter().position(|s| s.endpoint == ep).map(|index| {
                     crate::router::picker::PickResult {
-                        worker: w,
+                        index,
+                        worker: &scores[index],
                         replication_fired: false,
                     }
                 });
@@ -837,6 +838,7 @@ impl KinferenceService {
                 },
             };
             let chosen = pick_result.worker;
+            let chosen_idx = pick_result.index;
             let replication_fired = pick_result.replication_fired;
 
             if tracing::enabled!(tracing::Level::DEBUG) {
@@ -859,10 +861,6 @@ impl KinferenceService {
                 "pick"
             );
 
-            let chosen_idx = scores
-                .iter()
-                .position(|s| s.endpoint == chosen.endpoint)
-                .expect("chosen worker must be in scores");
             let chosen_inflight = inflight_per_worker[chosen_idx];
             let chosen_kv_blocks = kv_blocks_per_worker[chosen_idx];
             let chosen_workload: &[kinference_fleet::inflight::InflightSummary] =
