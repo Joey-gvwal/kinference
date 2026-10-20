@@ -406,7 +406,7 @@ fn primary(pool: &Arc<Pool>, model: &str, workers: &[(&str, u32)]) -> ScoredGrou
 
 async fn select(
     svc: &KinferenceService,
-    store: &Arc<crate::controller::policy::store::PolicyStore>,
+    store: &Arc<kinference_policy::store::PolicyStore>,
     start: ScoredGroup,
     model: &str,
 ) -> Result<PolicySelection, PickAndRecordOutcome> {

@@ -12,8 +12,8 @@ code goes. Change it in the same pull request as any move.
 
 - `kinference`, this crate. The server. The router and the controller
   live here as directories today.
-- `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types and
-  pure policy logic. No client and no runtime.
+- `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types, pure
+  policy logic and the policy snapshot holder. No client and no runtime.
 - `kinference-fleet`, in `crates/kinference-fleet`. Which workers exist
   and what state they are in. Imports `kinference-policy` only; no `kube`,
   no `anyhow`.
@@ -57,10 +57,6 @@ Imports point down, never up or sideways:
   router.
 - The operator surface imports all of the above.
 
-Today the tree breaks this rule in one place: the router imports the
-controller's policy store to read the snapshot. #49 moves the snapshot
-holder into `kinference-policy`.
-
 ## Module map
 
 Rows name a module by its group; in code the fleet's are under
@@ -97,7 +93,7 @@ Rows name a module by its group; in code the fleet's are under
 | `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
-| `controller::policy` | the CRD watch and snapshot, the status writer, the binding writer, the worker-set reconcile |
+| `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile |
 | `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |

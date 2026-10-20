@@ -33,9 +33,9 @@ use kube::api::{Patch, PatchParams};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::store::PolicyStore;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
+use kinference_policy::store::PolicyStore;
 
 /// The controller identity written into `status.parents[].controllerName`.
 pub const CONTROLLER_NAME: &str = "kinference.buoyant.io/router";

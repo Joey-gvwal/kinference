@@ -280,7 +280,7 @@ pub struct KinferenceService {
     pub(crate) observations: Observations,
     /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
-    pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
+    pub(crate) policy: Option<Arc<kinference_policy::store::PolicyStore>>,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<crate::router::metrics::RouterMetrics>,
 }
@@ -291,7 +291,7 @@ impl KinferenceService {
         tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
         bodies: crate::router::body_store::Bodies,
         observations: Observations,
-        policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
+        policy: Option<Arc<kinference_policy::store::PolicyStore>>,
         prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
         Self {

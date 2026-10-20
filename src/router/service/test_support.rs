@@ -10,7 +10,6 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::controller::policy::store::PolicyStore;
 pub(crate) use crate::router::tokenizer::test_support::Render;
 use crate::router::tokenizer::test_support::{FakeRender, worker};
 use kinference_fleet::pool::{PoolMap, PoolRegistry, test_spec};
@@ -18,6 +17,7 @@ use kinference_policy::crd::{
     InferencePolicy, InferencePool, InferenceProvider, InferenceWorkerSet,
 };
 use kinference_policy::resolve::PolicyIndex;
+use kinference_policy::store::PolicyStore;
 use kinference_policy::{PoolId, PoolKey, PoolRef, RequestIdentity};
 
 /// One worker set: a live pool with one worker per address.

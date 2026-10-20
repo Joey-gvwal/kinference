@@ -998,7 +998,7 @@ impl KinferenceService {
         req: &PickRequest<'a>,
     ) -> Option<(
         &'a kinference_policy::PoolRef,
-        &'a Arc<crate::controller::policy::store::PolicyStore>,
+        &'a Arc<kinference_policy::store::PolicyStore>,
     )> {
         Some((req.pool_ref?, self.policy.as_ref()?))
     }

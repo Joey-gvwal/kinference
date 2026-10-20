@@ -269,7 +269,10 @@ pub async fn run() -> Result<()> {
     // One `PolicyStore` for the process, made before anything reads it.
     // `None` when policy is off, which `/readyz` treats as nothing to wait
     // for.
-    let policy_store_cell = cfg.policy.enabled.then(policy::store::PolicyStore::new);
+    let policy_store_cell = cfg
+        .policy
+        .enabled
+        .then(kinference_policy::store::PolicyStore::new);
 
     // Admin listener, when configured.
     if let Some(dash_addr) = cfg.admin_listen {
