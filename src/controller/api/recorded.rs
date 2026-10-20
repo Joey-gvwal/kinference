@@ -22,19 +22,23 @@ fn kind<K: Object>() -> String {
 pub enum Write {
     Create(Key),
     Replace(Key),
+    Apply { key: Key, manager: String },
+    Delete(Key),
     PatchStatus { key: Key, status: serde_json::Value },
 }
 
 /// Reads answer from the recording; writes change it and are kept in
-/// order. A missing object is a 404; a `create` of an existing object or a
-/// `replace` with a stale `resourceVersion` is a 409. Every write stamps a
-/// fresh `resourceVersion`.
+/// order. A missing object, or a kind marked `without`, is a 404; a
+/// `create` of an existing object or a `replace` with a stale
+/// `resourceVersion` is a 409. Every write stamps a fresh `resourceVersion`.
 #[derive(Clone, Default)]
 pub struct Recorded(Arc<Mutex<Inner>>);
 
 #[derive(Default)]
 struct Inner {
     objects: BTreeMap<Key, serde_json::Value>,
+    /// Kinds whose CRD is not installed.
+    absent: HashSet<String>,
     /// Objects whose writes answer 500.
     failing: HashSet<Key>,
     writes: Vec<Write>,
@@ -52,6 +56,12 @@ impl Recorded {
                 inner.store(key::<K>(&namespace, &name), encode(&object));
             }
         }
+        self
+    }
+
+    /// `K`'s CRD is not installed: its list answers 404.
+    pub fn without<K: Object>(self) -> Self {
+        self.lock().absent.insert(kind::<K>());
         self
     }
 
@@ -126,7 +136,28 @@ fn not_found(key: &Key) -> kube::Error {
     api_error(404, format!("{} {}/{} not found", key.0, key.1, key.2))
 }
 
+fn no_such_kind(kind: &str) -> kube::Error {
+    api_error(
+        404,
+        format!("the server could not find the resource {kind}"),
+    )
+}
+
 impl ApiServer for Recorded {
+    async fn list<K: Object>(&self, namespace: Option<&str>) -> Result<Vec<K>, kube::Error> {
+        let kind = kind::<K>();
+        let inner = self.lock();
+        if inner.absent.contains(&kind) {
+            return Err(no_such_kind(&kind));
+        }
+        Ok(inner
+            .objects
+            .iter()
+            .filter(|(k, _)| k.0 == kind && namespace.is_none_or(|ns| k.1 == ns))
+            .map(|(_, v)| decode(v.clone()))
+            .collect())
+    }
+
     async fn get<K: Object>(&self, namespace: &str, name: &str) -> Result<K, kube::Error> {
         let key = key::<K>(namespace, name);
         self.lock()
@@ -177,6 +208,38 @@ impl ApiServer for Recorded {
         }
         inner.writes.push(Write::Replace(key.clone()));
         Ok(decode(inner.store(key, value)))
+    }
+
+    async fn apply<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        manager: &str,
+        object: &K,
+    ) -> Result<(), kube::Error> {
+        let key = key::<K>(namespace, name);
+        let mut inner = self.lock();
+        inner.check_failing(&key)?;
+        let mut value = encode(object);
+        value["metadata"]["name"] = serde_json::Value::String(name.to_string());
+        value["metadata"]["namespace"] = serde_json::Value::String(namespace.to_string());
+        inner.writes.push(Write::Apply {
+            key: key.clone(),
+            manager: manager.to_string(),
+        });
+        inner.store(key, value);
+        Ok(())
+    }
+
+    async fn delete<K: Object>(&self, namespace: &str, name: &str) -> Result<(), kube::Error> {
+        let key = key::<K>(namespace, name);
+        let mut inner = self.lock();
+        inner.check_failing(&key)?;
+        if inner.objects.remove(&key).is_none() {
+            return Err(not_found(&key));
+        }
+        inner.writes.push(Write::Delete(key));
+        Ok(())
     }
 
     /// Replaces `status` wholesale, which is what a merge patch of a

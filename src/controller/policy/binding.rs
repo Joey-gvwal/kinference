@@ -50,11 +50,12 @@ use kinference_policy::resolve::{
     GATEWAY_BACKEND_GROUP, GATEWAY_BACKEND_KIND, POLICY_GROUP, ResolvedDestination, ResolvedPool,
 };
 use kinference_policy::services::{ServiceIndex, UnresolvedPort};
-use kube::api::{DeleteParams, ListParams, ObjectMeta, Patch, PatchParams};
-use kube::{Api, Resource, ResourceExt};
+use kube::api::ObjectMeta;
+use kube::{Resource, ResourceExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::controller::api::ApiServer;
 use kinference_policy::store::PolicyStore;
 
 /// Server-side-apply field manager. A field this writer stops setting is
@@ -221,8 +222,8 @@ fn in_sync(current: &BackendBinding, desired: &BackendBinding) -> bool {
 }
 
 /// Creates, updates and prunes the `BackendBinding`s, on a tick.
-pub struct BindingWriter {
-    client: kube::Client,
+pub struct BindingWriter<A: ApiServer> {
+    api: A,
     /// Must match `PolicyWatcher`'s scope, or pruning would judge bindings
     /// against a snapshot that never contained their pools. `None` is every
     /// namespace.
@@ -238,16 +239,16 @@ pub struct BindingWriter {
     warned: Mutex<HashSet<String>>,
 }
 
-impl BindingWriter {
+impl<A: ApiServer> BindingWriter<A> {
     pub fn new(
-        client: kube::Client,
+        api: A,
         namespace: Option<String>,
         store: Arc<PolicyStore>,
         extension: Option<String>,
         leader: watch::Receiver<bool>,
     ) -> Self {
         Self {
-            client,
+            api,
             namespace,
             store,
             extension,
@@ -298,13 +299,6 @@ impl BindingWriter {
         }
     }
 
-    fn api(&self) -> Api<BackendBinding> {
-        match self.namespace.as_deref() {
-            Some(ns) => Api::namespaced(self.client.clone(), ns),
-            None => Api::all(self.client.clone()),
-        }
-    }
-
     async fn reconcile_once(&self) -> anyhow::Result<()> {
         let snapshot = self.store.snapshot();
         // Before the first complete list every pool looks deleted, and pruning
@@ -346,8 +340,12 @@ impl BindingWriter {
             })
             .collect();
 
-        let existing = match self.api().list(&ListParams::default()).await {
-            Ok(list) => list.items,
+        let existing = match self
+            .api
+            .list::<BackendBinding>(self.namespace.as_deref())
+            .await
+        {
+            Ok(list) => list,
             Err(kube::Error::Api(e)) if e.code == 404 => {
                 // The CRD is not installed. Expected without this gateway, but
                 // worth a warning.
@@ -395,18 +393,10 @@ impl BindingWriter {
                     continue;
                 }
             }
-            let api: Api<BackendBinding> = Api::namespaced(self.client.clone(), &key.0);
-            // Server-side apply covers both create and update. `force` takes
-            // back fields another manager grabbed; otherwise the apply would
-            // conflict on every tick and never converge.
-            match api
-                .patch(
-                    &key.1,
-                    &PatchParams::apply(FIELD_MANAGER).force(),
-                    &Patch::Apply(want),
-                )
-                .await
-            {
+            // Server-side apply covers both create and update. `apply` forces,
+            // taking back fields another manager grabbed; otherwise the apply
+            // would conflict on every tick and never converge.
+            match self.api.apply(&key.0, &key.1, FIELD_MANAGER, want).await {
                 Ok(_) => {
                     applied += 1;
                     tracing::debug!(namespace = %key.0, name = %key.1, "backend binding: applied");
@@ -437,8 +427,7 @@ impl BindingWriter {
             if binding.meta().deletion_timestamp.is_some() {
                 continue;
             }
-            let api: Api<BackendBinding> = Api::namespaced(self.client.clone(), &ns);
-            match api.delete(&name, &DeleteParams::default()).await {
+            match self.api.delete::<BackendBinding>(&ns, &name).await {
                 Ok(_) => tracing::info!(
                     namespace = %ns,
                     name = %name,
@@ -478,23 +467,20 @@ fn rejected_reason(binding: &BackendBinding) -> Option<String> {
     (accepted.status == "False").then(|| format!("{}: {}", accepted.reason, accepted.message))
 }
 
-/// Build the writer with its own client and spawn it.
+/// Build the writer over `api` and spawn it.
 ///
 /// `leader` gates writing; with election disabled, pass a channel set to
 /// `true`.
-pub async fn spawn(
+pub fn spawn<A: ApiServer>(
+    api: A,
     namespace: Option<String>,
     store: Arc<PolicyStore>,
     extension: Option<String>,
     leader: watch::Receiver<bool>,
     cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    // Honors kubeconfig, like `PolicyWatcher`.
-    let cfg = kube::Config::infer().await?;
-    let client = kube::Client::try_from(cfg)?;
-    let writer = BindingWriter::new(client, namespace, store, extension, leader);
+) {
+    let writer = BindingWriter::new(api, namespace, store, extension, leader);
     tokio::spawn(async move { writer.run(cancel).await });
-    Ok(())
 }
 
 #[cfg(test)]

@@ -402,13 +402,13 @@ pub async fn run() -> Result<()> {
         // `InferencePool`. Leader-gated like status.
         if cfg.policy.backend_bindings {
             policy::binding::spawn(
+                KubeApi::infer().await?,
                 cfg.policy.namespace.clone(),
                 store.clone(),
                 cfg.policy.binding_extension().map(str::to_string),
                 leader_rx,
                 cancel.clone(),
-            )
-            .await?;
+            );
         }
     }
 

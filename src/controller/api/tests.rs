@@ -76,3 +76,15 @@ async fn replace_with_a_stale_resource_version_conflicts() {
         ]
     );
 }
+
+#[tokio::test]
+async fn an_absent_kind_lists_as_404() {
+    let api = Recorded::default().with([lease("l")]);
+    let listed: Vec<Lease> = api.list(Some("infra")).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    let elsewhere: Vec<Lease> = api.list(Some("other")).await.unwrap();
+    assert!(elsewhere.is_empty());
+
+    let api = api.without::<Lease>();
+    assert_eq!(code(api.list::<Lease>(None).await), Some(404));
+}

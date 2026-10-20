@@ -5,7 +5,7 @@ use std::future::Future;
 
 use anyhow::Context as _;
 use kube::Api;
-use kube::api::{Patch, PatchParams, PostParams};
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::core::NamespaceResourceScope;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -35,9 +35,15 @@ impl<K> Object for K where
 {
 }
 
-/// What the control plane asks of the API server. Errors are `kube::Error`:
-/// the loops read a 404 as "absent" and a 409 as "lost the race".
+/// What the control plane asks of the API server. `namespace: None` is
+/// every namespace. Errors are `kube::Error`: the loops read a 404 as
+/// "absent" and a 409 as "lost the race".
 pub trait ApiServer: Clone + Send + Sync + 'static {
+    fn list<K: Object>(
+        &self,
+        namespace: Option<&str>,
+    ) -> impl Future<Output = Result<Vec<K>, kube::Error>> + Send;
+
     fn get<K: Object>(
         &self,
         namespace: &str,
@@ -57,6 +63,21 @@ pub trait ApiServer: Clone + Send + Sync + 'static {
         name: &str,
         object: &K,
     ) -> impl Future<Output = Result<K, kube::Error>> + Send;
+
+    /// Server-side apply as `manager`, taking back conflicting fields.
+    fn apply<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        manager: &str,
+        object: &K,
+    ) -> impl Future<Output = Result<(), kube::Error>> + Send;
+
+    fn delete<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<(), kube::Error>> + Send;
 
     /// Merge-patch `{"status": status}` on the status subresource.
     fn patch_status<K: Object>(
@@ -91,9 +112,24 @@ impl KubeApi {
     fn namespaced<K: Object>(&self, namespace: &str) -> Api<K> {
         Api::namespaced(self.client.clone(), namespace)
     }
+
+    fn scoped<K: Object>(&self, namespace: Option<&str>) -> Api<K> {
+        match namespace {
+            Some(ns) => Api::namespaced(self.client.clone(), ns),
+            None => Api::all(self.client.clone()),
+        }
+    }
 }
 
 impl ApiServer for KubeApi {
+    async fn list<K: Object>(&self, namespace: Option<&str>) -> Result<Vec<K>, kube::Error> {
+        let list = self
+            .scoped::<K>(namespace)
+            .list(&ListParams::default())
+            .await?;
+        Ok(list.items)
+    }
+
     async fn get<K: Object>(&self, namespace: &str, name: &str) -> Result<K, kube::Error> {
         self.namespaced::<K>(namespace).get(name).await
     }
@@ -113,6 +149,30 @@ impl ApiServer for KubeApi {
         self.namespaced::<K>(namespace)
             .replace(name, &PostParams::default(), object)
             .await
+    }
+
+    async fn apply<K: Object>(
+        &self,
+        namespace: &str,
+        name: &str,
+        manager: &str,
+        object: &K,
+    ) -> Result<(), kube::Error> {
+        self.namespaced::<K>(namespace)
+            .patch(
+                name,
+                &PatchParams::apply(manager).force(),
+                &Patch::Apply(object),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete<K: Object>(&self, namespace: &str, name: &str) -> Result<(), kube::Error> {
+        self.namespaced::<K>(namespace)
+            .delete(name, &DeleteParams::default())
+            .await?;
+        Ok(())
     }
 
     async fn patch_status<K: Object>(
