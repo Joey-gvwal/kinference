@@ -56,6 +56,8 @@ tempfile = "3"
 # is unidiomatic churn at every call site, so the lint is off crate-wide rather
 # than allowed at each of the handful of signatures it flags.
 result_large_err = "allow"
+# Name module files `foo.rs`, not `foo/mod.rs`.
+mod_module_files = "warn"
 
 [package]
 name = "kinference"
