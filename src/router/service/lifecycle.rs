@@ -79,7 +79,10 @@ impl KinferenceService {
         let mut force_model: Option<String> = None;
         if model == AUTO_MODEL {
             let messages = obj.get("messages").and_then(|v| v.as_array());
-            match self.choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[])) {
+            match self
+                .scoring
+                .choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[]))
+            {
                 Some(chosen) => {
                     tracing::info!(
                         req = %req_label,
@@ -101,7 +104,7 @@ impl KinferenceService {
 
         // 1b. Resolve the pools serving this model; several are scored and
         //     ranked against each other.
-        let mut serving = self.resolve_pools(&model);
+        let mut serving = self.scoring.resolve_pools(&model);
 
         // 1b-i. Alias fallback. The model index only holds names engines
         //     report, so translate a declared alias via the named pool's worker
@@ -122,7 +125,7 @@ impl KinferenceService {
             // Drives the body rewrite in step 1c, as for `auto`.
             force_model = Some(upstream.clone());
             model = upstream;
-            serving = self.resolve_pools(&model);
+            serving = self.scoring.resolve_pools(&model);
         }
 
         // A model no local pool serves may still be served by a provider in
@@ -212,7 +215,9 @@ impl KinferenceService {
         // Skipped when nothing local serves the model.
         if let Some(first) = serving.first() {
             let (outcome, score_side) = self
+                .scoring
                 .score_workers(
+                    &*self.tokenizer,
                     first,
                     &model,
                     Input::Messages(messages),
@@ -267,7 +272,9 @@ impl KinferenceService {
                     None => (Input::Messages(msgs), Some(raw)),
                 };
                 let (outcome, side) = self
+                    .scoring
                     .score_workers(
+                        &*self.tokenizer,
                         pool,
                         &model,
                         input,

@@ -1,10 +1,10 @@
 //! `KinferenceService`: the scoring and pick state behind the gRPC handlers in
 //! `crate::router::grpc`.
 //!
-//! This module owns the service struct, `score_workers` (tokenize, query the
-//! indexer, assemble `WorkerScore` rows), and the value types passed through
-//! it. The pick lifecycle is in `lifecycle`; tokenize/render HTTP plumbing is
-//! in [`crate::router::tokenizer`].
+//! This module owns the service struct and the value types passed through
+//! it. Scoring (the pools, the model index, the scrape reads) is the
+//! `Scoring` part in `scoring`; the pick lifecycle is in `lifecycle`;
+//! tokenizing is [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ pub struct ScoreResponse {
     pub scores: Vec<WorkerScore>,
 }
 
-/// Outcome of [`KinferenceService::score_workers`].
+/// Outcome of [`Scoring::score_workers`].
 pub(crate) enum ScoreOutcome {
     Ok(ScoreResponse),
     /// No workers in the registry serve the requested model name.
@@ -273,14 +273,7 @@ pub(crate) struct ScoreSideData {
 }
 
 pub struct KinferenceService {
-    /// The pools this fleet manages. Each owns its own predictor, picker,
-    /// block size, indexer and registry. Pools come and go, and the service is
-    /// shared behind an `Arc`, so the set is swapped rather than edited.
-    pub(crate) pools: Arc<kinference_fleet::pool::PoolRegistry>,
-    /// Which pools serve each model, read on the pick hot path. Several pools
-    /// may serve one model; `pick_and_record` ranks across them.
-    pub(crate) models: Arc<ModelIndex>,
-    pub(crate) metrics: Arc<MetricsRegistry>,
+    pub(crate) scoring: Scoring,
     /// The tokenizer. The mode and render URL are per pool, on the request.
     pub(crate) tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
     /// Per-pick observation stash. Inserted by `pick_and_record`, consumed by
@@ -314,9 +307,7 @@ pub struct KinferenceService {
 impl KinferenceService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pools: Arc<kinference_fleet::pool::PoolRegistry>,
-        models: Arc<ModelIndex>,
-        metrics: Arc<MetricsRegistry>,
+        scoring: Scoring,
         tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
@@ -328,9 +319,7 @@ impl KinferenceService {
         prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
         Self {
-            pools,
-            models,
-            metrics,
+            scoring,
             tokenizer,
             pending_observations,
             request_labels,
@@ -418,7 +407,9 @@ impl KinferenceService {
         let resolved = snapshot.lookup(&pref.namespace, &pref.name)?;
         let local: Vec<&kinference_policy::resolve::ResolvedWorkerSet> =
             resolved.local_destinations().collect();
-        first_served_upstream(&local, canonical, |m| !self.resolve_pools(m).is_empty())
+        first_served_upstream(&local, canonical, |m| {
+            !self.scoring.resolve_pools(m).is_empty()
+        })
     }
 
     /// Whether any provider in the named pool declares this canonical model.
@@ -442,49 +433,10 @@ impl KinferenceService {
             .filter_map(|d| d.as_provider())
             .any(|p| !p.upstreams_for(model).is_empty())
     }
-
-    /// Every pool currently serving `model`, in stable id order.
-    ///
-    /// Empty when no pool has claimed the model yet, or every claiming pool has
-    /// since been removed (ids that resolve to nothing are dropped). The
-    /// returned handles keep their pools alive.
-    pub(crate) fn resolve_pools(&self, model: &str) -> Vec<Arc<Pool>> {
-        let ids = self.models.pools_for(model);
-        if ids.is_empty() {
-            return Vec::new();
-        }
-        let snapshot = self.pools.snapshot();
-        ids.into_iter()
-            .filter_map(|id| snapshot.get(id).cloned())
-            .collect()
-    }
-
-    /// Resolve the `"auto"` pseudo-model to a concrete model for this prompt.
-    ///
-    /// For now, uniform random among the models any pool serves; `messages` is
-    /// passed for future prompt-aware selection. `None` when no model is known
-    /// yet, which the caller treats like an unknown model.
-    pub(crate) fn choose_model_for_auto(&self, _messages: &[serde_json::Value]) -> Option<String> {
-        let models = self.models.models();
-        // Never route "auto" to itself.
-        let candidates: Vec<&String> = models.iter().filter(|m| m.as_str() != AUTO_MODEL).collect();
-        match candidates.len() {
-            0 => None,
-            1 => Some(candidates[0].clone()),
-            n => {
-                let mut buf = [0u8; 8];
-                let idx = match getrandom::getrandom(&mut buf) {
-                    Ok(()) => (u64::from_le_bytes(buf) as usize) % n,
-                    Err(_) => 0,
-                };
-                Some(candidates[idx].clone())
-            }
-        }
-    }
 }
 
 /// Project a scraped sample onto a [`WorkerScore`], for both `score_workers`
-/// and [`KinferenceService::degraded_response`].
+/// and [`Scoring::degraded_response`].
 ///
 /// The prefix-cache values are parameters because the degraded path zeroes
 /// them while still reporting real load.
@@ -703,6 +655,8 @@ mod lifecycle;
 mod policy_driver;
 mod provider_feedback;
 mod scoring;
+
+pub(crate) use scoring::Scoring;
 
 #[cfg(test)]
 pub(crate) mod test_support;

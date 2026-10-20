@@ -153,7 +153,8 @@ impl KinferenceService {
                         {
                             Some(i) => i,
                             None => {
-                                let Some(pool) = self.pools.snapshot().get(dest.pool_id).cloned()
+                                let Some(pool) =
+                                    self.scoring.pools.snapshot().get(dest.pool_id).cloned()
                                 else {
                                     continue;
                                 };
@@ -174,7 +175,9 @@ impl KinferenceService {
                                     None => (Input::Messages(msgs), Some(body)),
                                 };
                                 let (outcome, side) = self
+                                    .scoring
                                     .score_workers(
+                                        &*self.tokenizer,
                                         &pool,
                                         &upstream,
                                         input,
@@ -352,7 +355,7 @@ impl KinferenceService {
             .iter_snapshot()
             .into_iter()
             .filter_map(|(num, entry)| {
-                let info = self.metrics.models(num);
+                let info = self.scoring.scrape.models(num);
                 let window = info
                     .models
                     .iter()
@@ -371,7 +374,7 @@ impl KinferenceService {
             .iter_snapshot()
             .into_iter()
             .filter_map(|(num, entry)| {
-                let m = self.metrics.sample(num)?;
+                let m = self.scoring.scrape.sample(num)?;
                 Some((
                     entry.score_addr,
                     (m.waiting_mean as f64, m.kv_cache_usage_mean as f64),

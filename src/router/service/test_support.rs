@@ -219,9 +219,7 @@ impl ServiceBuilder {
 
         let ttl = Duration::from_secs(30);
         let svc = KinferenceService::new(
-            pool_registry,
-            models,
-            scrape,
+            Scoring::new(pool_registry, models, scrape),
             tokenizer,
             Arc::new(PendingObservations::new(ttl)),
             Arc::new(RequestLabels::new(ttl)),

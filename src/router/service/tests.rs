@@ -470,7 +470,7 @@ async fn an_unscraped_worker_has_no_saturation_signals() {
         .build()
         .await;
     // Worker 2 was scraped and is idle; worker 1 never was.
-    t.svc.metrics.record_sample_for_test(
+    t.svc.scoring.scrape.record_sample_for_test(
         2,
         kinference_fleet::scrape::MetricsSample {
             scraped_at: Some(Instant::now()),
@@ -990,7 +990,7 @@ async fn two_pools_serving_one_model_pick_the_less_loaded() {
         .build()
         .await;
     // Worker 1 was scraped with a deep queue; worker 2 reads as idle.
-    t.svc.metrics.record_sample_for_test(
+    t.svc.scoring.scrape.record_sample_for_test(
         1,
         kinference_fleet::scrape::MetricsSample {
             waiting: 64,

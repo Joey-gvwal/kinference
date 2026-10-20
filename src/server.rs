@@ -18,7 +18,7 @@ use crate::router::body_store;
 use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
-use crate::router::service::KinferenceService;
+use crate::router::service::{KinferenceService, Scoring};
 use crate::router::tokenizer;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
@@ -429,9 +429,7 @@ pub async fn run() -> Result<()> {
         ),
     };
     let service = Arc::new(KinferenceService::new(
-        pool_registry.clone(),
-        models.clone(),
-        metrics.clone(),
+        Scoring::new(pool_registry.clone(), models.clone(), metrics.clone()),
         tokenizer,
         pending_observations.clone(),
         request_labels.clone(),

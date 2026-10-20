@@ -89,7 +89,7 @@ Rows name a module by its group; in code the fleet's are under
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
-| `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
+| `router::service` | `KinferenceService` and its parts: `Scoring` (the pools, the model index and the scrape reads), the pick path, the observation lifecycle, the policy driver, provider feedback |
 | `router::tokenizer` | the `Tokenizer` trait, the request and outcome types, the `tokenize` config, and `ByMode`, which picks a backend by the pool's mode and records the tokenize metrics |
 | `router::tokenizer::compare` | `Compare`: `/render` is authoritative; the local result is compared in the background for the divergence counters |
 | `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |

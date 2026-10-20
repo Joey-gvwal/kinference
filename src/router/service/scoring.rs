@@ -1,18 +1,84 @@
 //! Scoring: turning a pool's live workers into `WorkerScore` rows.
 //!
-//! Reads the metrics registry and the KV index and projects each worker via
-//! `super::worker_score`. Makes no routing decision; `lifecycle` does.
-//! `degraded_response` is the same with the prefix-cache values zeroed.
+//! `Scoring` is the read side of a pick: which pools serve a model, and the
+//! registry each worker's load and prefix overlap are read from. It makes no
+//! routing decision; `lifecycle` does. `degraded_response` is the same with
+//! the prefix-cache values zeroed.
 
 use super::*;
 
-impl KinferenceService {
+/// The read side of a pick: which pools serve a model, and each worker's
+/// scraped load and prefix overlap.
+pub(crate) struct Scoring {
+    /// The pools this fleet manages. Each owns its own predictor, picker,
+    /// block size, indexer and registry. Pools come and go, and the service is
+    /// shared behind an `Arc`, so the set is swapped rather than edited.
+    pub(crate) pools: Arc<kinference_fleet::pool::PoolRegistry>,
+    /// Which pools serve each model, read on the pick hot path. Several pools
+    /// may serve one model; `pick_and_record` ranks across them.
+    pub(crate) models: Arc<ModelIndex>,
+    /// The fleet's scrape samples and `/v1/models` answers.
+    pub(crate) scrape: Arc<MetricsRegistry>,
+}
+
+impl Scoring {
+    pub(crate) fn new(
+        pools: Arc<kinference_fleet::pool::PoolRegistry>,
+        models: Arc<ModelIndex>,
+        scrape: Arc<MetricsRegistry>,
+    ) -> Self {
+        Self {
+            pools,
+            models,
+            scrape,
+        }
+    }
+
+    /// Every pool currently serving `model`, in stable id order.
+    ///
+    /// Empty when no pool has claimed the model yet, or every claiming pool has
+    /// since been removed (ids that resolve to nothing are dropped). The
+    /// returned handles keep their pools alive.
+    pub(crate) fn resolve_pools(&self, model: &str) -> Vec<Arc<Pool>> {
+        let ids = self.models.pools_for(model);
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let snapshot = self.pools.snapshot();
+        ids.into_iter()
+            .filter_map(|id| snapshot.get(id).cloned())
+            .collect()
+    }
+
+    /// Resolve the `"auto"` pseudo-model to a concrete model for this prompt.
+    ///
+    /// For now, uniform random among the models any pool serves; `messages` is
+    /// passed for future prompt-aware selection. `None` when no model is known
+    /// yet, which the caller treats like an unknown model.
+    pub(crate) fn choose_model_for_auto(&self, _messages: &[serde_json::Value]) -> Option<String> {
+        let models = self.models.models();
+        // Never route "auto" to itself.
+        let candidates: Vec<&String> = models.iter().filter(|m| m.as_str() != AUTO_MODEL).collect();
+        match candidates.len() {
+            0 => None,
+            1 => Some(candidates[0].clone()),
+            n => {
+                let mut buf = [0u8; 8];
+                let idx = match getrandom::getrandom(&mut buf) {
+                    Ok(()) => (u64::from_le_bytes(buf) as usize) % n,
+                    Err(_) => 0,
+                };
+                Some(candidates[idx].clone())
+            }
+        }
+    }
+
     /// Build a degraded `ScoreResponse` when tokenize is unavailable: load
     /// fields as usual, `total_blocks` and `matched_blocks` zeroed.
     pub(crate) fn degraded_response(&self, workers: &[(u64, WorkerEntry)]) -> ScoreResponse {
         let mut scores = Vec::with_capacity(workers.len());
         for (num, entry) in workers {
-            let sample = self.metrics.latest(*num);
+            let sample = self.scrape.latest(*num);
             scores.push(worker_score(entry, &sample, entry.block_size, 0, 0));
         }
         ScoreResponse { scores }
@@ -20,10 +86,12 @@ impl KinferenceService {
 
     /// Score one pool's workers for one model.
     ///
+    /// `tokenizer` is passed in, since it is the service's own part.
     /// `chat_kwargs` applies to Chat and Messages input only.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn score_workers(
         &self,
+        tokenizer: &dyn crate::router::tokenizer::Tokenizer,
         pool: &Pool,
         model: &str,
         input: Input,
@@ -91,7 +159,7 @@ impl KinferenceService {
                     raw_body: raw_body.as_deref(),
                     req_id,
                 };
-                match self.tokenizer.tokenize(tok_req).await {
+                match tokenizer.tokenize(tok_req).await {
                     crate::router::tokenizer::TokenizeOutcome::Ok(tokens) => tokens,
                     crate::router::tokenizer::TokenizeOutcome::Unavailable { reason, attempts } => {
                         tracing::error!(
@@ -167,7 +235,7 @@ impl KinferenceService {
             }
 
             for (num, entry) in &group {
-                let sample = self.metrics.latest(*num);
+                let sample = self.scrape.latest(*num);
 
                 // Raw radix-tree match; the pick path layers in expected
                 // overlap later, inside `pick_lock`.
