@@ -95,7 +95,7 @@ impl Compare {
                 self.prom.record_tokenize_compare("error");
                 tracing::warn!(
                     model,
-                    error = %e,
+                    error = &e as &dyn std::error::Error,
                     "local_tokenize failed; HTTP result returned unchanged"
                 );
             }

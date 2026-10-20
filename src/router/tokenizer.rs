@@ -16,6 +16,7 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::router::error::Error;
 use crate::router::metrics::RouterMetrics;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::PoolRegistry;
@@ -161,7 +162,7 @@ pub(crate) fn build(
     pools: Arc<PoolRegistry>,
     models: &ModelIndex,
     cancel: CancellationToken,
-) -> anyhow::Result<Arc<dyn Tokenizer>> {
+) -> Result<Arc<dyn Tokenizer>, Error> {
     let pool_max_idle_per_host = cfg.pool_max_idle_per_host.unwrap_or(16);
     let http = Arc::new(HttpRender::new(pool_max_idle_per_host, scrape)?);
     tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");

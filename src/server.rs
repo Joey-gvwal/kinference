@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
@@ -153,7 +153,7 @@ pub async fn run() -> Result<()> {
         &models,
         cancel.clone(),
     )
-    .map_err(|e| anyhow::anyhow!("failed to build the tokenizer: {e}"))?;
+    .context("failed to build the tokenizer")?;
 
     // In-cluster credentials, acquired once here so pool creation stays
     // synchronous and infallible. Required (fatal) when the config declares

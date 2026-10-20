@@ -36,7 +36,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
@@ -48,6 +47,7 @@ use super::http::HttpRender;
 use futures::future::BoxFuture;
 
 use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest};
+use crate::router::error::Error;
 use crate::router::metrics::RouterMetrics;
 use kinference_fleet::models::ModelClaim;
 use kinference_fleet::pool::{Pool, PoolRegistry};
@@ -139,11 +139,14 @@ impl LocalTokenizer {
         config: LocalTokenizeConfig,
         http: Arc<HttpRender>,
         prom: Arc<RouterMetrics>,
-    ) -> Result<Self> {
+    ) -> Result<Self, Error> {
         let hub = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .context("building reqwest client for local-tokenize Hub fetch")?;
+            .map_err(|source| Error::HttpClient {
+                what: "the local-tokenize Hub client",
+                source,
+            })?;
         Ok(Self {
             loaded: DashMap::new(),
             config,
@@ -188,7 +191,7 @@ impl LocalTokenizer {
                     if let Err(err) = this.warmup(&claim.model).await {
                         tracing::warn!(
                             model = %claim.model,
-                            error = %err,
+                            error = &err as &dyn std::error::Error,
                             "tokenizer warmup failed; first request will pay the load cost or fall \
                              back to HTTP /render"
                         );
@@ -227,7 +230,7 @@ impl LocalTokenizer {
                 if self.warn_latch.insert(model.to_string(), ()).is_none() {
                     tracing::warn!(
                         model,
-                        error = %e,
+                        error = &e as &dyn std::error::Error,
                         "local tokenize failed; falling back to HTTP /render"
                     );
                 }
@@ -243,7 +246,7 @@ impl LocalTokenizer {
 
     /// Load `model_name`'s tokenizer into the cache, so requests find it
     /// warm. The caller logs errors and moves on.
-    pub async fn warmup(&self, model_name: &str) -> Result<()> {
+    pub async fn warmup(&self, model_name: &str) -> Result<(), Error> {
         let _ = self.get_or_load(model_name).await?;
         Ok(())
     }
@@ -262,14 +265,18 @@ impl LocalTokenizer {
     /// Errors when the tokenizer can't be loaded, chat input is given for a
     /// model with no `chat_template`, the template fails to render, or
     /// `encode` rejects the input.
-    pub async fn encode(&self, model_name: &str, input: &TokenizeInput) -> Result<Vec<u32>> {
+    pub async fn encode(&self, model_name: &str, input: &TokenizeInput) -> Result<Vec<u32>, Error> {
         let loaded = self.get_or_load(model_name).await?;
+        let encode = |source| Error::Encode {
+            model: model_name.to_string(),
+            source,
+        };
         match input {
             TokenizeInput::Raw(prompt) => {
                 let encoding = loaded
                     .tokenizer
                     .encode(prompt.as_str(), /* add_special_tokens */ true)
-                    .map_err(|e| anyhow!("tokenizer encode failed: {e}"))?;
+                    .map_err(encode)?;
                 Ok(encoding.get_ids().to_vec())
             }
             TokenizeInput::Chat {
@@ -279,12 +286,13 @@ impl LocalTokenizer {
                 tool_choice,
                 add_generation_prompt,
             } => {
-                let template = loaded.chat_template.as_deref().ok_or_else(|| {
-                    anyhow!(
-                        "model {model_name} has no chat_template in tokenizer_config.json; \
-                         can't render chat-style input locally"
-                    )
-                })?;
+                let template =
+                    loaded
+                        .chat_template
+                        .as_deref()
+                        .ok_or_else(|| Error::NoChatTemplate {
+                            model: model_name.to_string(),
+                        })?;
                 let rendered = render_chat_template(
                     template,
                     messages,
@@ -298,7 +306,7 @@ impl LocalTokenizer {
                     .tokenizer
                     // The template emits the special tokens itself.
                     .encode(rendered.as_str(), /* add_special_tokens */ false)
-                    .map_err(|e| anyhow!("tokenizer encode failed: {e}"))?;
+                    .map_err(encode)?;
                 Ok(encoding.get_ids().to_vec())
             }
         }
@@ -306,14 +314,11 @@ impl LocalTokenizer {
 
     /// Return the cached tokenizer, or load it (possibly from the network)
     /// and insert it. Concurrent first-loads may each load; one is kept.
-    async fn get_or_load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>> {
+    async fn get_or_load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
         if let Some(entry) = self.loaded.get(model_name) {
             return Ok(Arc::clone(entry.value()));
         }
-        let loaded = self
-            .load(model_name)
-            .await
-            .with_context(|| format!("loading local tokenizer for model {model_name}"))?;
+        let loaded = self.load(model_name).await?;
         Ok(self
             .loaded
             .entry(model_name.to_string())
@@ -321,7 +326,7 @@ impl LocalTokenizer {
             .clone())
     }
 
-    async fn load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>> {
+    async fn load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
         // Mount path first.
         if let Some(mount_dir) = self.config.mount_dir.as_deref() {
             let dir = mount_dir.join(model_name);
@@ -332,13 +337,16 @@ impl LocalTokenizer {
                     path = %tok_path.display(),
                     "local_tokenize: loading from mount"
                 );
-                let tokenizer = Tokenizer::from_file(&tok_path)
-                    .map_err(|e| anyhow!("Tokenizer::from_file({}): {e}", tok_path.display()))?;
+                let tokenizer =
+                    Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
+                        path: tok_path.clone(),
+                        source,
+                    })?;
                 let meta = read_chat_template_from_config(&dir)
                     .unwrap_or_else(|e| {
                         tracing::debug!(
                             model = model_name,
-                            error = %e,
+                            error = &e as &dyn std::error::Error,
                             "local_tokenize: no chat_template available from mount \
                              (checked tokenizer_config.json::chat_template + sibling chat_template.jinja)"
                         );
@@ -369,11 +377,15 @@ impl LocalTokenizer {
         }
         let model_name_owned = model_name.to_string();
         let tokenizer = tokio::task::spawn_blocking(move || {
-            Tokenizer::from_pretrained(&model_name_owned, None)
-                .map_err(|e| anyhow!("Tokenizer::from_pretrained({model_name_owned}): {e}"))
+            Tokenizer::from_pretrained(&model_name_owned, None).map_err(|source| {
+                Error::TokenizerHub {
+                    model: model_name_owned.clone(),
+                    source,
+                }
+            })
         })
         .await
-        .context("spawn_blocking join")??;
+        .map_err(Error::Join)??;
 
         let meta =
             fetch_chat_template_from_hub(&self.hub, self.config.hub_token.as_deref(), model_name)
@@ -381,7 +393,7 @@ impl LocalTokenizer {
                 .unwrap_or_else(|e| {
                     tracing::debug!(
                         model = model_name,
-                        error = %e,
+                        error = &e as &dyn std::error::Error,
                         "local_tokenize: no chat_template available via Hub"
                     );
                     TokenizerConfigMeta {
@@ -420,7 +432,7 @@ fn render_chat_template(
     tool_choice: Option<&serde_json::Value>,
     add_generation_prompt: bool,
     special_tokens: &HashMap<String, String>,
-) -> Result<String> {
+) -> Result<String, Error> {
     let mut ctx = serde_json::Map::new();
     // Special tokens first, so `chat_kwargs` can override them.
     for (k, v) in special_tokens {
@@ -477,10 +489,16 @@ fn render_chat_template(
         },
     );
     env.add_template("chat", template)
-        .map_err(|e| anyhow!("minijinja: failed to parse chat template: {e}"))?;
+        .map_err(|source| Error::Template {
+            op: "parse",
+            source,
+        })?;
     let tmpl = env.get_template("chat").unwrap();
     tmpl.render(serde_json::Value::Object(ctx))
-        .map_err(|e| anyhow!("minijinja: failed to render chat template: {e}"))
+        .map_err(|source| Error::Template {
+            op: "render",
+            source,
+        })
 }
 
 /// Normalize one OpenAI-style chat message so its `content` field is
@@ -518,15 +536,19 @@ fn normalize_message_content(message: &serde_json::Value) -> serde_json::Value {
 /// `chat_template.jinja` (see the module docs); `None` if neither exists.
 /// Special tokens are always extracted. `Err` only if
 /// `tokenizer_config.json` is missing or unparseable.
-fn read_chat_template_from_config(model_dir: &Path) -> Result<TokenizerConfigMeta> {
+fn read_chat_template_from_config(model_dir: &Path) -> Result<TokenizerConfigMeta, Error> {
     let cfg_path = model_dir.join("tokenizer_config.json");
     if !cfg_path.exists() {
-        return Err(anyhow!("{} does not exist", cfg_path.display()));
+        return Err(Error::MissingFile(cfg_path));
     }
-    let body = std::fs::read_to_string(&cfg_path)
-        .with_context(|| format!("reading {}", cfg_path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&body)
-        .with_context(|| format!("parsing {} as JSON", cfg_path.display()))?;
+    let body = std::fs::read_to_string(&cfg_path).map_err(|source| Error::Io {
+        path: cfg_path.clone(),
+        source,
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|source| Error::Json {
+        path: cfg_path.clone(),
+        source,
+    })?;
     let special_tokens = extract_special_tokens(&value);
     if let Some(inline) = value.get("chat_template").and_then(|v| v.as_str()) {
         return Ok(TokenizerConfigMeta {
@@ -543,8 +565,10 @@ fn read_chat_template_from_config(model_dir: &Path) -> Result<TokenizerConfigMet
             special_tokens,
         });
     }
-    let template = std::fs::read_to_string(&sibling)
-        .with_context(|| format!("reading {}", sibling.display()))?;
+    let template = std::fs::read_to_string(&sibling).map_err(|source| Error::Io {
+        path: sibling.clone(),
+        source,
+    })?;
     Ok(TokenizerConfigMeta {
         chat_template: Some(template),
         special_tokens,
@@ -587,19 +611,20 @@ async fn fetch_chat_template_from_hub(
     client: &reqwest::Client,
     token: Option<&str>,
     model_name: &str,
-) -> Result<TokenizerConfigMeta> {
+) -> Result<TokenizerConfigMeta, Error> {
     // Step 1: tokenizer_config.json (inline template + special tokens).
     let cfg_url = format!("https://huggingface.co/{model_name}/resolve/main/tokenizer_config.json");
-    let cfg_resp = hub_get(client, token, &cfg_url)
-        .await
-        .with_context(|| format!("GET {cfg_url}"))?;
+    let cfg_resp = hub_get(client, token, &cfg_url).await?;
     if !cfg_resp.status().is_success() {
-        anyhow::bail!("HTTP {} fetching tokenizer_config.json", cfg_resp.status());
+        return Err(Error::HubStatus {
+            url: cfg_url,
+            status: cfg_resp.status(),
+        });
     }
-    let cfg_value: serde_json::Value = cfg_resp
-        .json()
-        .await
-        .context("parsing tokenizer_config.json from Hub")?;
+    let cfg_value: serde_json::Value = cfg_resp.json().await.map_err(|source| Error::Hub {
+        url: cfg_url.clone(),
+        source,
+    })?;
     let special_tokens = extract_special_tokens(&cfg_value);
     if let Some(inline) = cfg_value.get("chat_template").and_then(|v| v.as_str()) {
         return Ok(TokenizerConfigMeta {
@@ -610,9 +635,7 @@ async fn fetch_chat_template_from_hub(
     // Step 2: sibling chat_template.jinja.
     let sibling_url =
         format!("https://huggingface.co/{model_name}/resolve/main/chat_template.jinja");
-    let sib_resp = hub_get(client, token, &sibling_url)
-        .await
-        .with_context(|| format!("GET {sibling_url}"))?;
+    let sib_resp = hub_get(client, token, &sibling_url).await?;
     if sib_resp.status() == reqwest::StatusCode::NOT_FOUND {
         // The repo has no chat template.
         return Ok(TokenizerConfigMeta {
@@ -621,12 +644,15 @@ async fn fetch_chat_template_from_hub(
         });
     }
     if !sib_resp.status().is_success() {
-        anyhow::bail!("HTTP {} fetching chat_template.jinja", sib_resp.status());
+        return Err(Error::HubStatus {
+            url: sibling_url,
+            status: sib_resp.status(),
+        });
     }
-    let body = sib_resp
-        .text()
-        .await
-        .context("reading chat_template.jinja body")?;
+    let body = sib_resp.text().await.map_err(|source| Error::Hub {
+        url: sibling_url.clone(),
+        source,
+    })?;
     Ok(TokenizerConfigMeta {
         chat_template: Some(body),
         special_tokens,
@@ -638,12 +664,15 @@ async fn hub_get(
     client: &reqwest::Client,
     token: Option<&str>,
     url: &str,
-) -> Result<reqwest::Response> {
+) -> Result<reqwest::Response, Error> {
     let mut req = client.get(url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
-    Ok(req.send().await?)
+    req.send().await.map_err(|source| Error::Hub {
+        url: url.to_string(),
+        source,
+    })
 }
 
 #[cfg(test)]

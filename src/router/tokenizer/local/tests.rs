@@ -6,7 +6,7 @@ fn render(
     messages: &[serde_json::Value],
     tools: &[serde_json::Value],
     add_generation_prompt: bool,
-) -> Result<String> {
+) -> Result<String, Error> {
     render_chat_template(
         template,
         messages,
@@ -24,7 +24,7 @@ fn render_with_tokens(
     template: &str,
     messages: &[serde_json::Value],
     special_tokens: &HashMap<String, String>,
-) -> Result<String> {
+) -> Result<String, Error> {
     render_chat_template(
         template,
         messages,
