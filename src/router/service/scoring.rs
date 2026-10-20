@@ -88,16 +88,13 @@ impl Scoring {
     ///
     /// `tokenizer` is passed in, since it is the service's own part.
     /// `chat_kwargs` applies to Chat and Messages input only.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn score_workers(
         &self,
         tokenizer: &dyn crate::router::tokenizer::Tokenizer,
         pool: &Pool,
         model: &str,
-        input: Input,
+        input: ScoreInput,
         chat_kwargs: HashMap<String, String>,
-        chat_extras: ChatExtras,
-        raw_body: Option<Vec<u8>>,
         req_id: Option<&str>,
     ) -> (ScoreOutcome, ScoreSideData) {
         let mut side = ScoreSideData {
@@ -117,6 +114,11 @@ impl Scoring {
             return (ScoreOutcome::NoWorkers, side);
         }
 
+        let ScoreInput {
+            input,
+            chat_extras,
+            raw_body,
+        } = input;
         let ChatExtras {
             tools,
             tool_choice,

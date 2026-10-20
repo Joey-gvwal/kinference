@@ -415,11 +415,11 @@ async fn select(
         name: "pool".into(),
         resource_version: String::new(),
     };
-    let spare = Some((
-        vec![serde_json::json!({"role": "user", "content": "hi"})],
-        ChatExtras::default(),
-        b"{}".to_vec(),
-    ));
+    let spare = Some(ScoreInput {
+        input: Input::Messages(vec![serde_json::json!({"role": "user", "content": "hi"})]),
+        chat_extras: ChatExtras::default(),
+        raw_body: Some(b"{}".to_vec()),
+    });
     let attrs = kinference_policy::predicate::RequestAttrs {
         model: vec![model.into()],
         ..Default::default()

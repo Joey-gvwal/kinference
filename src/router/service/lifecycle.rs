@@ -207,8 +207,12 @@ impl KinferenceService {
         // Scoring consumes these, but a second pool or a policy may need them
         // again; only clone in that case.
         let policy_active = pool_ref.is_some() && self.policy.is_some();
-        let spare = (policy_active || serving.len() > 1)
-            .then(|| (messages.clone(), chat_extras.clone(), outbound.clone()));
+        let input = ScoreInput {
+            input: Input::Messages(messages),
+            chat_extras,
+            raw_body: Some(outbound),
+        };
+        let spare = (policy_active || serving.len() > 1).then(|| input.clone());
         let mut degraded_reason: Option<String> = None;
         let mut groups: Vec<ScoredGroup> = Vec::new();
         // Skipped when nothing local serves the model.
@@ -219,10 +223,8 @@ impl KinferenceService {
                     &*self.tokenizer,
                     first,
                     &model,
-                    Input::Messages(messages),
+                    input,
                     HashMap::new(),
-                    chat_extras,
-                    Some(outbound),
                     Some(&req_label),
                 )
                 .await;
@@ -263,12 +265,12 @@ impl KinferenceService {
                 .map(|g| g.side.tokens.clone())
                 .filter(|t| !t.is_empty());
             for pool in &serving[1..] {
-                let Some((msgs, extras, raw)) = spare.clone() else {
+                let Some(spare) = spare.as_ref() else {
                     continue;
                 };
-                let (input, raw) = match reuse.clone() {
-                    Some(t) => (Input::Tokens(t), None),
-                    None => (Input::Messages(msgs), Some(raw)),
+                let input = match reuse.clone() {
+                    Some(t) => ScoreInput::tokens(t),
+                    None => spare.clone(),
                 };
                 let (outcome, side) = self
                     .scoring
@@ -278,8 +280,6 @@ impl KinferenceService {
                         &model,
                         input,
                         HashMap::new(),
-                        extras,
-                        raw,
                         Some(&req_label),
                     )
                     .await;
