@@ -14,9 +14,7 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use kinference_policy::AUTO_MODEL;
 
-use crate::router::observations::{
-    ObservationSink, PendingObservations, Qos, RequestLabels, RequestMeta, format_csv_row,
-};
+use crate::router::observations::{Observations, Qos, RequestMeta};
 use crate::router::picker::WorkerScore;
 use crate::router::tokenizer::TokenizeInput;
 use kinference_fleet::models::ModelIndex;
@@ -276,17 +274,10 @@ pub struct KinferenceService {
     pub(crate) scoring: Scoring,
     /// The tokenizer. The mode and render URL are per pool, on the request.
     pub(crate) tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
-    /// Per-pick observation stash. Inserted by `pick_and_record`, consumed by
-    /// `finalize_observation` (CSV row) or `abort_observation`, and TTL-swept.
-    pub(crate) pending_observations: Arc<PendingObservations>,
-    /// Per-request metric labels (model + qos), keyed by `response_id`.
-    /// Inserted at pick; taken at `ReportFinalToken` to label the token +
-    /// ITL metrics (the `PendingObservation` is gone by then). TTL-swept.
-    pub(crate) request_labels: Arc<RequestLabels>,
-    /// Predicted-vs-observed CSV sink.
-    pub(crate) observation_sink: Arc<ObservationSink>,
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
     pub(crate) bodies: crate::router::body_store::Bodies,
+    /// What each pick leaves behind until the caller reports.
+    pub(crate) observations: Observations,
     /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
     pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
@@ -304,23 +295,19 @@ impl KinferenceService {
     pub fn new(
         scoring: Scoring,
         tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
-        pending_observations: Arc<PendingObservations>,
-        request_labels: Arc<RequestLabels>,
         bodies: crate::router::body_store::Bodies,
+        observations: Observations,
         policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
-        observation_sink: Arc<ObservationSink>,
         prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
         Self {
             scoring,
             tokenizer,
-            pending_observations,
-            request_labels,
             bodies,
+            observations,
             policy,
             provider_health,
-            observation_sink,
             prom,
         }
     }

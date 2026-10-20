@@ -457,11 +457,12 @@ impl Picker for KinferenceService {
             let (released, _) = self.abort_request(req.response_id);
             released
         } else {
-            self.finalize_observation(req.response_id, req.observed_ttft_ms, req.upstream_status)
+            self.observations
+                .finalize(req.response_id, req.observed_ttft_ms, req.upstream_status)
         };
         Ok(Response::new(ReportFirstTokenResponse {
             // A provider pick is known even though it holds no pending
-            // observation for `finalize_observation` to find.
+            // observation for `Observations::finalize` to find.
             acknowledged: acknowledged || was_provider,
         }))
     }
@@ -480,7 +481,7 @@ impl Picker for KinferenceService {
         request: Request<ReportFinalTokenRequest>,
     ) -> Result<Response<ReportFinalTokenResponse>, Status> {
         let req = request.into_inner();
-        let meta = self.request_labels.take(req.response_id);
+        let meta = self.observations.labels.take(req.response_id);
         // An unknown or expired `response_id` leaves nothing to attribute this
         // to. The empty tenant maps to the default bucket.
         let (model, qos, tenant) = match &meta {

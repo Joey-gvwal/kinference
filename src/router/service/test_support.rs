@@ -221,8 +221,6 @@ impl ServiceBuilder {
         let svc = KinferenceService::new(
             Scoring::new(pool_registry, models, scrape),
             tokenizer,
-            Arc::new(PendingObservations::new(ttl)),
-            Arc::new(RequestLabels::new(ttl)),
             crate::router::body_store::Bodies::new(
                 Arc::new(crate::router::body_store::BodyStore::new(
                     1 << 20,
@@ -232,9 +230,13 @@ impl ServiceBuilder {
                 ttl,
                 prom.clone(),
             ),
+            crate::router::observations::Observations::new(
+                ttl,
+                crate::router::observations::ObservationSink::open(None),
+                prom.clone(),
+            ),
             store.clone(),
             Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
-            Arc::new(ObservationSink::open(None)),
             prom,
         );
         TestService {

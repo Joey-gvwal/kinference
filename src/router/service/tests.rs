@@ -605,10 +605,11 @@ async fn a_good_pick_returns_the_worker_and_reserves_its_state() {
     assert_eq!(t.render_calls(), 1);
 
     // What ReportFirstToken and ReportFinalToken will find.
-    assert_eq!(t.svc.pending_observations.len(), 1);
+    assert_eq!(t.svc.observations.pending.len(), 1);
     let meta = t
         .svc
-        .request_labels
+        .observations
+        .labels
         .take(7)
         .expect("labels for the final report");
     assert_eq!(meta.model, "qwen");
@@ -654,7 +655,7 @@ async fn a_streaming_pick_returns_the_rewritten_body() {
     assert_eq!(rewritten["stream_options"]["include_usage"], true);
     assert_eq!(model_in(&body), "qwen");
     assert!(
-        t.svc.request_labels.take(1).expect("labels").streaming,
+        t.svc.observations.labels.take(1).expect("labels").streaming,
         "the labels remember that the request streams"
     );
 }
@@ -674,7 +675,7 @@ async fn an_unknown_model_yields_no_workers() {
     };
     assert_eq!(model, "llama");
     assert_eq!(t.render_calls(), 0);
-    assert_eq!(t.svc.pending_observations.len(), 0);
+    assert_eq!(t.svc.observations.pending.len(), 0);
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
     assert!(nonzero(&t.metrics(), "kinference_routed_requests_total").is_empty());
 }
@@ -714,7 +715,7 @@ async fn a_malformed_body_is_a_bad_request() {
         assert_eq!(model, "");
     }
     assert_eq!(t.render_calls(), 0);
-    assert_eq!(t.svc.pending_observations.len(), 0);
+    assert_eq!(t.svc.observations.pending.len(), 0);
 }
 
 /// A policy that rejects the request leaves no state behind, though a worker
@@ -737,7 +738,7 @@ async fn a_policy_rejection_leaves_no_state() {
     assert_eq!(model, "qwen");
     // Scoring precedes the policy, so the worker was tokenized against.
     assert_eq!(t.render_calls(), 1);
-    assert_eq!(t.svc.pending_observations.len(), 0);
+    assert_eq!(t.svc.observations.pending.len(), 0);
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
 
     let out = t.metrics();
@@ -763,7 +764,10 @@ async fn auto_resolves_to_the_only_model_and_rewrites_the_body() {
     assert_eq!(model_in(&body), "qwen");
     let rewritten: serde_json::Value = serde_json::from_slice(&body).expect("a JSON body");
     assert_eq!(rewritten["messages"][0]["content"], "hi");
-    assert_eq!(t.svc.request_labels.take(1).expect("labels").model, "qwen");
+    assert_eq!(
+        t.svc.observations.labels.take(1).expect("labels").model,
+        "qwen"
+    );
     assert!(t.metrics().contains(
         r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#
     ));
@@ -848,7 +852,7 @@ async fn degraded_pick(render: Render) {
     assert!(body.is_empty());
     assert_eq!(model, "qwen");
 
-    assert_eq!(t.svc.pending_observations.len(), 1);
+    assert_eq!(t.svc.observations.pending.len(), 1);
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 1);
     let dispatches = t.pools[0].inflight_prefixes.dispatches_for("10.0.0.1:8000");
     assert_eq!(dispatches.len(), 1);
@@ -905,11 +909,12 @@ async fn a_batch_request_fails_over_to_the_provider() {
     assert_eq!(model_in(&body), "vendor/qwen");
 
     // Only the local pick reserved pool state.
-    assert_eq!(t.svc.pending_observations.len(), 1);
+    assert_eq!(t.svc.observations.pending.len(), 1);
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 1);
     let labels = t
         .svc
-        .request_labels
+        .observations
+        .labels
         .provider_pick_for(2)
         .expect("provider labels for the reports");
     assert_eq!(labels.provider.name, "cloud");

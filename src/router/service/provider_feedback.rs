@@ -30,7 +30,7 @@ impl KinferenceService {
         tenant: &str,
         streaming: bool,
     ) {
-        self.request_labels.insert(
+        self.observations.labels.insert(
             response_id,
             crate::router::observations::RequestMeta {
                 // The model the body names, as for a local pick.
@@ -58,7 +58,7 @@ impl KinferenceService {
         observed_ttft_ms: u32,
         upstream_status: i32,
     ) -> bool {
-        let Some(labels) = self.request_labels.provider_pick_for(response_id) else {
+        let Some(labels) = self.observations.labels.provider_pick_for(response_id) else {
             return false;
         };
         let (provider, model) = (labels.provider, labels.model);
@@ -108,7 +108,7 @@ impl KinferenceService {
             Reason::BackendUnauthorized => FailureKind::Unauthorized,
             Reason::Unspecified | Reason::NotDispatched | Reason::PullFailed => return,
         };
-        let Some(labels) = self.request_labels.provider_pick_for(response_id) else {
+        let Some(labels) = self.observations.labels.provider_pick_for(response_id) else {
             return;
         };
         let provider = labels.provider;

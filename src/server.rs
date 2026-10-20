@@ -120,14 +120,6 @@ pub async fn run() -> Result<()> {
     // *full* response time; see `Config::observation_ttl_secs`.
     let observation_ttl = std::time::Duration::from_secs(cfg.observation_ttl_secs.unwrap_or(600));
 
-    // Pending-observation stash, inserted at pick and consumed at report.
-    // Its TTL sweep, which also releases each evicted pick's inflight
-    // state, is spawned below once the service exists.
-    let pending_observations = observations::shared(observation_ttl);
-    // Per-request metric labels (model + qos), same TTL/lifecycle as the
-    // pending-observation stash; taken at ReportFinalToken, TTL-swept.
-    let request_labels = observations::shared_request_labels(observation_ttl);
-
     // Buffered bodies for PushBody, Pick, PullBody. A much shorter TTL than
     // `observation_ttl`: bodies are large and consumed immediately.
     let body_ttl = std::time::Duration::from_secs(cfg.body_ttl_secs.unwrap_or(60));
@@ -313,9 +305,7 @@ pub async fn run() -> Result<()> {
 
     // The observation CSV sink is shared across pools; rows carry their
     // pool and config snapshot.
-    let observation_sink = Arc::new(observations::ObservationSink::open(
-        cfg.observations_csv.clone(),
-    ));
+    let observation_sink = observations::ObservationSink::open(cfg.observations_csv.clone());
 
     // Optional CRD-driven routing policy, sharing the snapshot cell the
     // pick path reads. When disabled, a pool-naming Pick falls back to
@@ -431,12 +421,10 @@ pub async fn run() -> Result<()> {
     let service = Arc::new(KinferenceService::new(
         Scoring::new(pool_registry.clone(), models.clone(), metrics.clone()),
         tokenizer,
-        pending_observations.clone(),
-        request_labels.clone(),
         body_store::Bodies::new(body_store, body_idle_timeout, router_prom.clone()),
+        observations::Observations::new(observation_ttl, observation_sink, router_prom.clone()),
         policy_store,
         provider_health,
-        observation_sink,
         router_prom,
     ));
 
@@ -477,7 +465,7 @@ pub async fn run() -> Result<()> {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let evicted = service.sweep_expired_observations();
+                        let evicted = service.observations.sweep_expired();
                         if evicted > 0 {
                             tracing::debug!(
                                 evicted,

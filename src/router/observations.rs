@@ -1,12 +1,10 @@
-//! Server-side stash of per-pick state needed at observation time.
+//! What a pick leaves behind, kept until the caller reports.
 //!
 //! `Pick()` stashes a `PendingObservation` keyed by the server-minted
 //! `request_id`. When the caller reports the observed TTFT via
-//! `ReportFirstToken()`, `take(request_id)` returns it and
-//! `finalize_observation` writes the CSV row and releases the inflight state.
-//!
-//! The sweep task in `server.rs` evicts entries older than `ttl`, bounding
-//! leaks from callers that never report.
+//! `ReportFirstToken()`, `Observations::finalize` takes it back, writes the
+//! CSV row and releases the pick's inflight state; `abort` releases without
+//! a row, and `sweep_expired` is the backstop for callers that never report.
 //!
 //! [`ObservationSink`] is the CSV file those rows go to.
 
@@ -18,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use crate::router::metrics::RouterMetrics;
 use crate::router::picker::WaitPrediction;
 use crate::router::picker::WorkerScore;
 use kinference_fleet::profile::{PickerConfig, PredictorConfig};
@@ -99,7 +98,7 @@ impl std::fmt::Debug for InflightHandles {
 /// corresponding `ReportFirstToken()` arrives.
 ///
 /// Built by `KinferenceService::pick_and_record` at the end of the pick
-/// critical section; consumed by `KinferenceService::finalize_observation`.
+/// critical section; consumed by [`Observations::finalize`].
 #[derive(Debug, Clone)]
 pub struct PendingObservation {
     /// Server-minted identifier for this pick (the `response_id` on the
@@ -161,7 +160,7 @@ pub struct PendingObservation {
     pub model: String,
     /// Whether the request asked for a streaming response (`stream: true`).
     /// For non-streaming requests the reported "TTFT" is total latency, so
-    /// `finalize_observation` skips the CSV row (but still releases state).
+    /// `Observations::finalize` skips the CSV row (but still releases state).
     pub streaming: bool,
     /// QoS class from the Pick request. The `qos` label on the TTFT
     /// histogram, recorded from this record at `ReportFirstToken`.
@@ -173,7 +172,7 @@ pub struct PendingObservation {
 }
 
 /// In-memory stash of pending observations. Inserted by `pick_and_record`,
-/// consumed by `finalize_observation` or `abort_observation`, and TTL-swept
+/// consumed by `Observations::finalize` or `abort`, and TTL-swept
 /// as a backstop.
 pub struct PendingObservations {
     by_id: DashMap<u64, PendingObservation>,
@@ -203,8 +202,7 @@ impl PendingObservations {
     }
 
     /// Remove and return every entry older than `ttl`, so the caller can
-    /// release each one's inflight state (see
-    /// `KinferenceService::sweep_expired_observations`).
+    /// release each one's inflight state (see [`Observations::sweep_expired`]).
     pub fn take_expired(&self) -> Vec<PendingObservation> {
         let cutoff = Instant::now() - self.ttl;
         let expired: Vec<u64> = self
@@ -224,11 +222,6 @@ impl PendingObservations {
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
-}
-
-/// Arc constructor, used by `server.rs`.
-pub fn shared(ttl: Duration) -> Arc<PendingObservations> {
-    Arc::new(PendingObservations::new(ttl))
 }
 
 /// Per-request metric labels needed at `ReportFinalToken`. The
@@ -313,11 +306,6 @@ impl RequestLabels {
         self.by_id.retain(|_, v| v.picked_at >= cutoff);
         before - self.by_id.len()
     }
-}
-
-/// Arc ctor mirroring [`shared`], for the `RequestLabels` side map.
-pub fn shared_request_labels(ttl: Duration) -> Arc<RequestLabels> {
-    Arc::new(RequestLabels::new(ttl))
 }
 
 /// Header row for `format_csv_row`'s columns, with no trailing newline (the
@@ -518,9 +506,8 @@ pub fn format_csv_row(
 
 /// Predicted-vs-observed CSV sink for picks.
 ///
-/// Fed by `KinferenceService::finalize_observation`, behind the
-/// `ReportFirstToken` RPC. Rows are formatted by
-/// [`format_csv_row`].
+/// Fed by [`Observations::finalize`], behind the `ReportFirstToken` RPC.
+/// Rows are formatted by [`format_csv_row`].
 ///
 /// Behavior:
 /// - No path → sink is disabled, `append_line` is a no-op.
@@ -605,6 +592,145 @@ impl ObservationSink {
             tracing::warn!(error = %e, "observation sink write failed");
         }
     }
+}
+
+/// The service's part for what a pick leaves behind: the pending stash, the
+/// request labels and the CSV sink.
+pub(crate) struct Observations {
+    /// Inserted by `pick_and_record`, consumed by [`Self::finalize`] (CSV
+    /// row) or [`Self::abort`], and TTL-swept.
+    pub(crate) pending: PendingObservations,
+    /// Per-request metric labels (model + qos), keyed by `response_id`.
+    /// Inserted at pick; taken at `ReportFinalToken` to label the token and
+    /// ITL metrics, when the `PendingObservation` is already gone. TTL-swept.
+    pub(crate) labels: RequestLabels,
+    sink: ObservationSink,
+    prom: Arc<RouterMetrics>,
+}
+
+impl Observations {
+    /// Both maps sweep at `ttl`.
+    pub(crate) fn new(ttl: Duration, sink: ObservationSink, prom: Arc<RouterMetrics>) -> Self {
+        Self {
+            pending: PendingObservations::new(ttl),
+            labels: RequestLabels::new(ttl),
+            sink,
+            prom,
+        }
+    }
+
+    /// Close an observation: release the pick's inflight state and, for a
+    /// streaming request, write the CSV row. Called from `ReportFirstToken()`
+    /// with the caller's observed TTFT.
+    ///
+    /// Returns `false`, changing nothing, when `request_id` is unknown (swept,
+    /// never inserted, or already consumed).
+    pub(crate) fn finalize(
+        &self,
+        request_id: u64,
+        observed_ttft_ms: u32,
+        upstream_status: i32,
+    ) -> bool {
+        let Some(record) = self.pending.take(request_id) else {
+            return false;
+        };
+        // Always release in-flight bookkeeping, streaming or not.
+        release_inflight_state(&record);
+
+        let req_label_owned = record
+            .external_request_id
+            .clone()
+            .unwrap_or_else(|| record.request_id.to_string());
+
+        // For non-streaming responses `observed_ttft_ms` is the full response
+        // time, not TTFT, so skip the CSV row and residual log.
+        if !record.streaming {
+            tracing::debug!(
+                req = %req_label_owned,
+                endpoint = %record.chosen_worker.endpoint,
+                status = upstream_status,
+                "observation skipped: non-streaming response (reported time is total latency, not TTFT)"
+            );
+            return true;
+        }
+
+        // Streaming: a real TTFT.
+        self.prom.record_ttft(
+            &record.model,
+            record.qos.as_label(),
+            &record.tenant,
+            observed_ttft_ms,
+        );
+
+        let predicted_ms = record.prediction.total_ms();
+        let residual_ms = observed_ttft_ms as f32 - predicted_ms;
+        tracing::debug!(
+            req = %req_label_owned,
+            endpoint = %record.chosen_worker.endpoint,
+            predicted_ms = format!("{predicted_ms:.1}"),
+            observed_ms = observed_ttft_ms,
+            residual_ms = format!("{residual_ms:+.1}"),
+            status = upstream_status,
+            "observation"
+        );
+
+        self.sink.append_line(&format_csv_row(
+            &record,
+            observed_ttft_ms,
+            residual_ms,
+            upstream_status,
+        ));
+        true
+    }
+
+    /// Drop a `PendingObservation` without writing a CSV row.
+    ///
+    /// For a request that died before its first token: release the inflight
+    /// state, but write no row. Returns `true` if a record was found.
+    pub(crate) fn abort(&self, request_id: u64) -> bool {
+        let Some(record) = self.pending.take(request_id) else {
+            return false;
+        };
+        release_inflight_state(&record);
+        let req_label_owned = record
+            .external_request_id
+            .clone()
+            .unwrap_or_else(|| record.request_id.to_string());
+        tracing::debug!(
+            req = %req_label_owned,
+            endpoint = %record.chosen_worker.endpoint,
+            "abort: cleared inflight/inflight-prefix state without CSV emit"
+        );
+        true
+    }
+
+    /// Evict pending observations past the TTL, releasing each one's inflight
+    /// state as `abort` would. The backstop for callers that never
+    /// report. Returns the number evicted.
+    pub(crate) fn sweep_expired(&self) -> usize {
+        let evicted = self.pending.take_expired();
+        for record in &evicted {
+            release_inflight_state(record);
+        }
+        // Request labels whose ReportFinalToken never arrived.
+        self.labels.take_expired();
+        evicted.len()
+    }
+}
+
+/// Release the inflight counter and inflight-prefix entry a pick reserved
+/// for `record`. The inflight counter has no sweep of its own, so every
+/// terminal path for a pick (`finalize`, `abort`, `sweep_expired`) must come
+/// through here.
+///
+/// The pool handles ride on the record, so a pool torn down mid-request
+/// stays alive until its pending observations are released.
+fn release_inflight_state(record: &PendingObservation) {
+    // Pick-time config, from the record.
+    if record.picker_cfg.inflight_tracking {
+        record.inflight.inflight.dec(&record.chosen_worker.endpoint);
+    }
+    record.inflight.prefixes.forget(record.request_id);
 }
 
 #[cfg(test)]
