@@ -81,8 +81,9 @@ pub(crate) fn apply_pick_body_mutations(obj: &mut Value, force_model: Option<&st
         if !so.is_object() {
             *so = Value::Object(serde_json::Map::new());
         }
-        let so = so.as_object_mut().expect("stream_options is an object now");
-        if so.get("include_usage").and_then(Value::as_bool) != Some(true) {
+        if let Value::Object(so) = so
+            && so.get("include_usage").and_then(Value::as_bool) != Some(true)
+        {
             so.insert("include_usage".to_string(), Value::Bool(true));
             mutated = true;
         }

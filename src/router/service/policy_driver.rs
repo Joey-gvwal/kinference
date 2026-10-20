@@ -132,10 +132,9 @@ impl KinferenceService {
                     }
                     // Providers need no scoring; candidates come from the
                     // declared model table.
-                    let dest = match dest.as_local() {
-                        Some(local) => local,
-                        None => {
-                            let prov = dest.as_provider().expect("not local, so provider");
+                    let dest = match dest {
+                        kinference_policy::resolve::ResolvedDestination::Local(local) => local,
+                        kinference_policy::resolve::ResolvedDestination::Provider(prov) => {
                             candidates.extend(provider_candidates_for(
                                 &self.observations.provider_health,
                                 prov,

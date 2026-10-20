@@ -488,12 +488,12 @@ fn render_chat_template(
             Ok(chrono::Utc::now().format(&format).to_string())
         },
     );
-    env.add_template("chat", template)
+    let tmpl = env
+        .template_from_str(template)
         .map_err(|source| Error::Template {
             op: "parse",
             source,
         })?;
-    let tmpl = env.get_template("chat").unwrap();
     tmpl.render(serde_json::Value::Object(ctx))
         .map_err(|source| Error::Template {
             op: "render",
