@@ -1,7 +1,10 @@
 //! Fakes for the tokenizer tests: a `/render` on a loopback port and the
 //! worker entries that point at it.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+use crate::router::metrics::RouterMetrics;
 
 use super::{TokenizeInput, TokenizeRequest};
 use kinference_fleet::workers::WorkerEntry;
@@ -136,4 +139,69 @@ pub(crate) fn request<'a>(
         raw_body: None,
         req_id: None,
     }
+}
+
+/// A `tokenizer.json`: WordLevel on whitespace with `hello` 0, `world` 1 and
+/// `<bos>` 99, which a post-processor prepends.
+pub(crate) const WORDLEVEL_TOKENIZER_JSON: &str = r#"{
+    "version": "1.0",
+    "truncation": null,
+    "padding": null,
+    "added_tokens": [
+        {"id": 99, "content": "<bos>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+    ],
+    "normalizer": null,
+    "pre_tokenizer": {"type": "Whitespace"},
+    "post_processor": {
+        "type": "TemplateProcessing",
+        "single": [
+            {"SpecialToken": {"id": "<bos>", "type_id": 0}},
+            {"Sequence": {"id": "A", "type_id": 0}}
+        ],
+        "pair": [
+            {"Sequence": {"id": "A", "type_id": 0}},
+            {"Sequence": {"id": "B", "type_id": 1}}
+        ],
+        "special_tokens": {
+            "<bos>": {"id": "<bos>", "ids": [99], "tokens": ["<bos>"]}
+        }
+    },
+    "decoder": null,
+    "model": {
+        "type": "WordLevel",
+        "vocab": {"hello": 0, "world": 1, "<unk>": 2, "<bos>": 99},
+        "unk_token": "<unk>"
+    }
+}"#;
+
+/// Lay out `model` under `mount_dir` with the WordLevel tokenizer and a
+/// `tokenizer_config.json` binding `bos_token`, plus `chat_template` when
+/// given.
+pub(crate) fn mount_wordlevel(mount_dir: &Path, model: &str, chat_template: Option<&str>) {
+    let dir = mount_dir.join(model);
+    std::fs::create_dir_all(&dir).expect("model dir");
+    std::fs::write(dir.join("tokenizer.json"), WORDLEVEL_TOKENIZER_JSON).expect("tokenizer.json");
+    let mut config = serde_json::json!({ "bos_token": "<bos>" });
+    if let Some(template) = chat_template {
+        config["chat_template"] = serde_json::Value::String(template.into());
+    }
+    std::fs::write(dir.join("tokenizer_config.json"), config.to_string())
+        .expect("tokenizer_config.json");
+}
+
+/// A fresh registry and the router metrics registered in it.
+pub(crate) fn router_metrics() -> (prometheus::Registry, Arc<RouterMetrics>) {
+    let registry = prometheus::Registry::new();
+    let prom = Arc::new(RouterMetrics::new(&registry, &Default::default()));
+    (registry, prom)
+}
+
+/// The registry in Prometheus text form.
+pub(crate) fn exposition(registry: &prometheus::Registry) -> String {
+    use prometheus::Encoder as _;
+    let mut buf = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&registry.gather(), &mut buf)
+        .expect("encode the registry");
+    String::from_utf8(buf).expect("utf-8 exposition")
 }

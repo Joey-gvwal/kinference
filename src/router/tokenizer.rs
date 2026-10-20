@@ -103,7 +103,7 @@ impl KinferenceService {
         // mode. Without a raw body, `/render` gets a synthesized one.
         let outcome = match mode {
             TokenizeMode::Render => self.http.render(&req).await,
-            TokenizeMode::Local => self.tokenize_local_then_http(&req).await,
+            TokenizeMode::Local => self.local.encode_or_render(&req).await,
             TokenizeMode::Compare => self.tokenize_via_http_with_compare(&req).await,
         };
 
@@ -118,61 +118,6 @@ impl KinferenceService {
         outcome
     }
 
-    /// `Local` mode: in-process tokenization, falling back to `/render` on
-    /// any local failure (unknown model, missing chat template, render or
-    /// encode error).
-    async fn tokenize_local_then_http(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
-        let &TokenizeRequest {
-            model,
-            ref input,
-            req_id,
-            ..
-        } = req;
-        let local_reg = &self.local_tokenizer;
-        let chat_kwargs = match input {
-            TokenizeInput::Chat { kwargs, .. } => kwargs.clone(),
-            TokenizeInput::Raw(_) => std::collections::HashMap::new(),
-        };
-        let started = std::time::Instant::now();
-        let result = local_reg.tokenize(model, input, &chat_kwargs).await;
-        let render_ms = started.elapsed().as_secs_f64() * 1000.0;
-        match result {
-            Ok(tokens) => {
-                self.prom.record_tokenize_path("local");
-                tracing::debug!(
-                    req = %req_id.unwrap_or("-"),
-                    mode = "local",
-                    model = %model,
-                    render_ms = format_args!("{render_ms:.1}"),
-                    token_count = tokens.len(),
-                    "render ok"
-                );
-                TokenizeOutcome::Ok(tokens)
-            }
-            Err(e) => {
-                // Some models fail locally on every request (e.g. no
-                // chat_template), so warn once per model.
-                if self
-                    .local_tokenize_warn_latch
-                    .insert(model.to_string(), ())
-                    .is_none()
-                {
-                    tracing::warn!(
-                        model,
-                        error = %e,
-                        "local tokenize failed; falling back to HTTP /render"
-                    );
-                }
-                let outcome = self.http.render(req).await;
-                // A double failure is counted by `render_with_fallback`.
-                if matches!(outcome, TokenizeOutcome::Ok(_)) {
-                    self.prom.record_tokenize_path("http_fallback");
-                }
-                outcome
-            }
-        }
-    }
-
     /// `Compare` mode: `/render` is returned; the local result is only
     /// compared against it, for the divergence counters.
     async fn tokenize_via_http_with_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
@@ -180,7 +125,7 @@ impl KinferenceService {
         if let TokenizeOutcome::Ok(http_tokens) = &outcome {
             // In the background, so local template rendering doesn't add to
             // pick latency.
-            let local_reg = self.local_tokenizer.clone();
+            let local_reg = self.local.clone();
             let prom = self.prom.clone();
             let model_owned = req.model.to_string();
             let input_owned = req.input.clone();
@@ -203,18 +148,13 @@ impl KinferenceService {
     /// tokens. Errors are counted, never returned. No `&self`, so it can run
     /// in a spawned task.
     async fn compare_local_tokenize_inner(
-        local_reg: &local::LocalTokenizerRegistry,
+        local_reg: &local::LocalTokenizer,
         prom: &crate::router::metrics::RouterMetrics,
         model: &str,
         input: &TokenizeInput,
         http_tokens: &[u32],
     ) {
-        // Only `Chat` carries template kwargs.
-        let chat_kwargs = match input {
-            TokenizeInput::Chat { kwargs, .. } => kwargs.clone(),
-            TokenizeInput::Raw(_) => std::collections::HashMap::new(),
-        };
-        match local_reg.tokenize(model, input, &chat_kwargs).await {
+        match local_reg.encode(model, input).await {
             Ok(local_tokens) if local_tokens.as_slice() == http_tokens => {
                 prom.record_tokenize_compare("match");
             }

@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::controller::policy::store::PolicyStore;
 use crate::router::tokenizer::http::HttpRender;
+use crate::router::tokenizer::local::LocalTokenizer;
 pub(crate) use crate::router::tokenizer::test_support::Render;
 use crate::router::tokenizer::test_support::{FakeRender, worker};
 use kinference_fleet::pool::{PoolMap, PoolRegistry, test_spec};
@@ -123,6 +124,11 @@ impl ServiceBuilder {
         let http_url = render.as_ref().map(|r| r.base().to_string());
         let scrape = Arc::new(MetricsRegistry::new());
         let registry = prometheus::Registry::new();
+        let http = Arc::new(HttpRender::new(16, scrape.clone()).expect("an HTTP backend"));
+        let prom = Arc::new(crate::router::metrics::RouterMetrics::new(
+            &registry,
+            &Default::default(),
+        ));
         let pool_registry = PoolRegistry::new();
         let models = Arc::new(ModelIndex::new());
         let (mut pools, mut worker_sets, mut dests) = (Vec::new(), Vec::new(), Vec::new());
@@ -209,11 +215,11 @@ impl ServiceBuilder {
         let svc = KinferenceService::new(
             pool_registry,
             models,
-            scrape.clone(),
-            Arc::new(HttpRender::new(16, scrape).expect("an HTTP backend")),
+            scrape,
+            http.clone(),
             Arc::new(
-                crate::router::tokenizer::local::LocalTokenizerRegistry::new(Default::default())
-                    .expect("a local tokenizer registry"),
+                LocalTokenizer::new(Default::default(), http, prom.clone())
+                    .expect("a local tokenizer"),
             ),
             Arc::new(PendingObservations::new(ttl)),
             Arc::new(RequestLabels::new(ttl)),
@@ -226,10 +232,7 @@ impl ServiceBuilder {
             Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
             ttl,
             Arc::new(ObservationSink::open(None)),
-            Arc::new(crate::router::metrics::RouterMetrics::new(
-                &registry,
-                &Default::default(),
-            )),
+            prom,
         );
         TestService {
             svc,
@@ -286,12 +289,7 @@ impl TestService {
 
     /// The router's metrics in Prometheus text form.
     pub(crate) fn metrics(&self) -> String {
-        use prometheus::Encoder as _;
-        let mut buf = Vec::new();
-        prometheus::TextEncoder::new()
-            .encode(&self.registry.gather(), &mut buf)
-            .expect("encode the registry");
-        String::from_utf8(buf).expect("utf-8 exposition")
+        crate::router::tokenizer::test_support::exposition(&self.registry)
     }
 
     /// How many requests the fake `/render` has answered.

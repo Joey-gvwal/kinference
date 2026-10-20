@@ -324,12 +324,8 @@ pub struct KinferenceService {
     /// The `/render` backend. The tokenization mode and render URL are per
     /// pool.
     pub(crate) http: Arc<crate::router::tokenizer::http::HttpRender>,
-    /// In-process tokenizer registry, keyed by model and shared across pools.
-    pub(crate) local_tokenizer: Arc<crate::router::tokenizer::local::LocalTokenizerRegistry>,
-    /// Warn-once latch for local tokenization falling back to `/render`, per
-    /// `(model_name, error_shape)`, since some models fail locally on every
-    /// request.
-    pub(crate) local_tokenize_warn_latch: dashmap::DashMap<String, ()>,
+    /// The in-process backend, shared across pools.
+    pub(crate) local: Arc<crate::router::tokenizer::local::LocalTokenizer>,
     /// Per-pick observation stash. Inserted by `pick_and_record`, consumed by
     /// `finalize_observation` (CSV row) or `abort_observation`, and TTL-swept.
     pub(crate) pending_observations: Arc<PendingObservations>,
@@ -365,7 +361,7 @@ impl KinferenceService {
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
         http: Arc<crate::router::tokenizer::http::HttpRender>,
-        local_tokenizer: Arc<crate::router::tokenizer::local::LocalTokenizerRegistry>,
+        local: Arc<crate::router::tokenizer::local::LocalTokenizer>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::router::body_store::BodyStore>,
@@ -380,8 +376,7 @@ impl KinferenceService {
             models,
             metrics,
             http,
-            local_tokenizer,
-            local_tokenize_warn_latch: dashmap::DashMap::new(),
+            local,
             pending_observations,
             request_labels,
             body_store,

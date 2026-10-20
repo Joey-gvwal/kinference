@@ -161,12 +161,16 @@ pub async fn run() -> Result<()> {
     );
     tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
 
-    // The local tokenizer registry is fleet-wide and cheap to build, so it
-    // is always built; each pool's tokenize mode decides whether to use it.
+    // The local backend is fleet-wide and cheap to build, so it is always
+    // built; each pool's tokenize mode decides whether to use it.
     let warmup_enabled = cfg.tokenize.local.warmup;
     let local_tokenizer = Arc::new(
-        local::LocalTokenizerRegistry::new(cfg.tokenize.local.clone())
-            .map_err(|e| anyhow::anyhow!("failed to build the local tokenizer registry: {e}"))?,
+        local::LocalTokenizer::new(
+            cfg.tokenize.local.clone(),
+            http.clone(),
+            router_prom.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to build the local tokenizer: {e}"))?,
     );
     tracing::info!(
         mount_dir = ?cfg.tokenize.local.mount_dir,
@@ -174,8 +178,7 @@ pub async fn run() -> Result<()> {
         "Local tokenize registry built"
     );
     if warmup_enabled {
-        local::spawn_warmup(
-            local_tokenizer.clone(),
+        local_tokenizer.clone().spawn_warmup(
             pool_registry.clone(),
             models.subscribe(),
             cancel.clone(),

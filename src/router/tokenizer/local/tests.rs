@@ -1,4 +1,5 @@
 use super::*;
+use crate::router::tokenizer::test_support::WORDLEVEL_TOKENIZER_JSON;
 
 fn render(
     template: &str,
@@ -389,41 +390,9 @@ fn render_gemma4_golden_add_generation_prompt_false() {
 /// prepends `<bos>` as id 99) since Gemma's is gated.
 #[test]
 fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
-    // Minimal tokenizer.json: WordLevel on whitespace, a
-    // post-processor that prepends `<bos>`, and `<bos>` declared
-    // as an added/special token so the literal in the input also
-    // resolves to id 99.
-    let spec = r#"{
-            "version": "1.0",
-            "truncation": null,
-            "padding": null,
-            "added_tokens": [
-                {"id": 99, "content": "<bos>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
-            ],
-            "normalizer": null,
-            "pre_tokenizer": {"type": "Whitespace"},
-            "post_processor": {
-                "type": "TemplateProcessing",
-                "single": [
-                    {"SpecialToken": {"id": "<bos>", "type_id": 0}},
-                    {"Sequence": {"id": "A", "type_id": 0}}
-                ],
-                "pair": [
-                    {"Sequence": {"id": "A", "type_id": 0}},
-                    {"Sequence": {"id": "B", "type_id": 1}}
-                ],
-                "special_tokens": {
-                    "<bos>": {"id": "<bos>", "ids": [99], "tokens": ["<bos>"]}
-                }
-            },
-            "decoder": null,
-            "model": {
-                "type": "WordLevel",
-                "vocab": {"hello": 0, "world": 1, "<bos>": 99},
-                "unk_token": "<unk>"
-            }
-        }"#;
-    let tok: Tokenizer = spec.parse().expect("parse synthetic tokenizer spec");
+    let tok: Tokenizer = WORDLEVEL_TOKENIZER_JSON
+        .parse()
+        .expect("parse synthetic tokenizer spec");
 
     // Rendered text already includes the literal <bos>.
     let rendered = "<bos> hello world";
@@ -612,4 +581,131 @@ fn warmup_skips_only_render_mode_pools() {
         assert_eq!(should_warm(Some(&pool)), warm, "{mode:?}");
     }
     assert!(should_warm(None));
+}
+
+// --- the backend, over a mounted tokenizer ----------------------------------
+
+use crate::router::tokenizer::TokenizeOutcome;
+use crate::router::tokenizer::http::HttpRender;
+use crate::router::tokenizer::test_support::{
+    FakeRender, Render, exposition, mount_wordlevel, request, router_metrics, worker,
+};
+use kinference_fleet::scrape::MetricsRegistry;
+
+/// Reads the normalized content parts, as vLLM's templates do.
+const TEMPLATE: &str =
+    "{{ bos_token }} {% for m in messages %}{{ m['content'][0]['text'] }}{% endfor %}";
+
+/// A backend over a mount holding model `m` with `template`, and the
+/// registry its metrics land in.
+fn local_over(dir: &Path, template: Option<&str>) -> (LocalTokenizer, prometheus::Registry) {
+    mount_wordlevel(dir, "m", template);
+    let (registry, prom) = router_metrics();
+    let http = Arc::new(HttpRender::new(16, Arc::new(MetricsRegistry::new())).expect("http"));
+    let config = LocalTokenizeConfig {
+        mount_dir: Some(dir.to_path_buf()),
+        warmup: false,
+        hub_token: None,
+    };
+    let local = LocalTokenizer::new(config, http, prom).expect("a local backend");
+    (local, registry)
+}
+
+fn chat(text: &str) -> TokenizeInput {
+    TokenizeInput::Chat {
+        messages: vec![serde_json::json!({"role": "user", "content": text})],
+        kwargs: HashMap::new(),
+        tools: Vec::new(),
+        tool_choice: None,
+        add_generation_prompt: true,
+    }
+}
+
+/// A raw prompt encodes from the mount, with the post-processor's `<bos>`.
+#[tokio::test]
+async fn raw_input_encodes_from_the_mount() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, registry) = local_over(dir.path(), Some(TEMPLATE));
+
+    let out = local
+        .encode_or_render(&request(&[], "m", TokenizeInput::Raw("hello world".into())))
+        .await;
+    assert_eq!(out, TokenizeOutcome::Ok(vec![99, 0, 1]));
+    assert!(exposition(&registry).contains(r#"kinference_tokenize_total{path="local"} 1"#));
+}
+
+/// Chat input renders the mounted template, which emits `<bos>` itself.
+#[tokio::test]
+async fn chat_input_renders_the_mounted_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, _) = local_over(dir.path(), Some(TEMPLATE));
+
+    let out = local
+        .encode_or_render(&request(&[], "m", chat("hello world")))
+        .await;
+    assert_eq!(out, TokenizeOutcome::Ok(vec![99, 0, 1]));
+}
+
+/// A model without a chat template cannot render chat locally, so the
+/// request goes to `/render` and the fallback is counted.
+#[tokio::test]
+async fn a_model_without_a_chat_template_falls_back_to_render() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, registry) = local_over(dir.path(), None);
+    let fake = FakeRender::start(Render::Tokens(vec![7, 8])).await;
+    let workers = [(
+        1,
+        worker("m", "10.0.0.1:8000", true, Some(fake.base().to_string())),
+    )];
+
+    let out = local
+        .encode_or_render(&request(&workers, "m", chat("hello world")))
+        .await;
+    assert_eq!(out, TokenizeOutcome::Ok(vec![7, 8]));
+    assert_eq!(fake.calls(), 1);
+    let out = exposition(&registry);
+    assert!(
+        out.contains(r#"kinference_tokenize_total{path="http_fallback"} 1"#),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"kinference_tokenize_total{path="local"} 0"#),
+        "{out}"
+    );
+    assert!(
+        local.warn_latch.contains_key("m"),
+        "warned once for the model"
+    );
+}
+
+/// When the fallback fails too, nothing is counted as a success.
+#[tokio::test]
+async fn a_double_failure_is_unavailable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, registry) = local_over(dir.path(), None);
+    let fake = FakeRender::start(Render::Failing).await;
+    let workers = [(
+        1,
+        worker("m", "10.0.0.1:8000", true, Some(fake.base().to_string())),
+    )];
+
+    let out = local
+        .encode_or_render(&request(&workers, "m", chat("hello world")))
+        .await;
+    assert!(
+        matches!(out, TokenizeOutcome::Unavailable { .. }),
+        "{out:?}"
+    );
+    assert!(exposition(&registry).contains(r#"kinference_tokenize_total{path="http_fallback"} 0"#));
+}
+
+/// Warm-up loads the model so a later decode needs no load.
+#[tokio::test]
+async fn warmup_loads_the_model() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, _) = local_over(dir.path(), Some(TEMPLATE));
+
+    assert!(local.decode("m", &[0, 1]).is_none(), "not loaded yet");
+    local.warmup("m").await.expect("warm-up");
+    assert_eq!(local.decode("m", &[0, 1]).as_deref(), Some("hello world"));
 }
