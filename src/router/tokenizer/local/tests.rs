@@ -108,7 +108,7 @@ fn render_template_respects_add_generation_prompt_false() {
 /// `https://huggingface.co/google/gemma-4-12B-it/resolve/main/chat_template.jinja`.
 #[test]
 fn render_gemma4_template_against_minimal_chat() {
-    let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
+    let template = include_str!("fixtures/gemma4_chat_template.jinja");
     let messages = vec![serde_json::json!({"role": "user", "content": "Hello, world!"})];
     // Bind the special tokens as the registry would.
     let mut tokens = HashMap::new();
@@ -277,7 +277,7 @@ fn read_chat_template_returns_none_when_neither_source_has_template() {
 /// `eos_token` bound. Any drift in the render path or fixture fails these.
 #[test]
 fn render_gemma4_golden_minimal() {
-    let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
+    let template = include_str!("fixtures/gemma4_chat_template.jinja");
     let mut tokens = HashMap::new();
     tokens.insert("bos_token".to_string(), "<bos>".to_string());
     tokens.insert("eos_token".to_string(), "<eos>".to_string());
@@ -299,7 +299,7 @@ fn render_gemma4_golden_minimal() {
 
 #[test]
 fn render_gemma4_golden_multi_turn_with_system() {
-    let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
+    let template = include_str!("fixtures/gemma4_chat_template.jinja");
     let mut tokens = HashMap::new();
     tokens.insert("bos_token".to_string(), "<bos>".to_string());
     tokens.insert("eos_token".to_string(), "<eos>".to_string());
@@ -363,7 +363,7 @@ fn normalize_message_content_leaves_missing_content_unchanged() {
 
 #[test]
 fn render_gemma4_golden_add_generation_prompt_false() {
-    let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
+    let template = include_str!("fixtures/gemma4_chat_template.jinja");
     let mut tokens = HashMap::new();
     tokens.insert("bos_token".to_string(), "<bos>".to_string());
     tokens.insert("eos_token".to_string(), "<eos>".to_string());
@@ -463,7 +463,7 @@ fn encode_with_add_special_tokens_false_avoids_postprocessor_bos() {
 /// multi-turn loop.
 #[test]
 fn render_gemma4_template_against_multi_turn_with_tools() {
-    let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
+    let template = include_str!("fixtures/gemma4_chat_template.jinja");
     let messages = vec![
         serde_json::json!({"role": "system", "content": "You are a helpful assistant."}),
         serde_json::json!({"role": "user", "content": "What's the weather in SF?"}),
@@ -516,7 +516,7 @@ fn render_gemma4_template_against_multi_turn_with_tools() {
 #[test]
 #[ignore = "diagnostic: prints render diff between consecutive turns"]
 fn render_diff_across_turns() {
-    let template = include_str!("../local_tokenize_fixtures/gemma4_chat_template.jinja");
+    let template = include_str!("fixtures/gemma4_chat_template.jinja");
     let mut tokens = HashMap::new();
     tokens.insert("bos_token".to_string(), "<bos>".to_string());
     tokens.insert("eos_token".to_string(), "<eos>".to_string());

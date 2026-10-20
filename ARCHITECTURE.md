@@ -62,7 +62,7 @@ Today the tree breaks this rule in two places:
 - The router imports the controller's policy store to read the snapshot.
   #49 moves the snapshot holder into `kinference-policy`.
 - Two pairs inside the router import each other: `service` and
-  `observations` (#45), and `service` and `tokenize_client` (#44).
+  `observations` (#45), and `service` and `tokenizer` (#44).
 
 ## Module map
 
@@ -87,15 +87,13 @@ Rows name a module by its group; in code the fleet's are under
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
-| `router::local_tokenize` | the in-process tokenizer registry: tokenizers, chat templates, and the warm-up that follows the model index |
 | `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
 | `router::observations` | per-pick state kept until the caller reports, request labels, the CSV row, and the CSV sink |
 | `router::pick_body` | rewrites of the request body that `PullBody` serves |
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
 | `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
-| `router::tokenize` | HTTP `/render` helpers |
-| `router::tokenize_client` | `/render` with local fallback and compare mode, as methods on the service |
+| `router::tokenizer` | the tokenizer: the `/render` client in `http`, the in-process registry and its warm-up in `local`, and the mode dispatch with local fallback and compare mode, as methods on the service |
 | `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |

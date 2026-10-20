@@ -10,7 +10,7 @@ use crate::controller::leader::{self, LeaderElectionConfig};
 use crate::controller::policy::PolicyConfig;
 use crate::controller::policy::worker_sets::KubernetesConfig;
 use crate::router::metrics::MetricsConfig;
-use crate::router::tokenize_client::TokenizeConfig;
+use crate::router::tokenizer::TokenizeConfig;
 use kinference_fleet::discovery::DiscoveryConfig;
 use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use kinference_fleet::pool::PoolSpec;

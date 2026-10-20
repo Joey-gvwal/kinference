@@ -1,7 +1,7 @@
 //! In-process tokenization via the HuggingFace `tokenizers` Rust crate.
 //!
 //! Used by pools whose profile sets tokenize mode `local` or `compare`; the
-//! mode handling and the compare harness live in [`crate::router::tokenize_client`].
+//! mode handling and the compare harness live in [`crate::router::tokenizer`].
 //!
 //! ## Loading model tokenizers
 //!
@@ -43,12 +43,12 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
-use crate::router::tokenize::TokenizeInput;
+use crate::router::tokenizer::http::TokenizeInput;
 use kinference_fleet::models::ModelClaim;
 use kinference_fleet::pool::{Pool, PoolRegistry};
 use kinference_fleet::profile::TokenizeMode;
 
-/// `tokenize.local`. See `src/router/local_tokenize.rs`.
+/// `tokenize.local`. See `src/router/tokenizer/local.rs`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalTokenizeConfig {
@@ -352,7 +352,7 @@ impl LocalTokenizerRegistry {
 ///
 /// Values in `chat_kwargs` are JSON-parsed (`"false"` becomes `false`),
 /// falling back to literal strings, as the HTTP body builder in
-/// `src/router/tokenize.rs` does, so both render the same prompt.
+/// `src/router/tokenizer/http.rs` does, so both render the same prompt.
 fn render_chat_template(
     template: &str,
     messages: &[serde_json::Value],

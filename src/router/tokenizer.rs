@@ -12,14 +12,18 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::router::local_tokenize::LocalTokenizeConfig;
 use crate::router::service::KinferenceService;
-use crate::router::tokenize::{
+use kinference_fleet::profile::TokenizeMode;
+use kinference_fleet::workers::WorkerEntry;
+
+pub mod http;
+pub mod local;
+
+use self::http::{
     TokenizeInput, render_post_raw_at_url, render_structured_at_url, render_via_vllm_raw,
     render_via_vllm_structured,
 };
-use kinference_fleet::profile::TokenizeMode;
-use kinference_fleet::workers::WorkerEntry;
+use self::local::LocalTokenizeConfig;
 
 /// `tokenize`: tokenization settings shared by all pools. The mode is set
 /// per profile.
@@ -311,7 +315,7 @@ impl KinferenceService {
     /// tokens. Errors are counted, never returned. No `&self`, so it can run
     /// in a spawned task.
     async fn compare_local_tokenize_inner(
-        local_reg: &crate::router::local_tokenize::LocalTokenizerRegistry,
+        local_reg: &local::LocalTokenizerRegistry,
         prom: &crate::router::metrics::RouterMetrics,
         model: &str,
         input: &TokenizeInput,

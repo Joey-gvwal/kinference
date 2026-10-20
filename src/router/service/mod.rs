@@ -4,7 +4,7 @@
 //! This module owns the service struct, `score_workers` (tokenize, query the
 //! indexer, assemble `WorkerScore` rows), and the value types passed through
 //! it. The pick lifecycle is in `lifecycle`; tokenize/render HTTP plumbing is
-//! in [`crate::router::tokenize_client`].
+//! in [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use crate::router::observations::{
     ObservationSink, PendingObservations, RequestLabels, RequestMeta, format_csv_row,
 };
 use crate::router::picker::WorkerScore;
-use crate::router::tokenize::TokenizeInput;
+use crate::router::tokenizer::http::TokenizeInput;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
@@ -325,7 +325,7 @@ pub struct KinferenceService {
     /// The tokenization mode and render URL are per pool.
     pub(crate) tokenize_client: Arc<reqwest::Client>,
     /// In-process tokenizer registry, keyed by model and shared across pools.
-    pub(crate) local_tokenizer: Arc<crate::router::local_tokenize::LocalTokenizerRegistry>,
+    pub(crate) local_tokenizer: Arc<crate::router::tokenizer::local::LocalTokenizerRegistry>,
     /// Warn-once latch for local tokenization falling back to `/render`, per
     /// `(model_name, error_shape)`, since some models fail locally on every
     /// request.
@@ -365,7 +365,7 @@ impl KinferenceService {
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
         tokenize_client: Arc<reqwest::Client>,
-        local_tokenizer: Arc<crate::router::local_tokenize::LocalTokenizerRegistry>,
+        local_tokenizer: Arc<crate::router::tokenizer::local::LocalTokenizerRegistry>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::router::body_store::BodyStore>,
@@ -670,7 +670,7 @@ fn best_group(
 
 /// OpenAI ChatCompletionRequest fields beyond `messages` that local
 /// chat-template rendering needs to match the engine's tokens. Ends up in
-/// [`crate::router::tokenize::TokenizeInput::Chat`].
+/// [`crate::router::tokenizer::http::TokenizeInput::Chat`].
 ///
 /// The default has no tools and `add_generation_prompt = true`, the OpenAI
 /// default.

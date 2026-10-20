@@ -15,11 +15,11 @@ use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::router::body_store;
-use crate::router::local_tokenize;
 use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
+use crate::router::tokenizer::local;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
@@ -179,7 +179,7 @@ pub async fn run() -> Result<()> {
     // is always built; each pool's tokenize mode decides whether to use it.
     let warmup_enabled = cfg.tokenize.local.warmup;
     let local_tokenizer = Arc::new(
-        local_tokenize::LocalTokenizerRegistry::new(cfg.tokenize.local.clone())
+        local::LocalTokenizerRegistry::new(cfg.tokenize.local.clone())
             .map_err(|e| anyhow::anyhow!("failed to build the local tokenizer registry: {e}"))?,
     );
     tracing::info!(
@@ -188,7 +188,7 @@ pub async fn run() -> Result<()> {
         "Local tokenize registry built"
     );
     if warmup_enabled {
-        local_tokenize::spawn_warmup(
+        local::spawn_warmup(
             local_tokenizer.clone(),
             pool_registry.clone(),
             models.subscribe(),

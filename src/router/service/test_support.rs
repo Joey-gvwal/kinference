@@ -226,7 +226,7 @@ impl ServiceBuilder {
                     .expect("a reqwest client"),
             ),
             Arc::new(
-                crate::router::local_tokenize::LocalTokenizerRegistry::new(Default::default())
+                crate::router::tokenizer::local::LocalTokenizerRegistry::new(Default::default())
                     .expect("a local tokenizer registry"),
             ),
             Arc::new(PendingObservations::new(ttl)),
