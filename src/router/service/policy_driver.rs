@@ -137,7 +137,7 @@ impl KinferenceService {
                         None => {
                             let prov = dest.as_provider().expect("not local, so provider");
                             candidates.extend(provider_candidates_for(
-                                &self.provider_health,
+                                &self.observations.provider_health,
                                 prov,
                                 &target.model,
                             ));

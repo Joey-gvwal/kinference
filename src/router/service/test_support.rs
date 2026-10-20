@@ -233,10 +233,10 @@ impl ServiceBuilder {
             crate::router::observations::Observations::new(
                 ttl,
                 crate::router::observations::ObservationSink::open(None),
+                Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
                 prom.clone(),
             ),
             store.clone(),
-            Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
             prom,
         );
         TestService {

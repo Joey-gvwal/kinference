@@ -422,9 +422,13 @@ pub async fn run() -> Result<()> {
         Scoring::new(pool_registry.clone(), models.clone(), metrics.clone()),
         tokenizer,
         body_store::Bodies::new(body_store, body_idle_timeout, router_prom.clone()),
-        observations::Observations::new(observation_ttl, observation_sink, router_prom.clone()),
+        observations::Observations::new(
+            observation_ttl,
+            observation_sink,
+            provider_health,
+            router_prom.clone(),
+        ),
         policy_store,
-        provider_health,
         router_prom,
     ));
 
@@ -473,7 +477,7 @@ pub async fn run() -> Result<()> {
                             );
                         }
                         // So a deleted provider's entry doesn't linger.
-                        let dropped = service.provider_health.sweep();
+                        let dropped = service.observations.provider_health.sweep();
                         if dropped > 0 {
                             tracing::debug!(
                                 dropped,

@@ -396,7 +396,14 @@ impl KinferenceService {
                         to_model = %pick.upstream_model,
                         "policy: routing off-cluster"
                     );
-                    self.record_provider_pick(request_id, &pick, qos, &identity.tenant, streaming);
+                    self.observations.record_provider_pick(
+                        request_id,
+                        &pick.provider,
+                        &pick.upstream_model,
+                        qos,
+                        &identity.tenant,
+                        streaming,
+                    );
                     self.prom.record_routed(
                         &identity.tenant,
                         &pick.provider.name,

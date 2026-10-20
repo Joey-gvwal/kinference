@@ -281,24 +281,17 @@ pub struct KinferenceService {
     /// CRD-sourced routing policy, when `policy.enabled = true`. When `None`,
     /// a request naming an `InferencePool` falls back to model-based routing.
     pub(crate) policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
-    /// What the caller has reported back about off-cluster destinations.
-    ///
-    /// Always present, even with policy disabled, so the feedback handlers
-    /// needn't check.
-    pub(crate) provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<crate::router::metrics::RouterMetrics>,
 }
 
 impl KinferenceService {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         scoring: Scoring,
         tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
         bodies: crate::router::body_store::Bodies,
         observations: Observations,
         policy: Option<Arc<crate::controller::policy::store::PolicyStore>>,
-        provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         prom: Arc<crate::router::metrics::RouterMetrics>,
     ) -> Self {
         Self {
@@ -307,7 +300,6 @@ impl KinferenceService {
             bodies,
             observations,
             policy,
-            provider_health,
             prom,
         }
     }
@@ -633,7 +625,6 @@ pub(crate) enum PickAndRecordOutcome {
 
 mod lifecycle;
 mod policy_driver;
-mod provider_feedback;
 mod scoring;
 
 pub(crate) use scoring::Scoring;

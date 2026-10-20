@@ -443,7 +443,7 @@ impl Picker for KinferenceService {
         let req = request.into_inner();
         // Before releasing, which clears the label this is attributed by. A
         // no-op for a local pick.
-        let was_provider = self.record_provider_first_token(
+        let was_provider = self.observations.record_provider_first_token(
             req.response_id,
             req.observed_ttft_ms,
             req.upstream_status,
@@ -549,7 +549,10 @@ impl Picker for KinferenceService {
         let reason = proto::abort_request::Reason::try_from(req.reason)
             .unwrap_or(proto::abort_request::Reason::Unspecified);
         // Before releasing, which clears the label this is attributed by.
-        self.record_provider_abort(req.response_id, reason, &req.detail);
+        if let Some(kind) = abort_failure_kind(reason) {
+            self.observations
+                .record_provider_abort(req.response_id, kind, &req.detail);
+        }
         let (released, bytes_released) = self.abort_request(req.response_id);
         self.prom.record_body_aborted(abort_reason_label(reason));
         tracing::debug!(
@@ -585,6 +588,22 @@ fn commit_picked_body(
     let total = outbound.len() as u64;
     handle.commit(response_id, outbound);
     build(total)
+}
+
+/// The provider failure an abort reason reports, if any.
+///
+/// `NOT_DISPATCHED` (the caller changed its mind) and `PULL_FAILED`
+/// (kinference's body stream broke) are not provider failures.
+fn abort_failure_kind(
+    reason: proto::abort_request::Reason,
+) -> Option<kinference_policy::provider_health::FailureKind> {
+    use kinference_policy::provider_health::FailureKind;
+    use proto::abort_request::Reason;
+    match reason {
+        Reason::BackendUnresolved => Some(FailureKind::Unresolved),
+        Reason::BackendUnauthorized => Some(FailureKind::Unauthorized),
+        Reason::Unspecified | Reason::NotDispatched | Reason::PullFailed => None,
+    }
 }
 
 fn abort_reason_label(reason: proto::abort_request::Reason) -> &'static str {
