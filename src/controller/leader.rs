@@ -364,6 +364,16 @@ fn is_conflict(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(ae) if ae.code == 409)
 }
 
+/// The pod's own namespace, from the service-account mount. Used when
+/// `leader_election.namespace` is unset so a normal in-cluster deployment
+/// needs no configuration at all.
+pub fn pod_namespace() -> Option<String> {
+    std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// This replica's `holderIdentity` on the Lease.
 ///
 /// `pod_name` (`POD_NAME` from the downward API, as shown by `kubectl get

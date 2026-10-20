@@ -467,21 +467,5 @@ fn rejected_reason(binding: &BackendBinding) -> Option<String> {
     (accepted.status == "False").then(|| format!("{}: {}", accepted.reason, accepted.message))
 }
 
-/// Build the writer over `api` and spawn it.
-///
-/// `leader` gates writing; with election disabled, pass a channel set to
-/// `true`.
-pub fn spawn<A: ApiServer>(
-    api: A,
-    namespace: Option<String>,
-    store: Arc<PolicyStore>,
-    extension: Option<String>,
-    leader: watch::Receiver<bool>,
-    cancel: CancellationToken,
-) {
-    let writer = BindingWriter::new(api, namespace, store, extension, leader);
-    tokio::spawn(async move { writer.run(cancel).await });
-}
-
 #[cfg(test)]
 mod tests;

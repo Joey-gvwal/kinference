@@ -10,11 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
-use crate::controller::api::KubeApi;
-use crate::controller::discovery;
-use crate::controller::leader;
-use crate::controller::metrics::ControllerMetrics;
-use crate::controller::policy;
+use crate::controller::{self, ControllerConfig, ControllerHandles};
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::metrics::FleetMetrics;
@@ -74,17 +70,11 @@ pub async fn run() -> Result<()> {
         wait_for_shutdown_signal().await;
     };
 
-    // The elector is the one task whose work must complete after
-    // cancellation: vacating the Lease lets a peer take over immediately.
-    // Held here so shutdown can await it before the runtime drops.
-    let mut leader_task: Option<tokio::task::JoinHandle<()>> = None;
-
     let metrics = Arc::new(MetricsRegistry::new());
     // One Prometheus registry; each group registers its families, and
     // the admin listener renders it on `/metrics`.
     let registry = metrics::registry();
     let fleet_prom = Arc::new(FleetMetrics::new(&registry));
-    let controller_prom = Arc::new(ControllerMetrics::new(&registry));
     let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
     let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
     let ingest_cfg = cfg.ingest;
@@ -178,7 +168,7 @@ pub async fn run() -> Result<()> {
     )
     .context("starting the router")?;
 
-    let kubernetes = discovery::factory(cfg.kubernetes.enabled, !specs.is_empty())?;
+    let kubernetes = controller::discovery::factory(cfg.kubernetes.enabled, !specs.is_empty())?;
 
     // Pools can be built now. `PoolManager` owns the live set and
     // publishes it to the registry; the coordinator starts each pool's
@@ -198,9 +188,6 @@ pub async fn run() -> Result<()> {
             observation_ttl,
         },
     );
-    // Written by the worker-set watch, read by the status writer. Empty
-    // with `kubernetes.enabled` off.
-    let rejection_store = policy::worker_sets::RejectionStore::new();
     let mut pool_manager = pool::PoolManager::new(
         pool_registry.clone(),
         coordinator.clone(),
@@ -231,35 +218,27 @@ pub async fn run() -> Result<()> {
         );
     }
     let live_pools = pool_registry.snapshot();
-
-    // The manager moves into one task, so it needs no lock. With
-    // `kubernetes.enabled`, that task also watches `InferenceWorkerSet`s;
-    // otherwise it only reaps.
-    if cfg.kubernetes.enabled {
-        let api = KubeApi::infer().await?;
-        let watcher = policy::worker_sets::WorkerSetWatcher::new(
-            &cfg.kubernetes,
-            cfg.profiles.clone(),
-            pool_manager,
-            rejection_store.clone(),
-            controller_prom.clone(),
-        );
-        let cancel = cancel.clone();
-        tokio::spawn(async move { watcher.run(api, cancel).await });
-    } else {
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tick.tick() => { pool_manager.sweep(); }
-                }
-            }
-        });
-    }
     tokio::spawn(coordinator.run(inbox));
+
+    let controller = controller::start(
+        ControllerConfig {
+            kubernetes: cfg.kubernetes.clone(),
+            policy: cfg.policy.clone(),
+            leader_election: cfg.leader_election.clone(),
+            profiles: cfg.profiles.clone(),
+        },
+        ControllerHandles {
+            manager: pool_manager,
+            pools: pool_registry.clone(),
+            scrape: metrics.clone(),
+            store: policy_store.clone(),
+            provider_health,
+        },
+        &registry,
+        cancel.clone(),
+    )
+    .await
+    .context("starting the control plane")?;
 
     // Admin listener, when configured.
     if let Some(dash_addr) = cfg.admin_listen {
@@ -293,96 +272,6 @@ pub async fn run() -> Result<()> {
         "READY: gRPC accepting connections"
     );
 
-    // Optional CRD-driven routing policy, sharing the snapshot cell the
-    // pick path reads. When disabled, a pool-naming Pick falls back to
-    // model-based routing.
-    if let Some(store) = policy_store.clone() {
-        if !cfg.kubernetes.enabled {
-            tracing::warn!(
-                "policy.enabled is set but kubernetes.enabled is not, so no pool has a \
-                 namespaced identity for an InferenceWorkerSet to resolve to — every \
-                 destination will report NoMatchingPool. Policy routes between worker \
-                 sets that the CRs themselves define; set kubernetes.enabled = true."
-            );
-        }
-        let watcher = policy::store::PolicyWatcher::new(
-            KubeApi::infer().await?,
-            cfg.policy.namespace.clone(),
-            pool_registry.clone(),
-            rejection_store.clone(),
-            store.clone(),
-        );
-        {
-            let cancel = cancel.clone();
-            tokio::spawn(async move { watcher.run(cancel).await });
-        }
-        // Only one replica writes status; everything else runs on every
-        // replica. With election disabled the channel is set to `true` and
-        // no elector is spawned.
-        let leader_rx = if cfg.leader_election.enabled {
-            let (tx, rx) = tokio::sync::watch::channel(false);
-            let ns = cfg
-                .leader_election
-                .namespace
-                .clone()
-                .or_else(kube_namespace_hint)
-                .unwrap_or_else(|| "default".to_string());
-            let identity = cfg.leader_election.identity.clone();
-            let params = leader::LeaseParams::from(&cfg.leader_election);
-            let api = KubeApi::infer().await?;
-            tracing::info!(
-                lease = %params.name,
-                namespace = %ns,
-                identity = %identity,
-                lease_duration_secs = params.lease_duration.as_secs(),
-                "leader election enabled; only the holder writes CRD status"
-            );
-            let shutdown = {
-                let cancel = cancel.clone();
-                async move { cancel.cancelled().await }
-            };
-            leader_task = Some(tokio::spawn(async move {
-                leader::run(api, &ns, identity, params, tx, shutdown).await;
-            }));
-            rx
-        } else {
-            // Always leader. The sender is leaked so the channel never
-            // closes, which the writers would log as an error.
-            let (tx, rx) = tokio::sync::watch::channel(true);
-            std::mem::forget(tx);
-            rx
-        };
-
-        // A conforming gateway won't program a route until the pool reports
-        // Accepted=True, so nothing routes until this runs.
-        policy::status::spawn(
-            KubeApi::infer().await?,
-            policy::status::StatusHandles {
-                store: store.clone(),
-                pools: pool_registry.clone(),
-                rejections: rejection_store.clone(),
-                metrics: metrics.clone(),
-                provider_health: provider_health.clone(),
-                leader: leader_rx.clone(),
-                prom: controller_prom.clone(),
-            },
-            cancel.clone(),
-        );
-
-        // `BackendBinding`s let a gateway resolve a route naming an
-        // `InferencePool`. Leader-gated like status.
-        if cfg.policy.backend_bindings {
-            policy::binding::spawn(
-                KubeApi::infer().await?,
-                cfg.policy.namespace.clone(),
-                store.clone(),
-                cfg.policy.binding_extension().map(str::to_string),
-                leader_rx,
-                cancel.clone(),
-            );
-        }
-    }
-
     let server_result = Server::builder()
         .add_service(grpc::server(service))
         .serve_with_incoming_shutdown(incoming, shutdown)
@@ -390,34 +279,11 @@ pub async fn run() -> Result<()> {
 
     cancel.cancel();
 
-    // Give the elector a bounded moment to vacate the Lease, so a slow
-    // apiserver can't hold the pod past its grace period. Otherwise the handover
-    // waits out the lease, as on SIGKILL.
-    if let Some(task) = leader_task {
-        const VACATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
-        match tokio::time::timeout(VACATE_BUDGET, task).await {
-            Ok(Ok(())) => tracing::debug!("leader elector stopped; lease released if held"),
-            Ok(Err(e)) => tracing::warn!(error = %e, "leader elector task failed"),
-            Err(_) => tracing::warn!(
-                "leader elector did not finish within {VACATE_BUDGET:?}; a peer will \
-                 take over after the lease expires instead of immediately"
-            ),
-        }
-    }
+    controller.shutdown().await;
 
     server_result?;
     tracing::info!("Shut down complete");
     Ok(())
-}
-
-/// The pod's own namespace, from the service-account mount. Used when
-/// `leader_election.namespace` is unset so a normal in-cluster deployment
-/// needs no configuration at all.
-fn kube_namespace_hint() -> Option<String> {
-    std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// Resolve on SIGINT **or SIGTERM**.

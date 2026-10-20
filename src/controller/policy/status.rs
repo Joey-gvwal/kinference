@@ -1204,14 +1204,5 @@ impl<A: ApiServer> StatusWriter<A> {
     }
 }
 
-/// Build the writer over `api` and spawn it.
-///
-/// `handles.leader` gates writing; with election disabled, pass a channel
-/// set to `true`.
-pub fn spawn<A: ApiServer>(api: A, handles: StatusHandles, cancel: CancellationToken) {
-    let writer = StatusWriter::new(api, handles);
-    tokio::spawn(async move { writer.run(cancel).await });
-}
-
 #[cfg(test)]
 mod tests;
