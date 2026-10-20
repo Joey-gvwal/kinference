@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use crate::router::metrics::RouterMetrics;
 
 use super::{TokenizeInput, TokenizeRequest};
+use kinference_fleet::profile::TokenizeMode;
 use kinference_fleet::workers::WorkerEntry;
 
 /// What the fake `/render` answers.
@@ -125,13 +126,15 @@ pub(crate) fn worker(
     }
 }
 
-/// A request over `workers` with no dedicated URL, raw body or request id.
+/// A Render-mode request over `workers` with no dedicated URL, raw body or
+/// request id.
 pub(crate) fn request<'a>(
     workers: &'a [(u64, WorkerEntry)],
     model: &'a str,
     input: TokenizeInput,
 ) -> TokenizeRequest<'a> {
     TokenizeRequest {
+        mode: TokenizeMode::Render,
         render_url: None,
         workers,
         model,
@@ -204,4 +207,20 @@ pub(crate) fn exposition(registry: &prometheus::Registry) -> String {
         .encode(&registry.gather(), &mut buf)
         .expect("encode the registry");
     String::from_utf8(buf).expect("utf-8 exposition")
+}
+
+/// A chat template over the WordLevel tokenizer. Reads the normalized
+/// content parts, as vLLM's templates do, and emits `<bos>` itself.
+pub(crate) const WORDLEVEL_CHAT_TEMPLATE: &str =
+    "{{ bos_token }} {% for m in messages %}{{ m['content'][0]['text'] }}{% endfor %}";
+
+/// One user message, with no tools or kwargs.
+pub(crate) fn chat_input(text: &str) -> TokenizeInput {
+    TokenizeInput::Chat {
+        messages: vec![serde_json::json!({"role": "user", "content": text})],
+        kwargs: Default::default(),
+        tools: Vec::new(),
+        tool_choice: None,
+        add_generation_prompt: true,
+    }
 }

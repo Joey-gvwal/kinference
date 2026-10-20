@@ -321,11 +321,8 @@ pub struct KinferenceService {
     /// may serve one model; `pick_and_record` ranks across them.
     pub(crate) models: Arc<ModelIndex>,
     pub(crate) metrics: Arc<MetricsRegistry>,
-    /// The `/render` backend. The tokenization mode and render URL are per
-    /// pool.
-    pub(crate) http: Arc<crate::router::tokenizer::http::HttpRender>,
-    /// The in-process backend, shared across pools.
-    pub(crate) local: Arc<crate::router::tokenizer::local::LocalTokenizer>,
+    /// The tokenizer. The mode and render URL are per pool, on the request.
+    pub(crate) tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
     /// Per-pick observation stash. Inserted by `pick_and_record`, consumed by
     /// `finalize_observation` (CSV row) or `abort_observation`, and TTL-swept.
     pub(crate) pending_observations: Arc<PendingObservations>,
@@ -360,8 +357,7 @@ impl KinferenceService {
         pools: Arc<kinference_fleet::pool::PoolRegistry>,
         models: Arc<ModelIndex>,
         metrics: Arc<MetricsRegistry>,
-        http: Arc<crate::router::tokenizer::http::HttpRender>,
-        local: Arc<crate::router::tokenizer::local::LocalTokenizer>,
+        tokenizer: Arc<dyn crate::router::tokenizer::Tokenizer>,
         pending_observations: Arc<PendingObservations>,
         request_labels: Arc<RequestLabels>,
         body_store: Arc<crate::router::body_store::BodyStore>,
@@ -375,8 +371,7 @@ impl KinferenceService {
             pools,
             models,
             metrics,
-            http,
-            local,
+            tokenizer,
             pending_observations,
             request_labels,
             body_store,
@@ -687,7 +682,7 @@ impl Default for ChatExtras {
 }
 
 /// Resolved input: pre-supplied tokens, or input for
-/// `tokenize_with_fallback`.
+/// the tokenizer.
 pub(crate) enum TokenSource {
     Direct(Vec<u32>),
     NeedsTokenize(TokenizeInput),

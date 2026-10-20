@@ -19,7 +19,7 @@ use crate::router::metrics::RouterMetrics;
 use crate::router::observations;
 use crate::router::proto::picker_server::PickerServer;
 use crate::router::service::KinferenceService;
-use crate::router::tokenizer::{http, local};
+use crate::router::tokenizer;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
@@ -153,37 +153,15 @@ pub async fn run() -> Result<()> {
         "Body buffer configured"
     );
 
-    // One `/render` client for every pool, so connections pool.
-    let pool_max_idle_per_host = cfg.tokenize.pool_max_idle_per_host.unwrap_or(16);
-    let http = Arc::new(
-        http::HttpRender::new(pool_max_idle_per_host, metrics.clone())
-            .map_err(|e| anyhow::anyhow!("failed to build tokenize HTTP client: {e}"))?,
-    );
-    tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
-
-    // The local backend is fleet-wide and cheap to build, so it is always
-    // built; each pool's tokenize mode decides whether to use it.
-    let warmup_enabled = cfg.tokenize.local.warmup;
-    let local_tokenizer = Arc::new(
-        local::LocalTokenizer::new(
-            cfg.tokenize.local.clone(),
-            http.clone(),
-            router_prom.clone(),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to build the local tokenizer: {e}"))?,
-    );
-    tracing::info!(
-        mount_dir = ?cfg.tokenize.local.mount_dir,
-        warmup = warmup_enabled,
-        "Local tokenize registry built"
-    );
-    if warmup_enabled {
-        local_tokenizer.clone().spawn_warmup(
-            pool_registry.clone(),
-            models.subscribe(),
-            cancel.clone(),
-        );
-    }
+    let tokenizer = tokenizer::build(
+        &cfg.tokenize,
+        metrics.clone(),
+        router_prom.clone(),
+        pool_registry.clone(),
+        &models,
+        cancel.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("failed to build the tokenizer: {e}"))?;
 
     // In-cluster credentials, acquired once here so pool creation stays
     // synchronous and infallible. Required (fatal) when the config declares
@@ -454,8 +432,7 @@ pub async fn run() -> Result<()> {
         pool_registry.clone(),
         models.clone(),
         metrics.clone(),
-        http.clone(),
-        local_tokenizer,
+        tokenizer,
         pending_observations.clone(),
         request_labels.clone(),
         body_store.clone(),

@@ -14,7 +14,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use super::{ChatTemplateKwargs, TokenizeInput, TokenizeOutcome, TokenizeRequest};
+use futures::future::BoxFuture;
+
+use super::{ChatTemplateKwargs, TokenizeInput, TokenizeOutcome, TokenizeRequest, Tokenizer};
 use kinference_fleet::scrape::MetricsRegistry;
 
 /// Maximum number of workers tried in sequence, freshest metrics first, so
@@ -68,6 +70,7 @@ impl HttpRender {
             ref input,
             raw_body,
             req_id,
+            ..
         } = req;
         // A configured `render_url` (typically a Service) replaces the
         // per-worker rotation, keeping warm connections to one host. It fails
@@ -179,6 +182,12 @@ impl HttpRender {
                 attempts,
             },
         }
+    }
+}
+
+impl Tokenizer for HttpRender {
+    fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome> {
+        Box::pin(async move { self.render(&req).await })
     }
 }
 

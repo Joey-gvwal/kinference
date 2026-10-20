@@ -588,13 +588,10 @@ fn warmup_skips_only_render_mode_pools() {
 use crate::router::tokenizer::TokenizeOutcome;
 use crate::router::tokenizer::http::HttpRender;
 use crate::router::tokenizer::test_support::{
-    FakeRender, Render, exposition, mount_wordlevel, request, router_metrics, worker,
+    FakeRender, Render, WORDLEVEL_CHAT_TEMPLATE as TEMPLATE, chat_input as chat, exposition,
+    mount_wordlevel, request, router_metrics, worker,
 };
 use kinference_fleet::scrape::MetricsRegistry;
-
-/// Reads the normalized content parts, as vLLM's templates do.
-const TEMPLATE: &str =
-    "{{ bos_token }} {% for m in messages %}{{ m['content'][0]['text'] }}{% endfor %}";
 
 /// A backend over a mount holding model `m` with `template`, and the
 /// registry its metrics land in.
@@ -609,16 +606,6 @@ fn local_over(dir: &Path, template: Option<&str>) -> (LocalTokenizer, prometheus
     };
     let local = LocalTokenizer::new(config, http, prom).expect("a local backend");
     (local, registry)
-}
-
-fn chat(text: &str) -> TokenizeInput {
-    TokenizeInput::Chat {
-        messages: vec![serde_json::json!({"role": "user", "content": text})],
-        kwargs: HashMap::new(),
-        tools: Vec::new(),
-        tool_choice: None,
-        add_generation_prompt: true,
-    }
 }
 
 /// A raw prompt encodes from the mount, with the post-processor's `<bos>`.

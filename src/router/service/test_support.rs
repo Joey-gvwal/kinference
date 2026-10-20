@@ -11,8 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::controller::policy::store::PolicyStore;
-use crate::router::tokenizer::http::HttpRender;
-use crate::router::tokenizer::local::LocalTokenizer;
 pub(crate) use crate::router::tokenizer::test_support::Render;
 use crate::router::tokenizer::test_support::{FakeRender, worker};
 use kinference_fleet::pool::{PoolMap, PoolRegistry, test_spec};
@@ -124,7 +122,6 @@ impl ServiceBuilder {
         let http_url = render.as_ref().map(|r| r.base().to_string());
         let scrape = Arc::new(MetricsRegistry::new());
         let registry = prometheus::Registry::new();
-        let http = Arc::new(HttpRender::new(16, scrape.clone()).expect("an HTTP backend"));
         let prom = Arc::new(crate::router::metrics::RouterMetrics::new(
             &registry,
             &Default::default(),
@@ -167,6 +164,15 @@ impl ServiceBuilder {
             pools.push(p);
         }
         pool_registry.publish(Arc::new(PoolMap::from_pools(pools.clone())));
+        let tokenizer = crate::router::tokenizer::build(
+            &Default::default(),
+            scrape.clone(),
+            prom.clone(),
+            pool_registry.clone(),
+            &models,
+            CancellationToken::new(),
+        )
+        .expect("a tokenizer");
 
         let store = match self.policy {
             Policy::Off => None,
@@ -216,11 +222,7 @@ impl ServiceBuilder {
             pool_registry,
             models,
             scrape,
-            http.clone(),
-            Arc::new(
-                LocalTokenizer::new(Default::default(), http, prom.clone())
-                    .expect("a local tokenizer"),
-            ),
+            tokenizer,
             Arc::new(PendingObservations::new(ttl)),
             Arc::new(RequestLabels::new(ttl)),
             Arc::new(crate::router::body_store::BodyStore::new(

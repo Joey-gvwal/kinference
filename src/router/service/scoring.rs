@@ -83,6 +83,7 @@ impl KinferenceService {
             TokenSource::Direct(t) => t,
             TokenSource::NeedsTokenize(tok_input) => {
                 let tok_req = crate::router::tokenizer::TokenizeRequest {
+                    mode: pool.tokenize_mode,
                     render_url: pool.tokenize_render_url.as_deref(),
                     workers: &workers,
                     model,
@@ -90,7 +91,7 @@ impl KinferenceService {
                     raw_body: raw_body.as_deref(),
                     req_id,
                 };
-                match self.render_with_fallback(pool.tokenize_mode, tok_req).await {
+                match self.tokenizer.tokenize(tok_req).await {
                     crate::router::tokenizer::TokenizeOutcome::Ok(tokens) => tokens,
                     crate::router::tokenizer::TokenizeOutcome::Unavailable { reason, attempts } => {
                         tracing::error!(

@@ -1,28 +1,37 @@
-//! Tokenization for `score_workers`, as methods on
-//! [`crate::router::service::KinferenceService`]. One mode per pool profile:
-//! - `Render`: vLLM's `/render`, rotating across workers.
-//! - `Local`: in-process tokenization, falling back to `/render`.
+//! Tokenization for `score_workers`: one [`Tokenizer`] behind which the
+//! three modes a pool profile can set live as backends.
+//! - `Render`: vLLM's `/render`, rotating across workers ([`http`]).
+//! - `Local`: in-process tokenization, falling back to `/render` ([`local`]).
 //! - `Compare`: `/render` is authoritative; the local result is compared in
-//!   the background.
+//!   the background ([`compare`]).
 //!
-//! `render_with_fallback` dispatches and records latency and failures once
-//! for every path.
+//! [`ByMode`] picks the backend by the pool's mode and records latency and
+//! failures once for every call.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
+use futures::future::BoxFuture;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
-use crate::router::service::KinferenceService;
+use crate::router::metrics::RouterMetrics;
+use kinference_fleet::models::ModelIndex;
+use kinference_fleet::pool::PoolRegistry;
 use kinference_fleet::profile::TokenizeMode;
+use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
 
+pub mod compare;
 pub mod http;
 pub mod local;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use self::local::LocalTokenizeConfig;
+use self::compare::Compare;
+use self::http::HttpRender;
+use self::local::{LocalTokenizeConfig, LocalTokenizer};
 
 /// `tokenize`: tokenization settings shared by all pools. The mode is set
 /// per profile.
@@ -78,6 +87,8 @@ pub(crate) enum TokenizeOutcome {
 
 /// One request to tokenize, against the model's worker pool.
 pub(crate) struct TokenizeRequest<'a> {
+    /// The pool's mode. Read by [`ByMode`]; a backend serves one mode.
+    pub mode: TokenizeMode,
     /// A dedicated `/render` URL; `None` rotates across `workers`.
     pub render_url: Option<&'a str>,
     pub workers: &'a [(u64, WorkerEntry)],
@@ -90,122 +101,90 @@ pub(crate) struct TokenizeRequest<'a> {
     pub req_id: Option<&'a str>,
 }
 
-impl KinferenceService {
-    /// Tokenize against the model's worker pool, in the pool's mode.
-    pub(crate) async fn render_with_fallback(
-        &self,
-        mode: TokenizeMode,
-        req: TokenizeRequest<'_>,
-    ) -> TokenizeOutcome {
-        let started = Instant::now();
+/// Turns one request into the token ids the engine will hash.
+pub(crate) trait Tokenizer: Send + Sync {
+    fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome>;
+}
 
-        // Latency and unavailability are recorded here, once, for every
-        // mode. Without a raw body, `/render` gets a synthesized one.
-        let outcome = match mode {
-            TokenizeMode::Render => self.http.render(&req).await,
-            TokenizeMode::Local => self.local.encode_or_render(&req).await,
-            TokenizeMode::Compare => self.tokenize_via_http_with_compare(&req).await,
-        };
+/// The tokenizer the service holds: every backend built once, chosen per
+/// request by the pool's mode. Records the duration and the `unavailable`
+/// path once per call, for every mode.
+pub(crate) struct ByMode {
+    render: Arc<HttpRender>,
+    local: Arc<LocalTokenizer>,
+    compare: Arc<Compare>,
+    prom: Arc<RouterMetrics>,
+}
 
-        let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let unavailable = matches!(outcome, TokenizeOutcome::Unavailable { .. });
-        self.prom.record_tokenize_duration(latency_ms);
-        if unavailable {
-            // Successful paths are counted where they succeed.
-            self.prom.record_tokenize_path("unavailable");
-        }
-
-        outcome
-    }
-
-    /// `Compare` mode: `/render` is returned; the local result is only
-    /// compared against it, for the divergence counters.
-    async fn tokenize_via_http_with_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
-        let outcome = self.http.render(req).await;
-        if let TokenizeOutcome::Ok(http_tokens) = &outcome {
-            // In the background, so local template rendering doesn't add to
-            // pick latency.
-            let local_reg = self.local.clone();
-            let prom = self.prom.clone();
-            let model_owned = req.model.to_string();
-            let input_owned = req.input.clone();
-            let http_tokens_owned: Vec<u32> = http_tokens.clone();
-            tokio::spawn(async move {
-                Self::compare_local_tokenize_inner(
-                    &local_reg,
-                    &prom,
-                    &model_owned,
-                    &input_owned,
-                    &http_tokens_owned,
-                )
-                .await;
-            });
-        }
-        outcome
-    }
-
-    /// Tokenize in-process and count and log divergence from the `/render`
-    /// tokens. Errors are counted, never returned. No `&self`, so it can run
-    /// in a spawned task.
-    async fn compare_local_tokenize_inner(
-        local_reg: &local::LocalTokenizer,
-        prom: &crate::router::metrics::RouterMetrics,
-        model: &str,
-        input: &TokenizeInput,
-        http_tokens: &[u32],
-    ) {
-        match local_reg.encode(model, input).await {
-            Ok(local_tokens) if local_tokens.as_slice() == http_tokens => {
-                prom.record_tokenize_compare("match");
-            }
-            Ok(local_tokens) => {
-                prom.record_tokenize_compare("divergence");
-                let first_diff = http_tokens
-                    .iter()
-                    .zip(local_tokens.iter())
-                    .position(|(a, b)| a != b)
-                    .unwrap_or_else(|| http_tokens.len().min(local_tokens.len()));
-                // 8 tokens before to 16 after the divergence, on both sides.
-                let win_start = first_diff.saturating_sub(8);
-                let http_win: Vec<u32> = http_tokens
-                    .iter()
-                    .skip(win_start)
-                    .take(24)
-                    .copied()
-                    .collect();
-                let local_win: Vec<u32> = local_tokens
-                    .iter()
-                    .skip(win_start)
-                    .take(24)
-                    .copied()
-                    .collect();
-                let http_text = local_reg
-                    .decode(model, &http_win)
-                    .unwrap_or_else(|| "<decode-unavailable>".to_string());
-                let local_text = local_reg
-                    .decode(model, &local_win)
-                    .unwrap_or_else(|| "<decode-unavailable>".to_string());
-                tracing::warn!(
-                    model,
-                    http_count = http_tokens.len(),
-                    local_count = local_tokens.len(),
-                    first_diff_index = first_diff,
-                    window_start = win_start,
-                    http_window = ?http_win,
-                    local_window = ?local_win,
-                    http_text = %http_text,
-                    local_text = %local_text,
-                    "local_tokenize divergence — in-process result differs from /render"
-                );
-            }
-            Err(e) => {
-                prom.record_tokenize_compare("error");
-                tracing::warn!(
-                    model,
-                    error = %e,
-                    "local_tokenize failed; HTTP result returned unchanged"
-                );
-            }
+impl ByMode {
+    pub(crate) fn new(
+        render: Arc<HttpRender>,
+        local: Arc<LocalTokenizer>,
+        compare: Arc<Compare>,
+        prom: Arc<RouterMetrics>,
+    ) -> Self {
+        Self {
+            render,
+            local,
+            compare,
+            prom,
         }
     }
 }
+
+impl Tokenizer for ByMode {
+    fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let outcome = match req.mode {
+                TokenizeMode::Render => self.render.render(&req).await,
+                TokenizeMode::Local => self.local.encode_or_render(&req).await,
+                TokenizeMode::Compare => self.compare.render_then_compare(&req).await,
+            };
+            self.prom
+                .record_tokenize_duration(started.elapsed().as_secs_f64() * 1000.0);
+            if matches!(outcome, TokenizeOutcome::Unavailable { .. }) {
+                // Successful paths are counted where they succeed.
+                self.prom.record_tokenize_path("unavailable");
+            }
+            outcome
+        })
+    }
+}
+
+/// Build the `/render` client and every backend, and start the warm-up
+/// when configured. The one call the server makes.
+pub(crate) fn build(
+    cfg: &TokenizeConfig,
+    scrape: Arc<MetricsRegistry>,
+    prom: Arc<RouterMetrics>,
+    pools: Arc<PoolRegistry>,
+    models: &ModelIndex,
+    cancel: CancellationToken,
+) -> anyhow::Result<Arc<dyn Tokenizer>> {
+    let pool_max_idle_per_host = cfg.pool_max_idle_per_host.unwrap_or(16);
+    let http = Arc::new(HttpRender::new(pool_max_idle_per_host, scrape)?);
+    tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
+    // Fleet-wide and cheap to build, so always built; each pool's mode
+    // decides whether to use it.
+    let local = Arc::new(LocalTokenizer::new(
+        cfg.local.clone(),
+        http.clone(),
+        prom.clone(),
+    )?);
+    tracing::info!(
+        mount_dir = ?cfg.local.mount_dir,
+        warmup = cfg.local.warmup,
+        "local tokenizer built"
+    );
+    if cfg.local.warmup {
+        local
+            .clone()
+            .spawn_warmup(pools, models.subscribe(), cancel);
+    }
+    let compare = Arc::new(Compare::new(http.clone(), local.clone(), prom.clone()));
+    Ok(Arc::new(ByMode::new(http, local, compare, prom)))
+}
+
+#[cfg(test)]
+mod tests;

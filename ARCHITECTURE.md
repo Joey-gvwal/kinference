@@ -61,8 +61,8 @@ Today the tree breaks this rule in two places:
 
 - The router imports the controller's policy store to read the snapshot.
   #49 moves the snapshot holder into `kinference-policy`.
-- Two pairs inside the router import each other: `service` and
-  `observations` (#45), and `service` and `tokenizer` (#44).
+- One pair inside the router imports each other: `service` and
+  `observations` (#45).
 
 ## Module map
 
@@ -93,7 +93,10 @@ Rows name a module by its group; in code the fleet's are under
 | `router::picker` | the wait-time predictor and the top-K picker; pure functions |
 | `router::proto` | the generated tonic types for `kinference.v1` |
 | `router::service` | `KinferenceService`: scoring, pick, observation lifecycle, policy driver, provider feedback |
-| `router::tokenizer` | the tokenizer: the `/render` client in `http`, the in-process registry and its warm-up in `local`, and the mode dispatch with local fallback and compare mode, as methods on the service |
+| `router::tokenizer` | the `Tokenizer` trait, the request and outcome types, the `tokenize` config, and `ByMode`, which picks a backend by the pool's mode and records the tokenize metrics |
+| `router::tokenizer::compare` | `Compare`: `/render` is authoritative; the local result is compared in the background for the divergence counters |
+| `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |
+| `router::tokenizer::local` | `LocalTokenizer`: in-process tokenizers, chat templates, the warm-up that follows the model index, and the fallback to `/render` |
 | `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |

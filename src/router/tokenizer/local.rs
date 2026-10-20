@@ -1,7 +1,8 @@
 //! In-process tokenization via the HuggingFace `tokenizers` Rust crate.
 //!
 //! Used by pools whose profile sets tokenize mode `local` or `compare`; the
-//! mode handling and the compare harness live in [`crate::router::tokenizer`].
+//! mode dispatch is [`crate::router::tokenizer::ByMode`] and the compare
+//! harness [`crate::router::tokenizer::compare`].
 //!
 //! ## Loading model tokenizers
 //!
@@ -44,6 +45,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use super::http::HttpRender;
+use futures::future::BoxFuture;
+
 use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest};
 use crate::router::metrics::RouterMetrics;
 use kinference_fleet::models::ModelClaim;
@@ -391,6 +394,13 @@ impl LocalTokenizer {
             chat_template: meta.chat_template,
             special_tokens: meta.special_tokens,
         }))
+    }
+}
+
+// The HuggingFace type takes the short name here.
+impl super::Tokenizer for LocalTokenizer {
+    fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome> {
+        Box::pin(async move { self.encode_or_render(&req).await })
     }
 }
 
