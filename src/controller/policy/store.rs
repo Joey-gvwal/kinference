@@ -23,9 +23,10 @@ use kinference_policy::services::ServiceIndex;
 use kinference_policy::store::PolicyStore;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector;
-use kube::runtime::watcher::{self, watcher as start_watcher};
-use kube::{Api, Resource};
+use kube::runtime::watcher;
 use tokio_util::sync::CancellationToken;
+
+use crate::controller::api::ApiServer;
 
 /// Build the identity index from a live pool snapshot.
 pub fn pool_index(pools: &kinference_fleet::pool::PoolMap) -> PoolIndex {
@@ -33,8 +34,8 @@ pub fn pool_index(pools: &kinference_fleet::pool::PoolMap) -> PoolIndex {
 }
 
 /// Watch the CRDs and keep [`PolicyStore`] current.
-pub struct PolicyWatcher {
-    client: kube::Client,
+pub struct PolicyWatcher<A: ApiServer> {
+    api: A,
     namespace: Option<String>,
     /// Why worker sets were refused, read on every resolve so an unresolved
     /// destination reports the actual cause rather than a guess.
@@ -44,46 +45,28 @@ pub struct PolicyWatcher {
     store: Arc<PolicyStore>,
 }
 
-impl PolicyWatcher {
-    /// Build a watcher.
-    ///
-    /// Unlike [`crate::controller::discovery::KubeDiscovery`], this honors
-    /// `~/.kube/config` when there is no service-account token. Discovery
-    /// can't, since the pod IPs it returns are unreachable from outside the
-    /// cluster; policy only reads and writes CRDs, so it can run against a
-    /// local cluster.
-    pub async fn new(
+impl<A: ApiServer> PolicyWatcher<A> {
+    pub fn new(
+        api: A,
         namespace: Option<String>,
         pools: Arc<kinference_fleet::pool::PoolRegistry>,
         rejections: Arc<super::worker_sets::RejectionStore>,
         store: Arc<PolicyStore>,
-    ) -> anyhow::Result<Self> {
-        let kube_cfg = kube::Config::infer().await.map_err(|e| {
-            anyhow::anyhow!(
-                "failed to build a Kubernetes client for the policy watcher \
-                 (policy.enabled = true): no in-cluster service-account token and no usable \
-                 kubeconfig. Set `policy.enabled = false` to run without CRD policy. ({e})"
-            )
-        })?;
-        let client = kube::Client::try_from(kube_cfg)?;
-        Ok(Self {
-            client,
+    ) -> Self {
+        Self {
+            api,
             namespace,
             pools,
             rejections,
             store,
-        })
+        }
     }
 
-    fn api<K>(&self) -> Api<K>
-    where
-        K: Resource<Scope = kube::core::NamespaceResourceScope>,
-        K::DynamicType: Default,
-    {
-        match self.namespace.as_deref() {
-            Some(ns) => Api::namespaced(self.client.clone(), ns),
-            None => Api::all(self.client.clone()),
-        }
+    fn watch<K: crate::controller::api::Object>(
+        &self,
+        cfg: &watcher::Config,
+    ) -> futures::stream::BoxStream<'static, Result<watcher::Event<K>, watcher::Error>> {
+        self.api.watch(self.namespace.as_deref(), cfg.clone())
     }
 
     /// Run until cancelled. Every watch event triggers a full re-resolve. When
@@ -126,23 +109,16 @@ impl PolicyWatcher {
         let (svc_store, svc_writer) = reflector::store::<Service>();
 
         let cfg = watcher::Config::default();
-        let pools = reflector::reflector(pool_writer, start_watcher(self.api(), cfg.clone()))
-            .default_backoff();
-        let policies = reflector::reflector(policy_writer, start_watcher(self.api(), cfg.clone()))
-            .default_backoff();
-        let sets = reflector::reflector(ws_writer, start_watcher(self.api(), cfg.clone()))
-            .default_backoff();
-        let provs = reflector::reflector(prov_writer, start_watcher(self.api(), cfg.clone()))
-            .default_backoff();
-        let routes = reflector::reflector(route_writer, start_watcher(self.api(), cfg.clone()))
-            .default_backoff();
-        let grants = reflector::reflector(grant_writer, start_watcher(self.api(), cfg.clone()))
-            .default_backoff();
+        let pools = reflector::reflector(pool_writer, self.watch(&cfg)).default_backoff();
+        let policies = reflector::reflector(policy_writer, self.watch(&cfg)).default_backoff();
+        let sets = reflector::reflector(ws_writer, self.watch(&cfg)).default_backoff();
+        let provs = reflector::reflector(prov_writer, self.watch(&cfg)).default_backoff();
+        let routes = reflector::reflector(route_writer, self.watch(&cfg)).default_backoff();
+        let grants = reflector::reflector(grant_writer, self.watch(&cfg)).default_backoff();
         // Cluster-wide when the namespace is unset, so on a big cluster this
         // holds every Service. There is no label kinference owns to select on;
         // scope by namespace when the router serves only one.
-        let services =
-            reflector::reflector(svc_writer, start_watcher(self.api(), cfg)).default_backoff();
+        let services = reflector::reflector(svc_writer, self.watch(&cfg)).default_backoff();
         tokio::pin!(pools, policies, sets, provs, routes, grants, services);
 
         tracing::info!(

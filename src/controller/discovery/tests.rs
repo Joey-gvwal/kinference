@@ -572,3 +572,62 @@ async fn two_ready_endpoints_yield_two_added() {
     }
     assert_eq!(announced.len(), 2);
 }
+
+/// `run` over a recorded API server: only the named Service's slices count,
+/// and each Ready endpoint is announced once.
+#[tokio::test]
+async fn run_announces_each_ready_endpoint_of_the_named_service() {
+    use crate::controller::api::recorded::Recorded;
+    use std::time::Duration;
+
+    let of_service = |mut s: EndpointSlice, svc: &str| {
+        s.metadata.labels = Some([(SVC_NAME_LABEL.to_string(), svc.to_string())].into());
+        s
+    };
+    let api = Recorded::default().with([
+        of_service(
+            slice(
+                "s1",
+                "vllm-abc",
+                vec![
+                    ready_endpoint("u1", "p1", "10.0.0.1"),
+                    not_ready_endpoint("u2", "p2", "10.0.0.2"),
+                ],
+            ),
+            "vllm",
+        ),
+        of_service(
+            slice(
+                "s2",
+                "other-abc",
+                vec![ready_endpoint("u3", "p3", "10.0.0.3")],
+            ),
+            "other",
+        ),
+    ]);
+    let cfg = DiscoveryConfig {
+        namespace: Some("default".into()),
+        service_name: Some("vllm".into()),
+        ..Default::default()
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(KubeDiscovery::new(cfg, api).run(tx, cancel.clone()));
+
+    let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the listed endpoint is announced")
+        .expect("the task holds the sender");
+    match first {
+        WorkerChange::Added(w) => assert_eq!(w.pod_ip.as_deref(), Some("10.0.0.1")),
+        other => panic!("expected Added, got {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err(),
+        "the not-ready endpoint and the other Service's are not announced"
+    );
+    cancel.cancel();
+    task.await.expect("discovery exits on cancel");
+}

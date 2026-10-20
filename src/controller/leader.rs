@@ -16,9 +16,11 @@ use std::time::Duration;
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
 use k8s_openapi::jiff::Timestamp;
-use kube::api::{Api, ObjectMeta, PostParams};
+use kube::api::ObjectMeta;
 use serde::Deserialize;
 use tokio::sync::watch;
+
+use crate::controller::api::ApiServer;
 
 /// `leader_election`: elect a single CRD status writer across replicas.
 ///
@@ -128,15 +130,14 @@ enum Action {
 /// Run the elector until `shutdown` resolves, publishing leadership
 /// transitions on `tx`. Apiserver errors are retried forever; if our
 /// own claim lapses meanwhile the channel demotes to follower.
-pub async fn run(
-    client: kube::Client,
+pub async fn run<A: ApiServer>(
+    api: A,
     namespace: &str,
     identity: String,
     params: LeaseParams,
     tx: watch::Sender<bool>,
     shutdown: impl Future<Output = ()>,
 ) {
-    let api: Api<Lease> = Api::namespaced(client, namespace);
     let mut shutdown = std::pin::pin!(shutdown);
     let mut known: Option<Lease> = None;
 
@@ -150,7 +151,7 @@ pub async fn run(
             Action::Claim => match known.take() {
                 // Fetch failed above: retry it.
                 None => params.retry,
-                Some(prev) => match claim(&api, &identity, prev, now, &params).await {
+                Some(prev) => match claim(&api, namespace, &identity, prev, now, &params).await {
                     Ok(lease) => {
                         known = Some(lease);
                         // Successful claims re-decide immediately and
@@ -192,7 +193,7 @@ pub async fn run(
     // instead of waiting out our expiry.
     if is_current_holder(spec_of(known.as_ref()), &identity, Timestamp::now())
         && let Some(lease) = known
-        && let Err(e) = vacate(&api, lease, &params.name).await
+        && let Err(e) = vacate(&api, namespace, lease, &params.name).await
     {
         tracing::warn!(error = %e, "failed to vacate lease on shutdown");
     }
@@ -205,8 +206,8 @@ pub async fn run(
 /// Matches on `Status::code` rather than kube's `is_not_found()` /
 /// `is_conflict()`, which compare the `reason` string and so miss a bare
 /// 404/409 with no reason.
-async fn fetch_or_create(api: &Api<Lease>, namespace: &str, name: &str) -> Option<Lease> {
-    match api.get(name).await {
+async fn fetch_or_create<A: ApiServer>(api: &A, namespace: &str, name: &str) -> Option<Lease> {
+    match api.get::<Lease>(namespace, name).await {
         Ok(lease) => Some(lease),
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
             let lease = Lease {
@@ -217,10 +218,12 @@ async fn fetch_or_create(api: &Api<Lease>, namespace: &str, name: &str) -> Optio
                 },
                 spec: None,
             };
-            match api.create(&PostParams::default(), &lease).await {
+            match api.create(namespace, &lease).await {
                 Ok(lease) => Some(lease),
                 // Lost the create race to the peer: read theirs.
-                Err(kube::Error::Api(ae)) if ae.code == 409 => api.get(name).await.ok(),
+                Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                    api.get::<Lease>(namespace, name).await.ok()
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to create lease; retrying");
                     None
@@ -269,8 +272,9 @@ fn next_action(
 /// `resourceVersion`). Taking over from another/expired holder bumps
 /// `leaseTransitions` and stamps a fresh `acquireTime`; a renewal
 /// carries both forward.
-async fn claim(
-    api: &Api<Lease>,
+async fn claim<A: ApiServer>(
+    api: &A,
+    namespace: &str,
     identity: &str,
     mut prev: Lease,
     now: Timestamp,
@@ -301,19 +305,23 @@ async fn claim(
         }),
         ..Default::default()
     });
-    api.replace(&params.name, &PostParams::default(), &prev)
-        .await
+    api.replace(namespace, &params.name, &prev).await
 }
 
 /// Clear the holder fields (keeping the transition counter) so the
 /// peer's next decision is `Claim`.
-async fn vacate(api: &Api<Lease>, mut lease: Lease, name: &str) -> Result<(), kube::Error> {
+async fn vacate<A: ApiServer>(
+    api: &A,
+    namespace: &str,
+    mut lease: Lease,
+    name: &str,
+) -> Result<(), kube::Error> {
     let transitions = lease.spec.take().and_then(|s| s.lease_transitions);
     lease.spec = Some(LeaseSpec {
         lease_transitions: transitions,
         ..Default::default()
     });
-    api.replace(name, &PostParams::default(), &lease).await?;
+    api.replace(namespace, name, &lease).await?;
     Ok(())
 }
 
@@ -354,6 +362,16 @@ fn millis_until(now: Timestamp, target: Timestamp) -> Duration {
 
 fn is_conflict(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(ae) if ae.code == 409)
+}
+
+/// The pod's own namespace, from the service-account mount. Used when
+/// `leader_election.namespace` is unset so a normal in-cluster deployment
+/// needs no configuration at all.
+pub fn pod_namespace() -> Option<String> {
+    std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// This replica's `holderIdentity` on the Lease.

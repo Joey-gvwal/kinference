@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::controller::api::recorded::{Recorded, Write, key};
+
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
 use kinference_policy::PoolId;
@@ -481,4 +483,146 @@ fn only_a_false_accepted_condition_reads_as_rejected() {
     let reason = rejected_reason(&b).expect("rejected");
     assert!(reason.contains("NoNativeTarget"), "{reason}");
     assert!(reason.contains("backendRefs is empty"), "{reason}");
+}
+
+// --- the reconcile loop, over a recorded API server ---------------------
+
+/// A listed snapshot with one pool, `infra/chat`, whose one destination is
+/// the worker set `infra/workers-h100` on Service `vllm-h100`.
+fn listed_snapshot() -> Arc<kinference_policy::resolve::PolicyIndex> {
+    use kinference_policy::crd::{
+        Destination, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec, ServiceRef,
+    };
+    let meta = |name: &str| ObjectMeta {
+        name: Some(name.into()),
+        namespace: Some("infra".into()),
+        uid: Some(format!("uid-{name}")),
+        ..Default::default()
+    };
+    let pool_cr = InferencePool {
+        metadata: meta("chat"),
+        spec: InferencePoolSpec {
+            destinations: vec![Destination {
+                kind: Some("InferenceWorkerSet".into()),
+                name: Some("workers-h100".into()),
+                ..Default::default()
+            }],
+            policy_ref: None,
+        },
+        status: None,
+    };
+    let set = InferenceWorkerSet {
+        metadata: meta("workers-h100"),
+        spec: InferenceWorkerSetSpec {
+            service_ref: ServiceRef {
+                name: "vllm-h100".into(),
+                port: None,
+            },
+            profile: Some("h100".into()),
+            kv_block_size: Some(16),
+            ..Default::default()
+        },
+        status: None,
+    };
+    let pools_by_key = kinference_policy::resolve::PoolIndex::from([(
+        kinference_policy::PoolKey::namespaced("infra", "workers-h100"),
+        PoolId::from_raw(1),
+    )]);
+    let index = kinference_policy::resolve::resolve(
+        &[Arc::new(pool_cr)],
+        &[],
+        &[Arc::new(set)],
+        &[],
+        &[],
+        &[],
+        &pools_by_key,
+        &Default::default(),
+    )
+    .with_services(index());
+    assert_eq!(
+        index.lookup("infra", "chat").unwrap().destinations.len(),
+        1,
+        "the fixture's destination resolves"
+    );
+    Arc::new(index)
+}
+
+fn writer_over(api: &Recorded) -> BindingWriter<Recorded> {
+    let store = PolicyStore::new();
+    store.publish(listed_snapshot());
+    let (tx, rx) = watch::channel(true);
+    std::mem::forget(tx);
+    BindingWriter::new(
+        api.clone(),
+        Some("infra".into()),
+        store,
+        Some("chat-picker".into()),
+        rx,
+    )
+}
+
+fn chat() -> crate::controller::api::recorded::Key {
+    key::<BackendBinding>("infra", "chat")
+}
+
+#[tokio::test]
+async fn a_pool_with_no_binding_gets_one_applied() {
+    let api = Recorded::default();
+    writer_over(&api).reconcile_once().await.unwrap();
+    assert_eq!(
+        api.writes(),
+        vec![Write::Apply {
+            key: chat(),
+            manager: FIELD_MANAGER.into()
+        }]
+    );
+    let binding: BackendBinding = api.object("infra", "chat").unwrap();
+    assert!(is_ours(&binding));
+    assert_eq!(binding.spec.claim.name, "chat");
+}
+
+#[tokio::test]
+async fn an_in_sync_binding_is_left_alone() {
+    let api = Recorded::default();
+    let w = writer_over(&api);
+    w.reconcile_once().await.unwrap();
+    let first = api.writes();
+    w.reconcile_once().await.unwrap();
+    assert_eq!(api.writes(), first, "what we applied is what is listed");
+}
+
+#[tokio::test]
+async fn a_binding_that_is_not_ours_is_never_adopted() {
+    let mut foreign = desired(listed_snapshot().lookup("infra", "chat").unwrap(), EXT);
+    foreign.metadata.labels = None;
+    foreign.spec.extensions.clear();
+    let api = Recorded::default().with([foreign]);
+    writer_over(&api).reconcile_once().await.unwrap();
+    assert!(api.writes().is_empty(), "left alone, drift and all");
+}
+
+#[tokio::test]
+async fn an_orphaned_binding_of_ours_is_deleted() {
+    let mut orphan = desired(listed_snapshot().lookup("infra", "chat").unwrap(), EXT);
+    orphan.metadata.name = Some("gone".into());
+    let api = Recorded::default().with([orphan]);
+    writer_over(&api).reconcile_once().await.unwrap();
+    assert_eq!(
+        api.writes(),
+        vec![
+            Write::Apply {
+                key: chat(),
+                manager: FIELD_MANAGER.into()
+            },
+            Write::Delete(key::<BackendBinding>("infra", "gone")),
+        ]
+    );
+    assert!(api.object::<BackendBinding>("infra", "gone").is_none());
+}
+
+#[tokio::test]
+async fn a_missing_binding_crd_publishes_nothing() {
+    let api = Recorded::default().without::<BackendBinding>();
+    writer_over(&api).reconcile_once().await.unwrap();
+    assert!(api.writes().is_empty());
 }

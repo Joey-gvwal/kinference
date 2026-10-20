@@ -89,3 +89,58 @@ fn holder_currency_respects_expiry() {
     assert!(!is_current_holder(Some(&s), OTHER, ts(110)));
     assert!(!is_current_holder(None, ME, ts(110)));
 }
+
+/// The loop over a recorded API server: a free Lease is created, claimed,
+/// and vacated when shutdown fires.
+#[tokio::test]
+async fn a_free_lease_is_claimed_and_vacated_on_shutdown() {
+    use crate::controller::api::recorded::{Recorded, Write, key};
+
+    let api = Recorded::default();
+    let (tx, mut rx) = watch::channel(false);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let params = LeaseParams {
+        name: "kinference".into(),
+        lease_duration: Duration::from_secs(15),
+        renew_grace: GRACE,
+        retry: Duration::from_millis(10),
+    };
+    let task = tokio::spawn({
+        let api = api.clone();
+        async move {
+            run(api, "infra", ME.to_string(), params, tx, async {
+                let _ = stopped.await;
+            })
+            .await
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), rx.wait_for(|leader| *leader))
+        .await
+        .expect("elected within the timeout")
+        .expect("the elector holds the sender");
+    stop.send(()).expect("the elector is waiting on shutdown");
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the elector stops on shutdown")
+        .expect("the elector does not panic");
+
+    let lease = key::<Lease>("infra", "kinference");
+    assert_eq!(
+        api.writes(),
+        vec![
+            Write::Create(lease.clone()),
+            Write::Replace(lease.clone()),
+            Write::Replace(lease),
+        ],
+        "created empty, claimed, vacated"
+    );
+    let spec = api
+        .object::<Lease>("infra", "kinference")
+        .expect("the lease is still there")
+        .spec
+        .expect("vacating keeps a spec");
+    assert_eq!(spec.holder_identity, None);
+    assert_eq!(spec.lease_transitions, Some(1));
+    assert!(!*rx.borrow(), "demoted on the way out");
+}
