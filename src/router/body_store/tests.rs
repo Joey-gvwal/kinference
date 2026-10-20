@@ -1,4 +1,5 @@
 use super::*;
+use futures::StreamExt as _;
 
 const MB: u64 = 1024 * 1024;
 
@@ -198,4 +199,154 @@ fn ids_are_unique_across_many_pushes() {
     let ids: std::collections::HashSet<u64> = (0..200).map(|_| push(&s, b"x")).collect();
     assert_eq!(ids.len(), 200, "minted ids must not collide");
     assert!(!ids.contains(&0));
+}
+
+// --- the push drain ---------------------------------------------------------
+
+fn chunk(bytes: &[u8]) -> Result<BodyChunk, Status> {
+    Ok(BodyChunk {
+        chunk: bytes.to_vec(),
+    })
+}
+
+fn push_store() -> Arc<BodyStore> {
+    // 1 MiB server-wide, 1 KiB per request, so the budget paths are cheap to
+    // hit.
+    shared(1024 * 1024, 1024, Duration::from_secs(60))
+}
+
+#[tokio::test]
+async fn accumulate_concatenates_chunks_until_half_close() {
+    let s = push_store();
+    let mut r = s.reservation();
+    let mut stream = futures::stream::iter(vec![chunk(b"hello "), chunk(b"world")]);
+    let buf = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), None)
+        .await
+        .expect("clean half-close");
+    assert_eq!(buf, b"hello world", "chunk boundaries carry no meaning");
+}
+
+#[tokio::test]
+async fn accumulate_empty_body_is_valid() {
+    let s = push_store();
+    let mut r = s.reservation();
+    let mut stream = futures::stream::iter(Vec::<Result<BodyChunk, Status>>::new());
+    let buf = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), None)
+        .await
+        .expect("an immediate half-close is a complete (empty) body");
+    assert!(buf.is_empty());
+}
+
+#[tokio::test]
+async fn accumulate_propagates_a_reset_stream() {
+    let s = push_store();
+    let mut r = s.reservation();
+    let mut stream = futures::stream::iter(vec![
+        chunk(b"partial"),
+        Err(Status::cancelled("client went away")),
+    ]);
+    let failure = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), None)
+        .await
+        .expect_err("a reset stream must not look like a complete body");
+    assert!(matches!(failure, PushFailure::Transport(_)));
+    assert_eq!(failure.into_status().code(), tonic::Code::Cancelled);
+}
+
+#[tokio::test]
+async fn accumulate_enforces_the_byte_budget_mid_stream() {
+    let s = push_store(); // 1 KiB per-request cap
+    let mut r = s.reservation();
+    let big = vec![0u8; 700];
+    let mut stream = futures::stream::iter(vec![chunk(&big), chunk(&big)]);
+    let failure = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), None)
+        .await
+        .expect_err("1400 bytes exceeds the 1 KiB cap");
+    assert_eq!(failure.reject_reason(), Some(RejectReason::RequestTooLarge));
+    assert_eq!(failure.into_status().code(), tonic::Code::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn declared_length_matching_is_accepted() {
+    let s = push_store();
+    let mut r = s.reservation();
+    let mut stream = futures::stream::iter(vec![chunk(b"hello "), chunk(b"world")]);
+    let buf = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), Some(11))
+        .await
+        .expect("11 bytes declared, 11 delivered");
+    assert_eq!(buf, b"hello world");
+}
+
+#[tokio::test]
+async fn early_half_close_is_caught_by_declared_length() {
+    // The caller cleanly half-closes after sending only part of the body,
+    // which only the declared length can catch.
+    let s = push_store();
+    let mut r = s.reservation();
+    let mut stream = futures::stream::iter(vec![chunk(br#"{"model":"a","mess"#)]);
+    let failure = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), Some(64))
+        .await
+        .expect_err("a truncated body must not look complete");
+    assert!(matches!(
+        failure,
+        PushFailure::LengthMismatch {
+            declared: 64,
+            received: 18
+        }
+    ));
+    assert_eq!(failure.into_status().code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn over_long_body_fails_fast_against_declared_length() {
+    let s = push_store();
+    let mut r = s.reservation();
+    // Declares 4 bytes then sends 10: caught on the chunk that overshoots,
+    // without buffering the rest.
+    let mut stream = futures::stream::iter(vec![chunk(b"0123456789"), chunk(b"more")]);
+    let failure = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), Some(4))
+        .await
+        .expect_err("over-long body must be refused");
+    assert!(matches!(
+        failure,
+        PushFailure::LengthMismatch { declared: 4, .. }
+    ));
+    assert_eq!(failure.into_status().code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn length_mismatch_leaks_no_bytes() {
+    let s = push_store();
+    {
+        let mut r = s.reservation();
+        let mut stream = futures::stream::iter(vec![chunk(b"short")]);
+        let _ = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), Some(999)).await;
+    }
+    assert_eq!(s.stats().1, 0, "a rejected push must release its bytes");
+}
+
+#[tokio::test]
+async fn accumulate_times_out_on_an_idle_stream() {
+    let s = push_store();
+    let mut r = s.reservation();
+    // A stream that yields one chunk then never completes. Box::pin for the
+    // `Unpin` bound.
+    let mut stream =
+        Box::pin(futures::stream::iter(vec![chunk(b"first")]).chain(futures::stream::pending()));
+    let failure = accumulate_body(&mut stream, &mut r, Duration::from_millis(20), None)
+        .await
+        .expect_err("idle budget must fire");
+    assert!(matches!(failure, PushFailure::Idle(_)));
+    assert_eq!(failure.into_status().code(), tonic::Code::DeadlineExceeded);
+}
+
+#[tokio::test]
+async fn abandoned_accumulate_leaks_no_bytes() {
+    let s = push_store();
+    {
+        let mut r = s.reservation();
+        let mut stream = futures::stream::iter(vec![chunk(b"abc"), Err(Status::cancelled("gone"))]);
+        let _ = accumulate_body(&mut stream, &mut r, Duration::from_secs(5), None).await;
+        // `r` drops here without a commit.
+    }
+    assert_eq!(s.stats().1, 0, "a failed push must release its bytes");
 }

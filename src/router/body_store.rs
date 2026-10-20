@@ -34,6 +34,7 @@ use dashmap::DashMap;
 use tonic::Status;
 
 use crate::router::metrics::RouterMetrics;
+use crate::router::proto::BodyChunk;
 
 /// Reason a push was refused, for the `kinference_body_rejected_total{reason}`
 /// counter. Kept alongside the `Status` so the caller-facing message and the
@@ -532,8 +533,107 @@ impl BodyLease {
     }
 }
 
-/// The service's part for bodies: the store, the push idle budget and the
-/// buffer metrics.
+/// Why a `PushBody` drain stopped short.
+#[derive(Debug)]
+enum PushFailure {
+    /// No chunk arrived within the inter-chunk budget.
+    Idle(Duration),
+    /// A byte budget was exceeded; carries the metric label.
+    Budget(Status, RejectReason),
+    /// The stream reset before half-close, so the body is incomplete.
+    Transport(Status),
+    /// The caller sent `kinference-declared-length` and delivered a different
+    /// number of bytes, e.g. a body truncated by an early half-close.
+    LengthMismatch { declared: u64, received: u64 },
+}
+
+impl PushFailure {
+    fn reject_reason(&self) -> Option<RejectReason> {
+        match self {
+            PushFailure::Budget(_, reason) => Some(*reason),
+            _ => None,
+        }
+    }
+
+    fn into_status(self) -> Status {
+        match self {
+            PushFailure::Idle(idle) => Status::deadline_exceeded(format!(
+                "no body chunk received within {}s",
+                idle.as_secs()
+            )),
+            PushFailure::Budget(status, _) | PushFailure::Transport(status) => status,
+            PushFailure::LengthMismatch { declared, received } => {
+                Status::invalid_argument(format!(
+                    "body length {received} does not match the declared \
+                     kinference-declared-length of {declared}"
+                ))
+            }
+        }
+    }
+}
+
+/// Drain a client-streaming body into one buffer, enforcing the idle budget and
+/// the byte budgets as chunks arrive.
+///
+/// Generic over the stream so it is testable without a gRPC transport.
+///
+/// The timeout applies per chunk, not to the call, since a push spans the
+/// client's upload. Stream end is a clean half-close: the body is complete. An
+/// `Err` item is a reset stream, and the bytes are discarded.
+///
+/// `declared`, the caller's `kinference-declared-length`, is enforced: a
+/// mismatch either way is rejected.
+async fn accumulate_body<S>(
+    stream: &mut S,
+    reservation: &mut Reservation,
+    idle: Duration,
+    declared: Option<u64>,
+) -> Result<Vec<u8>, PushFailure>
+where
+    S: futures::Stream<Item = Result<BodyChunk, Status>> + Unpin,
+{
+    use futures::StreamExt;
+    // `declared` is only an allocation hint here, clamped.
+    let mut buf: Vec<u8> = Vec::with_capacity(declared.unwrap_or(0).min(1024 * 1024) as usize);
+    loop {
+        match tokio::time::timeout(idle, stream.next()).await {
+            Err(_) => return Err(PushFailure::Idle(idle)),
+            Ok(None) => {
+                // Clean half-close. If a length was declared, this is where a
+                // truncated body is caught.
+                if let Some(declared) = declared
+                    && buf.len() as u64 != declared
+                {
+                    return Err(PushFailure::LengthMismatch {
+                        declared,
+                        received: buf.len() as u64,
+                    });
+                }
+                return Ok(buf);
+            }
+            Ok(Some(Ok(chunk))) => {
+                if let Err((status, reason)) = reservation.charge(chunk.chunk.len() as u64) {
+                    return Err(PushFailure::Budget(status, reason));
+                }
+                buf.extend_from_slice(&chunk.chunk);
+                // Fail fast on an over-long body rather than buffering past
+                // what the caller said it would send.
+                if let Some(declared) = declared
+                    && buf.len() as u64 > declared
+                {
+                    return Err(PushFailure::LengthMismatch {
+                        declared,
+                        received: buf.len() as u64,
+                    });
+                }
+            }
+            Ok(Some(Err(e))) => return Err(PushFailure::Transport(e)),
+        }
+    }
+}
+
+/// The service's part for bodies: the store, the push drain with its idle
+/// budget, and the buffer metrics.
 pub(crate) struct Bodies {
     pub(crate) store: Arc<BodyStore>,
     /// Maximum silence between two `PushBody` chunks before the push is
@@ -566,6 +666,70 @@ impl Bodies {
         let (entries, in_use) = self.store.stats();
         self.prom.set_body_buffer(entries as u64, in_use);
         (reaped, bytes)
+    }
+
+    /// `PushBody` after its metadata is read: refuse on the declared length
+    /// alone, drain the stream under the idle and byte budgets, commit.
+    /// Returns `(stream_id, total_bytes)`.
+    pub(crate) async fn push<S>(
+        &self,
+        stream: &mut S,
+        client_request_id: Option<String>,
+        declared: Option<u64>,
+    ) -> Result<(u64, u64), Status>
+    where
+        S: futures::Stream<Item = Result<BodyChunk, Status>> + Unpin,
+    {
+        let req_label = client_request_id.clone().unwrap_or_else(|| "-".to_string());
+
+        // Refuse an over-budget body on its declared length alone, before
+        // reading a single chunk.
+        if let Some(declared) = declared
+            && let Err((status, reason)) = self.store.check_declared_length(declared)
+        {
+            self.prom.record_body_rejected(reason.as_label());
+            tracing::warn!(
+                req = %req_label,
+                declared,
+                "push_body: refused on declared length"
+            );
+            return Err(status);
+        }
+
+        let mut reservation = self
+            .store
+            .reservation()
+            .with_client_request_id(client_request_id);
+        let started = Instant::now();
+
+        let buf = match accumulate_body(stream, &mut reservation, self.idle_timeout, declared).await
+        {
+            Ok(buf) => buf,
+            Err(failure) => {
+                if let Some(reason) = failure.reject_reason() {
+                    self.prom.record_body_rejected(reason.as_label());
+                }
+                let status = failure.into_status();
+                tracing::warn!(
+                    req = %req_label,
+                    code = ?status.code(),
+                    "push_body: aborted before half-close; discarding"
+                );
+                return Err(status);
+            }
+        };
+
+        let total_bytes = buf.len() as u64;
+        let stream_id = self.store.commit(reservation, buf);
+        self.prom.record_body_pushed(total_bytes);
+        tracing::debug!(
+            req = %req_label,
+            stream_id,
+            total_bytes,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "push_body: buffered"
+        );
+        Ok((stream_id, total_bytes))
     }
 }
 

@@ -82,7 +82,7 @@ Rows name a module by its group; in code the fleet's are under
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
-| `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the push idle budget and the buffer metrics |
+| `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the `PushBody` drain with its idle budget, and the buffer metrics |
 | `router::grpc` | the `Picker` gRPC service; maps proto types to service calls |
 | `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
 | `router::observations` | `Observations`, the service's part: per-pick state kept until the caller reports, request labels, the CSV row and the CSV sink, and the provider feedback the caller reports |
