@@ -4,9 +4,12 @@
 use std::future::Future;
 
 use anyhow::Context as _;
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
 use kube::Api;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::core::NamespaceResourceScope;
+use kube::runtime::watcher;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -39,6 +42,13 @@ impl<K> Object for K where
 /// every namespace. Errors are `kube::Error`: the loops read a 404 as
 /// "absent" and a 409 as "lost the race".
 pub trait ApiServer: Clone + Send + Sync + 'static {
+    /// `kube::runtime::watcher` over `K`, with `cfg`'s selectors.
+    fn watch<K: Object>(
+        &self,
+        namespace: Option<&str>,
+        cfg: watcher::Config,
+    ) -> BoxStream<'static, Result<watcher::Event<K>, watcher::Error>>;
+
     fn list<K: Object>(
         &self,
         namespace: Option<&str>,
@@ -122,6 +132,14 @@ impl KubeApi {
 }
 
 impl ApiServer for KubeApi {
+    fn watch<K: Object>(
+        &self,
+        namespace: Option<&str>,
+        cfg: watcher::Config,
+    ) -> BoxStream<'static, Result<watcher::Event<K>, watcher::Error>> {
+        watcher::watcher(self.scoped::<K>(namespace), cfg).boxed()
+    }
+
     async fn list<K: Object>(&self, namespace: Option<&str>) -> Result<Vec<K>, kube::Error> {
         let list = self
             .scoped::<K>(namespace)

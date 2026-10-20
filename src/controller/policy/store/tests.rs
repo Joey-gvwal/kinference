@@ -1,5 +1,6 @@
 //! Event classification and the reflector stores that feed `resolve`.
 use super::*;
+use crate::controller::api::recorded::Recorded;
 use kinference_policy::crd::{Destination, InferencePoolSpec, InferenceWorkerSetSpec, ServiceRef};
 use kinference_policy::resolve::RejectionIndex;
 use kube::api::ObjectMeta;
@@ -132,4 +133,82 @@ fn other_failures_are_still_transient() {
         404
     ))));
     assert!(!crd_not_installed(&watcher::Error::NoResourceVersion));
+}
+
+// --- the run loop, over a recorded API server --------------------------
+
+/// Wait for the watcher to publish a listed snapshot.
+async fn published(store: &PolicyStore) -> Arc<kinference_policy::resolve::PolicyIndex> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let snapshot = store.snapshot();
+            if snapshot.listed() {
+                break snapshot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the watcher publishes once every kind has listed")
+}
+
+/// One generation of `run_once` over `api`, until it has published.
+async fn run_once_over(api: Recorded) -> Arc<kinference_policy::resolve::PolicyIndex> {
+    let store = PolicyStore::new();
+    let watcher = PolicyWatcher::new(
+        api,
+        Some("infra".into()),
+        kinference_fleet::pool::PoolRegistry::new(),
+        crate::controller::policy::worker_sets::RejectionStore::new(),
+        store.clone(),
+    );
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { watcher.run_once(&cancel).await }
+    });
+    let snapshot = published(&store).await;
+    cancel.cancel();
+    task.await.expect("the watcher exits on cancel");
+    snapshot
+}
+
+#[tokio::test]
+async fn run_once_publishes_when_every_gated_kind_has_listed() {
+    let api = Recorded::default()
+        .with([pool(
+            "chat",
+            vec![Destination {
+                kind: Some("InferenceWorkerSet".into()),
+                name: Some("workers-h100".into()),
+                ..Default::default()
+            }],
+        )])
+        .with([worker_set("workers-h100")]);
+    let snapshot = run_once_over(api).await;
+    assert_eq!(snapshot.len(), 1);
+    let chat = snapshot.lookup("infra", "chat").expect("the recorded pool");
+    assert_eq!(
+        chat.unresolved.len(),
+        1,
+        "no live pool for the set yet, so its destination is unresolved"
+    );
+    assert!(
+        snapshot.services().listed(),
+        "the Service list completed too"
+    );
+}
+
+#[tokio::test]
+async fn an_absent_crd_does_not_hold_the_gate() {
+    let api = Recorded::default()
+        .with([pool("chat", vec![])])
+        .without::<HTTPRoute>()
+        .without::<ReferenceGrant>();
+    let snapshot = run_once_over(api).await;
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "published with the two kinds read as empty"
+    );
 }

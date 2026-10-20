@@ -88,3 +88,51 @@ async fn an_absent_kind_lists_as_404() {
     let api = api.without::<Lease>();
     assert_eq!(code(api.list::<Lease>(None).await), Some(404));
 }
+
+#[tokio::test]
+async fn a_watch_lists_the_recording_and_stays_open() {
+    use futures::StreamExt as _;
+    use kube::runtime::watcher::{self, Config, Event};
+    use std::time::Duration;
+
+    let mut tagged = lease("tagged");
+    tagged.metadata.labels = Some([("team".to_string(), "a".to_string())].into());
+    let api = Recorded::default().with([lease("plain"), tagged]);
+
+    let mut all = api.watch::<Lease>(Some("infra"), Config::default());
+    assert!(matches!(all.next().await, Some(Ok(Event::Init))));
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        match all.next().await {
+            Some(Ok(Event::InitApply(l))) => names.push(l.metadata.name.unwrap()),
+            other => panic!("expected an InitApply, got {other:?}"),
+        }
+    }
+    names.sort();
+    assert_eq!(names, ["plain", "tagged"]);
+    assert!(matches!(all.next().await, Some(Ok(Event::InitDone))));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), all.next())
+            .await
+            .is_err(),
+        "the watch stays open after the list"
+    );
+
+    let selected: Vec<_> = api
+        .watch::<Lease>(None, Config::default().labels("team=a"))
+        .take(3)
+        .collect()
+        .await;
+    assert!(
+        matches!(&selected[1], Ok(Event::InitApply(l)) if l.metadata.name.as_deref() == Some("tagged"))
+    );
+    assert!(matches!(selected[2], Ok(Event::InitDone)));
+
+    let mut absent = api
+        .without::<Lease>()
+        .watch::<Lease>(None, Config::default());
+    assert!(matches!(
+        absent.next().await,
+        Some(Err(watcher::Error::InitialListFailed(kube::Error::Api(s)))) if s.code == 404
+    ));
+}

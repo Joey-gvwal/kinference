@@ -3,6 +3,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
+use kube::runtime::watcher;
+
 use super::{ApiServer, Object};
 
 /// (group/Kind, namespace, name).
@@ -31,6 +35,9 @@ pub enum Write {
 /// order. A missing object, or a kind marked `without`, is a 404; a
 /// `create` of an existing object or a `replace` with a stale
 /// `resourceVersion` is a 409. Every write stamps a fresh `resourceVersion`.
+/// A watch lists the recording as of the call and then stays open. Label
+/// selectors are equality terms (`k=v`, comma-separated), the only form
+/// the loops use.
 #[derive(Clone, Default)]
 pub struct Recorded(Arc<Mutex<Inner>>);
 
@@ -59,7 +66,7 @@ impl Recorded {
         self
     }
 
-    /// `K`'s CRD is not installed: its list answers 404.
+    /// `K`'s CRD is not installed: its list and watch answer 404.
     pub fn without<K: Object>(self) -> Self {
         self.lock().absent.insert(kind::<K>());
         self
@@ -143,7 +150,49 @@ fn no_such_kind(kind: &str) -> kube::Error {
     )
 }
 
+/// The `k=v` terms of a label selector.
+fn selector_terms(selector: Option<&str>) -> Vec<(String, String)> {
+    selector
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|term| term.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+fn matches_labels(value: &serde_json::Value, terms: &[(String, String)]) -> bool {
+    terms.iter().all(|(k, v)| {
+        value["metadata"]["labels"].get(k).and_then(|l| l.as_str()) == Some(v.as_str())
+    })
+}
+
 impl ApiServer for Recorded {
+    fn watch<K: Object>(
+        &self,
+        namespace: Option<&str>,
+        cfg: watcher::Config,
+    ) -> BoxStream<'static, Result<watcher::Event<K>, watcher::Error>> {
+        let kind = kind::<K>();
+        let inner = self.lock();
+        if inner.absent.contains(&kind) {
+            let failed = async move { Err(watcher::Error::InitialListFailed(no_such_kind(&kind))) };
+            return stream::once(failed).chain(stream::pending()).boxed();
+        }
+        let terms = selector_terms(cfg.label_selector.as_deref());
+        let mut events = vec![Ok(watcher::Event::Init)];
+        events.extend(
+            inner
+                .objects
+                .iter()
+                .filter(|(k, v)| {
+                    k.0 == kind && namespace.is_none_or(|ns| k.1 == ns) && matches_labels(v, &terms)
+                })
+                .map(|(_, v)| Ok(watcher::Event::InitApply(decode::<K>(v.clone())))),
+        );
+        events.push(Ok(watcher::Event::InitDone));
+        stream::iter(events).chain(stream::pending()).boxed()
+    }
+
     async fn list<K: Object>(&self, namespace: Option<&str>) -> Result<Vec<K>, kube::Error> {
         let kind = kind::<K>();
         let inner = self.lock();

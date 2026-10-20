@@ -598,3 +598,31 @@ async fn re_reconciling_an_unchanged_store_keeps_the_same_pools() {
     w.reconcile_from_store();
     assert_eq!(registry.snapshot().iter().next().unwrap().id, id);
 }
+
+/// The watch over a recorded API server lists the set and materializes it.
+#[tokio::test]
+async fn a_recorded_set_materializes_through_the_watch() {
+    use crate::controller::api::recorded::Recorded;
+
+    let (w, registry) = watcher_with(&[], vec![profile("h100")]);
+    let api = Recorded::default().with([iws("infra", "a", full_spec())]);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { w.run(api, cancel).await }
+    });
+    let live = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pools = registry.snapshot();
+            if !pools.is_empty() {
+                break pools;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the set materializes once the watch has listed");
+    cancel.cancel();
+    task.await.expect("the watcher exits on cancel");
+    assert_eq!(live.iter().next().unwrap().name, "infra/a");
+}

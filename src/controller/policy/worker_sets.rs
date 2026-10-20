@@ -17,13 +17,13 @@ use futures::TryStreamExt;
 use kinference_policy::PoolKey;
 use kinference_policy::crd::{InferenceWorkerSet, IntOrString, ModelDiscoveryMode};
 use kinference_policy::rejection::{RejectReason, Rejection};
-use kube::Api;
 use kube::api::ResourceExt;
-use kube::runtime::watcher::{self, watcher as start_watcher};
+use kube::runtime::watcher;
 use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::controller::api::ApiServer;
 use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
@@ -270,7 +270,7 @@ pub struct WorkerSetWatcher {
 }
 
 impl WorkerSetWatcher {
-    /// The kube client is passed to [`Self::run`] instead, so tests can drive
+    /// The API server is passed to [`Self::run`] instead, so tests can drive
     /// reconciles without one.
     pub fn new(
         kube_cfg: &KubernetesConfig,
@@ -293,13 +293,13 @@ impl WorkerSetWatcher {
     }
 
     /// Run until cancelled, rebuilding the watch whenever its stream ends.
-    pub async fn run(mut self, client: kube::Client, cancel: CancellationToken) {
+    pub async fn run<A: ApiServer>(mut self, api: A, cancel: CancellationToken) {
         const REBUILD_DELAY: Duration = Duration::from_secs(2);
         loop {
             if cancel.is_cancelled() {
                 return;
             }
-            self.run_once(&client, &cancel).await;
+            self.run_once(&api, &cancel).await;
             if cancel.is_cancelled() {
                 return;
             }
@@ -311,11 +311,7 @@ impl WorkerSetWatcher {
         }
     }
 
-    async fn run_once(&mut self, client: &kube::Client, cancel: &CancellationToken) {
-        let api: Api<InferenceWorkerSet> = match self.namespace.as_deref() {
-            Some(ns) => Api::namespaced(client.clone(), ns),
-            None => Api::all(client.clone()),
-        };
+    async fn run_once<A: ApiServer>(&mut self, api: &A, cancel: &CancellationToken) {
         let mut cfg = watcher::Config::default();
         if let Some(sel) = self.selector.as_deref() {
             cfg = cfg.labels(sel);
@@ -326,7 +322,7 @@ impl WorkerSetWatcher {
                 self.store = Some(store);
                 writer
             },
-            start_watcher(api, cfg),
+            api.watch::<InferenceWorkerSet>(self.namespace.as_deref(), cfg),
         )
         .default_backoff();
         tokio::pin!(sets);

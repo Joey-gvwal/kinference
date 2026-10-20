@@ -264,8 +264,7 @@ pub async fn run() -> Result<()> {
     // `kubernetes.enabled`, that task also watches `InferenceWorkerSet`s;
     // otherwise it only reaps.
     if cfg.kubernetes.enabled {
-        // Inferred, so it also works outside a cluster.
-        let client = kube::Client::try_from(kube::Config::infer().await?)?;
+        let api = KubeApi::infer().await?;
         let watcher = policy::worker_sets::WorkerSetWatcher::new(
             &cfg.kubernetes,
             cfg.profiles.clone(),
@@ -274,7 +273,7 @@ pub async fn run() -> Result<()> {
             controller_prom.clone(),
         );
         let cancel = cancel.clone();
-        tokio::spawn(async move { watcher.run(client, cancel).await });
+        tokio::spawn(async move { watcher.run(api, cancel).await });
     } else {
         let cancel = cancel.clone();
         tokio::spawn(async move {
@@ -335,12 +334,12 @@ pub async fn run() -> Result<()> {
             );
         }
         let watcher = policy::store::PolicyWatcher::new(
+            KubeApi::infer().await?,
             cfg.policy.namespace.clone(),
             pool_registry.clone(),
             rejection_store.clone(),
             store.clone(),
-        )
-        .await?;
+        );
         {
             let cancel = cancel.clone();
             tokio::spawn(async move { watcher.run(cancel).await });
