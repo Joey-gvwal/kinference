@@ -11,6 +11,19 @@ use std::time::Instant;
 use super::*;
 use crate::router::observations::PendingObservation;
 
+/// What `Pick()` carried, read by every step of the pick.
+struct PickRequest<'a> {
+    /// The pushed body, forwarded unchanged unless a step rewrites it.
+    body: &'a [u8],
+    request_id: u64,
+    client_request_id: Option<&'a str>,
+    /// For logs: the client's id, else ours.
+    label: String,
+    qos: Qos,
+    pool_ref: Option<&'a kinference_policy::PoolRef>,
+    identity: &'a kinference_policy::RequestIdentity,
+}
+
 impl KinferenceService {
     /// Full pick path behind gRPC `Pick()`:
     /// 1. Parse the OpenAI body for model + messages + chat-template
@@ -38,14 +51,22 @@ impl KinferenceService {
         pool_ref: Option<&kinference_policy::PoolRef>,
         identity: &kinference_policy::RequestIdentity,
     ) -> PickAndRecordOutcome {
-        let req_label = client_request_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| request_id.to_string());
+        let req = PickRequest {
+            body,
+            request_id,
+            client_request_id,
+            label: client_request_id
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| request_id.to_string()),
+            qos,
+            pool_ref,
+            identity,
+        };
 
         // 1. Parse the body into a JSON tree, rewritten in place (see
         //    `crate::router::pick_body`). Not a typed struct, which would drop unknown
         //    fields.
-        let mut obj: serde_json::Value = match serde_json::from_slice(body) {
+        let mut obj: serde_json::Value = match serde_json::from_slice(req.body) {
             Ok(v) => v,
             Err(e) => {
                 return PickAndRecordOutcome::BadRequest {
@@ -84,7 +105,7 @@ impl KinferenceService {
             {
                 Some(chosen) => {
                     tracing::info!(
-                        req = %req_label,
+                        req = %req.label,
                         chosen_model = %chosen,
                         "auto: resolved pseudo-model to concrete model"
                     );
@@ -93,7 +114,7 @@ impl KinferenceService {
                 }
                 None => {
                     tracing::info!(
-                        req = %req_label,
+                        req = %req.label,
                         "auto: no candidate models available yet (cold start?)"
                     );
                     return PickAndRecordOutcome::NoWorkers { model };
@@ -113,10 +134,10 @@ impl KinferenceService {
         //     upstream models always route to the same one rather than being
         //     ranked by the policy.
         if serving.is_empty()
-            && let Some(upstream) = self.resolve_alias(pool_ref, &model)
+            && let Some(upstream) = self.resolve_alias(req.pool_ref, &model)
         {
             tracing::info!(
-                req = %req_label,
+                req = %req.label,
                 alias = %model,
                 upstream_model = %upstream,
                 "pick: resolved declared alias to an upstream model"
@@ -130,16 +151,16 @@ impl KinferenceService {
         // A model no local pool serves may still be served by a provider in
         // the named pool, so check before refusing.
         if serving.is_empty() {
-            if !self.provider_serves(pool_ref, &model) {
+            if !self.provider_serves(req.pool_ref, &model) {
                 tracing::info!(
-                    req = %req_label,
+                    req = %req.label,
                     model = %model,
                     "pick: no pool serves model (unknown model or cold-start before /v1/models)"
                 );
                 return PickAndRecordOutcome::NoWorkers { model };
             }
             tracing::debug!(
-                req = %req_label,
+                req = %req.label,
                 model = %model,
                 "pick: no local worker set serves this model, but a provider declares it"
             );
@@ -162,7 +183,7 @@ impl KinferenceService {
         let outbound = if mutated {
             serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
         } else {
-            body.to_vec()
+            req.body.to_vec()
         };
         let mut wire_body = if mutated {
             outbound.clone()
@@ -206,7 +227,7 @@ impl KinferenceService {
             });
         // Scoring consumes these, but a second pool or a policy may need them
         // again; only clone in that case.
-        let policy_active = pool_ref.is_some() && self.policy.is_some();
+        let policy_active = req.pool_ref.is_some() && self.policy.is_some();
         let input = ScoreInput {
             input: Input::Messages(messages),
             chat_extras,
@@ -225,7 +246,7 @@ impl KinferenceService {
                     &model,
                     input,
                     HashMap::new(),
-                    Some(&req_label),
+                    Some(&req.label),
                 )
                 .await;
             match outcome {
@@ -237,7 +258,7 @@ impl KinferenceService {
                 }),
                 ScoreOutcome::Unavailable(resp, why) => {
                     tracing::warn!(
-                        req = %req_label,
+                        req = %req.label,
                         model = %model,
                         pool = %first.name,
                         reason = why.as_label(),
@@ -280,7 +301,7 @@ impl KinferenceService {
                         &model,
                         input,
                         HashMap::new(),
-                        Some(&req_label),
+                        Some(&req.label),
                     )
                     .await;
                 let scores = match outcome {
@@ -312,16 +333,16 @@ impl KinferenceService {
         // Recording in both would double-count. A request naming an unresolved
         // pool records none, but is counted under
         // `kinference_policy_decisions_total`.
-        let policy_will_rank = pool_ref.is_some() && self.policy.is_some();
+        let policy_will_rank = req.pool_ref.is_some() && self.policy.is_some();
         let winner = best_group(
             groups,
-            &req_label,
+            &req.label,
             (!policy_will_rank).then_some(&*self.prom),
         );
         if winner.is_none() && serving.is_empty() {
             // Normal for a provider-only model.
             tracing::debug!(
-                req = %req_label,
+                req = %req.label,
                 model = %model,
                 "pick: no local group to score; the decision rests entirely with the policy"
             );
@@ -333,12 +354,12 @@ impl KinferenceService {
         //     one concurrent pick stale.
         let mut forced_endpoint: Option<String> = None;
         let selected: Option<ScoredGroup>;
-        if let (Some(pref), Some(store)) = (pool_ref, self.policy.as_ref()) {
+        if let (Some(pref), Some(store)) = (req.pool_ref, self.policy.as_ref()) {
             let attrs = kinference_policy::predicate::RequestAttrs {
                 // Upstream first, then its declared aliases.
                 model: {
                     let mut names = vec![model.clone()];
-                    names.extend(self.declared_aliases(pool_ref, &model));
+                    names.extend(self.declared_aliases(req.pool_ref, &model));
                     names
                 },
                 // Block-granular, from scoring. `None` when nothing local was
@@ -350,16 +371,16 @@ impl KinferenceService {
                         .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
                 }),
                 max_tokens: parsed_max_tokens,
-                qos: Some(qos.as_label().to_string()),
-                tenant: identity.tenant.clone(),
+                qos: Some(req.qos.as_label().to_string()),
+                tenant: req.identity.tenant.clone(),
                 // See `kinference_policy::classify`.
                 tag: kinference_policy::classify::tags_for_request(
-                    &req_label,
+                    &req.label,
                     classifier_text.as_deref(),
                 ),
             };
             match self
-                .policy_select(pref, store, winner, &model, spare, attrs, &req_label)
+                .policy_select(pref, store, winner, &model, spare, attrs, &req.label)
                 .await
             {
                 // An off-cluster destination. Returns here, skipping the
@@ -367,7 +388,7 @@ impl KinferenceService {
                 // model name and hold an observation for the reported TTFT.
                 Ok(PolicySelection::Provider(pick)) => {
                     let base = if wire_body.is_empty() {
-                        body
+                        req.body
                     } else {
                         &wire_body
                     };
@@ -375,7 +396,7 @@ impl KinferenceService {
                         crate::router::pick_body::rewrite_model(base, &pick.upstream_model)
                     else {
                         tracing::error!(
-                            req = %req_label,
+                            req = %req.label,
                             from_model = %body_model,
                             to_model = %pick.upstream_model,
                             provider = %pick.provider.label(),
@@ -389,7 +410,7 @@ impl KinferenceService {
                         };
                     };
                     tracing::info!(
-                        req = %req_label,
+                        req = %req.label,
                         provider = %pick.provider.label(),
                         backend = %pick.backend_ref.label(),
                         from_model = %body_model,
@@ -397,21 +418,21 @@ impl KinferenceService {
                         "policy: routing off-cluster"
                     );
                     self.observations.record_provider_pick(
-                        request_id,
+                        req.request_id,
                         &pick.provider,
                         &pick.upstream_model,
-                        qos,
-                        &identity.tenant,
+                        req.qos,
+                        &req.identity.tenant,
                         streaming,
                     );
                     self.prom.record_routed(
-                        &identity.tenant,
+                        &req.identity.tenant,
                         &pick.provider.name,
                         kinference_policy::crd::BackendType::Provider,
                     );
                     return PickAndRecordOutcome::Provider {
                         pick,
-                        response_id: request_id,
+                        response_id: req.request_id,
                         body: rewritten,
                     };
                 }
@@ -426,7 +447,7 @@ impl KinferenceService {
                     let Some(group) = group else {
                         // Nothing local was scored and no provider chosen.
                         tracing::info!(
-                            req = %req_label,
+                            req = %req.label,
                             model = %model,
                             "pick: no local group and no provider chosen"
                         );
@@ -441,14 +462,14 @@ impl KinferenceService {
                     // were taken for scoring.
                     if model != body_model {
                         let base = if wire_body.is_empty() {
-                            body
+                            req.body
                         } else {
                             &wire_body
                         };
                         match crate::router::pick_body::rewrite_model(base, &model) {
                             Some(rewritten) => {
                                 tracing::debug!(
-                                    req = %req_label,
+                                    req = %req.label,
                                     from_model = %body_model,
                                     to_model = %model,
                                     "policy: rewriting the body's model to the chosen one"
@@ -460,7 +481,7 @@ impl KinferenceService {
                                 // Refuse rather than forward a body naming a
                                 // model the chosen endpoint does not serve.
                                 tracing::error!(
-                                    req = %req_label,
+                                    req = %req.label,
                                     from_model = %body_model,
                                     to_model = %model,
                                     "policy: chose a different model but the body could not be \
@@ -486,7 +507,7 @@ impl KinferenceService {
         // Everything below is bound to whichever pool won.
         let Some(group) = selected else {
             tracing::info!(
-                req = %req_label,
+                req = %req.label,
                 model = %model,
                 "pick: no workers serve model"
             );
@@ -512,7 +533,7 @@ impl KinferenceService {
             // section, and the state it touches is TTL-swept.
             let _pick_guard = pick_lock.lock().unwrap_or_else(|poisoned| {
                 tracing::warn!(
-                    req = %req_label,
+                    req = %req.label,
                     workerset = %pool.name,
                     "pick_lock was poisoned by an earlier panic; continuing. The lock \
                      guards ordering only, so this is recoverable — but a panic inside \
@@ -622,7 +643,7 @@ impl KinferenceService {
                     // this group's scores. Warn, since the decision counter
                     // already recorded `chosen`.
                     tracing::warn!(
-                        req = %req_label,
+                        req = %req.label,
                         model = %model,
                         worker_set = %pool.name,
                         endpoint = %ep,
@@ -641,7 +662,7 @@ impl KinferenceService {
                     Some(r) => r,
                     None => {
                         tracing::warn!(
-                            req = %req_label,
+                            req = %req.label,
                             model = %model,
                             n_scored = scores.len(),
                             "pick: picker returned None (defensive); reporting BadRequest"
@@ -659,7 +680,7 @@ impl KinferenceService {
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
                     "pick: score table for req={}\n{}",
-                    req_label,
+                    req.label,
                     crate::router::picker::format_score_table(
                         &inputs,
                         expected_overlap_alpha,
@@ -668,7 +689,7 @@ impl KinferenceService {
                 );
             }
             tracing::info!(
-                req = %req_label,
+                req = %req.label,
                 model = %model,
                 chosen_endpoint = %chosen.endpoint,
                 chosen_name = %chosen.name,
@@ -712,7 +733,7 @@ impl KinferenceService {
             if degraded_reason.is_none() {
                 self.prom.record_prefix_match(
                     &model,
-                    qos.as_label(),
+                    req.qos.as_label(),
                     chosen.total_blocks,
                     chosen.matched_blocks,
                     chosen_kv_blocks,
@@ -721,7 +742,7 @@ impl KinferenceService {
 
             let chosen_clone = chosen.clone();
             pending = PendingObservation {
-                request_id,
+                request_id: req.request_id,
                 workerset: pool.name.clone(),
                 profile: pool.profile.clone(),
                 inflight: crate::router::observations::InflightHandles::of(&pool),
@@ -737,21 +758,21 @@ impl KinferenceService {
                 expected_overlap_alpha,
                 predictor_cfg: predictor_cfg.clone(),
                 picker_cfg: picker_cfg.clone(),
-                external_request_id: client_request_id.map(|s| s.to_string()),
+                external_request_id: req.client_request_id.map(|s| s.to_string()),
                 replication_fired,
                 model: model.clone(),
                 streaming,
-                qos,
-                tenant: identity.tenant.clone(),
+                qos: req.qos,
+                tenant: req.identity.tenant.clone(),
             };
             // For ReportFinalToken; the record above is consumed earlier, at
             // ReportFirstToken.
             self.observations.labels.insert(
-                request_id,
+                req.request_id,
                 RequestMeta {
                     model: model.clone(),
-                    qos,
-                    tenant: identity.tenant.clone(),
+                    qos: req.qos,
+                    tenant: req.identity.tenant.clone(),
                     streaming,
                     picked_at: score_now,
                     // A local pick, so there is no provider to attribute
@@ -772,7 +793,7 @@ impl KinferenceService {
                 chosen_hashes_u64.into_iter().collect();
             let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
             pool.inflight_prefixes.insert(
-                request_id,
+                req.request_id,
                 chosen.endpoint.clone(),
                 chosen_hashes_set,
                 chosen_uncached,
@@ -786,7 +807,7 @@ impl KinferenceService {
         // The bare name, as `backend.name` spells it; a CRD worker set's
         // `pool.name` is `namespace/name`.
         self.prom.record_routed(
-            &identity.tenant,
+            &req.identity.tenant,
             &pool.key.name,
             kinference_policy::crd::BackendType::Local,
         );
@@ -794,14 +815,14 @@ impl KinferenceService {
         match degraded_reason {
             Some(reason) => PickAndRecordOutcome::Degraded {
                 endpoint: chosen_endpoint,
-                response_id: request_id,
+                response_id: req.request_id,
                 reason,
                 body: wire_body,
                 model,
             },
             None => PickAndRecordOutcome::Ok {
                 endpoint: chosen_endpoint,
-                response_id: request_id,
+                response_id: req.request_id,
                 body: wire_body,
                 model,
             },
