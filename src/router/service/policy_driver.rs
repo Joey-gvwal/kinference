@@ -27,7 +27,7 @@ impl KinferenceService {
         // Passed explicitly, since `primary` may not exist (a provider-only
         // model).
         requested_model: &str,
-        spare: Option<(Vec<serde_json::Value>, ChatExtras, Vec<u8>)>,
+        spare: Option<ScoreInput>,
         attrs: kinference_policy::predicate::RequestAttrs,
         req_label: &str,
     ) -> Result<PolicySelection, PickAndRecordOutcome> {
@@ -158,7 +158,7 @@ impl KinferenceService {
                                 else {
                                     continue;
                                 };
-                                let Some((msgs, extras, body)) = spare.clone() else {
+                                let Some(spare) = spare.as_ref() else {
                                     // Only reachable if scoring inputs were not
                                     // cloned, which cannot happen when a policy
                                     // is active.
@@ -170,9 +170,9 @@ impl KinferenceService {
                                     .iter()
                                     .find(|g| g.model == upstream && !g.side.tokens.is_empty())
                                     .map(|g| g.side.tokens.clone());
-                                let (input, raw) = match cached {
-                                    Some(t) => (Input::Tokens(t), None),
-                                    None => (Input::Messages(msgs), Some(body)),
+                                let input = match cached {
+                                    Some(t) => ScoreInput::tokens(t),
+                                    None => spare.clone(),
                                 };
                                 let (outcome, side) = self
                                     .scoring
@@ -182,8 +182,6 @@ impl KinferenceService {
                                         &upstream,
                                         input,
                                         HashMap::new(),
-                                        extras,
-                                        raw,
                                         Some(req_label),
                                     )
                                     .await;

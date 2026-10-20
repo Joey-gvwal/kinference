@@ -3,8 +3,8 @@
 //!
 //! This module owns the service struct and the value types passed through
 //! it. Scoring (the pools, the model index, the scrape reads) is the
-//! `Scoring` part in `scoring`; the pick lifecycle is in `lifecycle`;
-//! tokenizing is [`crate::router::tokenizer`].
+//! `Scoring` part in `scoring`; the pick path, as five steps, is in
+//! `lifecycle`; tokenizing is [`crate::router::tokenizer`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -435,6 +435,7 @@ fn worker_score(
 
 /// Input variants `score_workers` accepts. The Pick handler uses `Messages`;
 /// policy re-scoring uses `Tokens`.
+#[derive(Clone)]
 pub(crate) enum Input {
     #[allow(dead_code)]
     Raw(String),
@@ -444,6 +445,27 @@ pub(crate) enum Input {
     Messages(Vec<serde_json::Value>),
     #[allow(dead_code)]
     Tokens(Vec<u32>),
+}
+
+/// What one `(pool, model)` is scored from.
+#[derive(Clone)]
+pub(crate) struct ScoreInput {
+    pub input: Input,
+    pub chat_extras: ChatExtras,
+    /// The body `/render` sees. `None` with `Input::Tokens`.
+    pub raw_body: Option<Vec<u8>>,
+}
+
+impl ScoreInput {
+    /// Tokens already resolved for the model, so `/render` is not called
+    /// again.
+    pub(crate) fn tokens(tokens: Vec<u32>) -> Self {
+        Self {
+            input: Input::Tokens(tokens),
+            chat_extras: ChatExtras::default(),
+            raw_body: None,
+        }
+    }
 }
 
 /// First upstream among `destinations`' alias tables that `is_served` accepts.
