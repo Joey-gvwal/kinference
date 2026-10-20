@@ -20,14 +20,31 @@ use kinference_policy::crd::{
 use kinference_policy::resolve::PolicyIndex;
 use kinference_policy::{PoolId, PoolKey, PoolRef, RequestIdentity};
 
+/// What the fake `/render` answers.
+#[derive(Clone)]
+pub(crate) enum Render {
+    /// Every request tokenizes to these ids.
+    Tokens(Vec<u32>),
+    /// Every request gets a 500.
+    Failing,
+    /// No worker has an `http_url`, so nothing is tried.
+    Absent,
+}
+
 /// One worker set: a live pool with one worker per address.
 struct PoolFixture {
     name: String,
     model: String,
     addrs: Vec<String>,
+    /// `initial_sync_complete` on every worker.
+    ready: bool,
+    /// `(upstream, aliases)` rows for the worker set's `spec.models`.
+    aliases: Vec<(String, Vec<String>)>,
 }
 
 enum Policy {
+    /// `policy: None`, as with policy disabled.
+    Off,
     /// A listed snapshot with no pools, so a named pool is unknown.
     ListedEmpty,
     /// `InferencePool default/pool` over every fixture, under this spec.
@@ -38,8 +55,7 @@ pub(crate) struct ServiceBuilder {
     pools: Vec<PoolFixture>,
     providers: Vec<(String, serde_json::Value)>,
     policy: Policy,
-    /// What the fake `/render` answers for every request.
-    tokens: Vec<u32>,
+    render: Render,
 }
 
 impl ServiceBuilder {
@@ -49,7 +65,7 @@ impl ServiceBuilder {
             providers: Vec::new(),
             policy: Policy::ListedEmpty,
             // Two full blocks at the test pools' block size of 16.
-            tokens: (1..=32).collect(),
+            render: Render::Tokens((1..=32).collect()),
         }
     }
 
@@ -59,7 +75,39 @@ impl ServiceBuilder {
             name: name.into(),
             model: model.into(),
             addrs: addrs.iter().map(|a| a.to_string()).collect(),
+            ready: true,
+            aliases: Vec::new(),
         });
+        self
+    }
+
+    /// The last pool's workers have not finished their initial sync.
+    pub(crate) fn still_syncing(mut self) -> Self {
+        self.pools.last_mut().expect("a pool to mark").ready = false;
+        self
+    }
+
+    /// `models: [{name: upstream, aliases}]` on worker set `set`.
+    pub(crate) fn alias(mut self, set: &str, upstream: &str, aliases: &[&str]) -> Self {
+        let f = self
+            .pools
+            .iter_mut()
+            .find(|f| f.name == set)
+            .expect("an alias names a pool the builder has");
+        f.aliases.push((
+            upstream.into(),
+            aliases.iter().map(|a| a.to_string()).collect(),
+        ));
+        self
+    }
+
+    pub(crate) fn render(mut self, render: Render) -> Self {
+        self.render = render;
+        self
+    }
+
+    pub(crate) fn without_policy(mut self) -> Self {
+        self.policy = Policy::Off;
         self
     }
 
@@ -78,7 +126,11 @@ impl ServiceBuilder {
     }
 
     pub(crate) async fn build(self) -> TestService {
-        let render = FakeRender::start(self.tokens).await;
+        let render = match self.render {
+            Render::Absent => None,
+            answer => Some(FakeRender::start(answer).await),
+        };
+        let http_url = render.as_ref().map(|r| r.base.clone());
         let registry = prometheus::Registry::new();
         let pool_registry = PoolRegistry::new();
         let models = Arc::new(ModelIndex::new());
@@ -100,23 +152,32 @@ impl ServiceBuilder {
             for addr in &f.addrs {
                 id += 1;
                 p.registry
-                    .register(id, worker(&f.model, addr, Some(render.base.clone())));
+                    .register(id, worker(&f.model, addr, f.ready, http_url.clone()));
             }
             models.associate(p.id, &f.name, std::slice::from_ref(&f.model));
             bound.insert(spec.key.clone(), p.id);
+            let aliases: Vec<serde_json::Value> = f
+                .aliases
+                .iter()
+                .map(|(u, a)| serde_json::json!({"name": u, "aliases": a}))
+                .collect();
             worker_sets.push(cr::<InferenceWorkerSet>(serde_json::json!({
                 "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceWorkerSet",
                 "metadata": {"name": f.name, "namespace": "default"},
-                "spec": {"serviceRef": {"name": f.name}}
+                "spec": {"serviceRef": {"name": f.name}, "models": aliases}
             })));
             dests.push(serde_json::json!({"kind": "InferenceWorkerSet", "name": f.name}));
             pools.push(p);
         }
         pool_registry.publish(Arc::new(PoolMap::from_pools(pools.clone())));
 
-        let store = PolicyStore::new();
-        match self.policy {
-            Policy::ListedEmpty => store.publish(Arc::new(PolicyIndex::listed_empty())),
+        let store = match self.policy {
+            Policy::Off => None,
+            Policy::ListedEmpty => {
+                let store = PolicyStore::new();
+                store.publish(Arc::new(PolicyIndex::listed_empty()));
+                Some(store)
+            }
             Policy::Spec(spec) => {
                 let mut provs = Vec::new();
                 for (name, models) in &self.providers {
@@ -138,6 +199,7 @@ impl ServiceBuilder {
                     "metadata": {"name": "p", "namespace": "default"},
                     "spec": spec
                 }));
+                let store = PolicyStore::new();
                 store.publish(Arc::new(kinference_policy::resolve::resolve(
                     &[pool],
                     &[policy],
@@ -148,8 +210,9 @@ impl ServiceBuilder {
                     &bound,
                     &Default::default(),
                 )));
+                Some(store)
             }
-        }
+        };
 
         let ttl = Duration::from_secs(30);
         let svc = KinferenceService::new(
@@ -170,7 +233,7 @@ impl ServiceBuilder {
                 1 << 20,
                 ttl,
             )),
-            Some(store.clone()),
+            store.clone(),
             Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
             ttl,
             Arc::new(ObservationSink::open(None)),
@@ -194,9 +257,9 @@ pub(crate) struct TestService {
     pub svc: KinferenceService,
     /// In the order the builder was given them.
     pub pools: Vec<Arc<Pool>>,
-    store: Arc<PolicyStore>,
+    store: Option<Arc<PolicyStore>>,
     registry: prometheus::Registry,
-    render: FakeRender,
+    render: Option<FakeRender>,
 }
 
 impl TestService {
@@ -209,8 +272,11 @@ impl TestService {
         }
     }
 
+    /// The policy store; panics for a service built `without_policy`.
     pub(crate) fn store(&self) -> &Arc<PolicyStore> {
-        &self.store
+        self.store
+            .as_ref()
+            .expect("the service was built with policy")
     }
 
     /// `pick_and_record` for tenant `acme`, with no client request id.
@@ -241,19 +307,21 @@ impl TestService {
 
     /// How many requests the fake `/render` has answered.
     pub(crate) fn render_calls(&self) -> usize {
-        self.render.calls.load(Ordering::SeqCst)
+        self.render
+            .as_ref()
+            .map_or(0, |r| r.calls.load(Ordering::SeqCst))
     }
 }
 
-/// A ready worker serving `model` at `addr`, tokenizing at `http_url`.
-fn worker(model: &str, addr: &str, http_url: Option<String>) -> WorkerEntry {
+/// A worker serving `model` at `addr`, tokenizing at `http_url`.
+fn worker(model: &str, addr: &str, ready: bool, http_url: Option<String>) -> WorkerEntry {
     WorkerEntry {
         worker_id_str: addr.into(),
         model_name_hint: Some(model.into()),
         current_models: vec![model.into()],
         http_url,
         block_size: 16,
-        initial_sync_complete: true,
+        initial_sync_complete: ready,
         kv_events_observed: true,
         score_addr: addr.into(),
         engine: None,
@@ -271,8 +339,8 @@ fn cr<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Arc<T> {
     Arc::new(serde_json::from_value(v).expect("valid fixture"))
 }
 
-/// A `/render` on a loopback port that answers every request with the same
-/// token ids. Stops when dropped.
+/// A `/render` on a loopback port that gives every request the same answer.
+/// Stops when dropped.
 struct FakeRender {
     base: String,
     calls: Arc<AtomicUsize>,
@@ -280,7 +348,8 @@ struct FakeRender {
 }
 
 impl FakeRender {
-    async fn start(tokens: Vec<u32>) -> Self {
+    async fn start(answer: Render) -> Self {
+        use axum::response::IntoResponse as _;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a loopback port");
@@ -290,8 +359,19 @@ impl FakeRender {
         // Any path: a worker is POSTed `{http_url}/v1/chat/completions/render`.
         let app = axum::Router::new().fallback(move || {
             hits.fetch_add(1, Ordering::SeqCst);
-            let tokens = tokens.clone();
-            async move { axum::Json(serde_json::json!({ "token_ids": tokens })) }
+            let answer = answer.clone();
+            async move {
+                match answer {
+                    Render::Tokens(ids) => {
+                        axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
+                    }
+                    Render::Failing => {
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
+                            .into_response()
+                    }
+                    Render::Absent => unreachable!("no server is started for Absent"),
+                }
+            }
         });
         let task = tokio::spawn(async move {
             axum::serve(listener, app)

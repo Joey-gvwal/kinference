@@ -1,5 +1,5 @@
 use super::*;
-use crate::router::service::test_support::{ServiceBuilder, TestService};
+use crate::router::service::test_support::{Render, ServiceBuilder, TestService};
 
 use kinference_fleet::pool::test_pool;
 
@@ -493,8 +493,9 @@ async fn an_unscraped_worker_has_no_saturation_signals() {
 /// A service where `qwen` is served by worker set `qwen-ws` and by provider
 /// `cloud`, whose row names it `vendor/qwen`, after two picks for tenant
 /// `acme`: response 1 interactive, which is unmatched and stays local, and
-/// response 2 batch, which a rule sends to the provider.
-async fn local_and_cloud_picks() -> TestService {
+/// response 2 batch, which a rule sends to the provider. Returns the two
+/// outcomes in that order.
+async fn local_and_cloud_picks() -> (TestService, [PickAndRecordOutcome; 2]) {
     let t = ServiceBuilder::new()
         .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
         .provider(
@@ -509,22 +510,14 @@ async fn local_and_cloud_picks() -> TestService {
     let pool = TestService::pool_ref();
 
     let local = t.pick(BODY, 1, Qos::Interactive, Some(&pool)).await;
-    assert!(
-        matches!(local, PickAndRecordOutcome::Ok { .. }),
-        "{local:?}"
-    );
     let cloud = t.pick(BODY, 2, Qos::Batch, Some(&pool)).await;
-    assert!(
-        matches!(cloud, PickAndRecordOutcome::Provider { .. }),
-        "{cloud:?}"
-    );
-    t
+    (t, [local, cloud])
 }
 
 /// Every pick that routes is counted by tenant and destination.
 #[tokio::test]
 async fn a_pick_is_counted_by_tenant_and_destination() {
-    let t = local_and_cloud_picks().await;
+    let (t, _) = local_and_cloud_picks().await;
     let out = t.metrics();
     for line in [
         r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#,
@@ -541,7 +534,7 @@ async fn a_pick_is_counted_by_tenant_and_destination() {
 async fn token_metrics_name_the_model_each_body_was_sent_with() {
     use crate::router::proto::picker_server::Picker;
 
-    let t = local_and_cloud_picks().await;
+    let (t, _) = local_and_cloud_picks().await;
     for (response_id, prompt_tokens) in [(1, 10), (2, 7)] {
         t.svc
             .report_final_token(tonic::Request::new(
@@ -664,4 +657,355 @@ async fn a_streaming_pick_returns_the_rewritten_body() {
         t.svc.request_labels.take(1).expect("labels").streaming,
         "the labels remember that the request streams"
     );
+}
+
+/// A model nothing serves is refused without scoring.
+#[tokio::test]
+async fn an_unknown_model_yields_no_workers() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+    let body = br#"{"model":"llama","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let out = t.pick(body, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::NoWorkers { model } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "llama");
+    assert_eq!(t.render_calls(), 0);
+    assert_eq!(t.svc.pending_observations.len(), 0);
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
+    assert!(nonzero(&t.metrics(), "kinference_routed_requests_total").is_empty());
+}
+
+/// A body that is not an OpenAI chat request is refused with the reason, and
+/// nothing is reserved.
+#[tokio::test]
+async fn a_malformed_body_is_a_bad_request() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+    let cases: [(&[u8], &str); 4] = [
+        (
+            b"{not json",
+            "body is not a valid OpenAI ChatCompletionRequest: ",
+        ),
+        (
+            b"[1,2]",
+            "body is not a valid OpenAI ChatCompletionRequest: expected a JSON object",
+        ),
+        (
+            br#"{"messages":[]}"#,
+            "request body has an empty or absent `model`",
+        ),
+        (
+            br#"{"model":"","messages":[]}"#,
+            "request body has an empty or absent `model`",
+        ),
+    ];
+    for (body, expected) in cases {
+        let out = t.pick(body, 1, Qos::Interactive, None).await;
+        let PickAndRecordOutcome::BadRequest { reason, model } = out else {
+            panic!("{out:?}");
+        };
+        assert!(reason.starts_with(expected), "{reason}");
+        assert_eq!(model, "");
+    }
+    assert_eq!(t.render_calls(), 0);
+    assert_eq!(t.svc.pending_observations.len(), 0);
+}
+
+/// A policy that rejects the request leaves no state behind, though a worker
+/// was available and scored.
+#[tokio::test]
+async fn a_policy_rejection_leaves_no_state() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .policy(serde_json::json!({"unmatched": "Reject"}))
+        .build()
+        .await;
+
+    let out = t
+        .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    let PickAndRecordOutcome::PolicyRejected { reason, model } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(reason, "no rule matched and unmatched=Reject");
+    assert_eq!(model, "qwen");
+    // Scoring precedes the policy, so the worker was tokenized against.
+    assert_eq!(t.render_calls(), 1);
+    assert_eq!(t.svc.pending_observations.len(), 0);
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
+
+    let out = t.metrics();
+    assert!(out.contains(r#"kinference_policy_decisions_total{outcome="rejected_unmatched"} 1"#));
+    assert!(nonzero(&out, "kinference_routed_requests_total").is_empty());
+}
+
+/// `auto` resolves to the one model the fleet serves, and the body is
+/// rewritten to name it.
+#[tokio::test]
+async fn auto_resolves_to_the_only_model_and_rewrites_the_body() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+    let body = br#"{"model":"auto","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let out = t.pick(body, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::Ok { model, body, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "qwen");
+    assert_eq!(model_in(&body), "qwen");
+    let rewritten: serde_json::Value = serde_json::from_slice(&body).expect("a JSON body");
+    assert_eq!(rewritten["messages"][0]["content"], "hi");
+    assert_eq!(t.svc.request_labels.take(1).expect("labels").model, "qwen");
+    assert!(t.metrics().contains(
+        r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#
+    ));
+}
+
+/// Before any model is known, `auto` has nothing to resolve to.
+#[tokio::test]
+async fn auto_with_no_models_yields_no_workers() {
+    let t = ServiceBuilder::new().build().await;
+    let body = br#"{"model":"auto","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let out = t.pick(body, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::NoWorkers { model } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "auto");
+}
+
+/// A declared alias resolves to the upstream an engine serves, and the body is
+/// rewritten to the upstream. Without the named pool there is no alias table.
+#[tokio::test]
+async fn an_alias_resolves_to_the_upstream_and_rewrites_the_body() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .alias("qwen-ws", "qwen", &["qwen-alias"])
+        .policy(serde_json::json!({}))
+        .build()
+        .await;
+    let body = br#"{"model":"qwen-alias","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let out = t
+        .pick(body, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    let PickAndRecordOutcome::Ok {
+        model,
+        endpoint,
+        body: rewritten,
+        ..
+    } = out
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "qwen");
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    assert_eq!(model_in(&rewritten), "qwen");
+    let out = t.metrics();
+    assert!(out.contains(r#"kinference_policy_decisions_total{outcome="unmatched_served"} 1"#));
+    assert!(out.contains(
+        r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#
+    ));
+
+    let out = t.pick(body, 2, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::NoWorkers { model } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "qwen-alias");
+}
+
+/// A pick whose tokenize failed: chosen on load alone, with the same state
+/// reserved as a good pick, minus the prefix blocks.
+async fn degraded_pick(render: Render) {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .render(render)
+        .build()
+        .await;
+
+    let out = t.pick(BODY, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::Degraded {
+        endpoint,
+        response_id,
+        reason,
+        body,
+        model,
+    } = out
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    assert_eq!(response_id, 1);
+    assert_eq!(reason, "tokenize unavailable across the fleet");
+    assert!(body.is_empty());
+    assert_eq!(model, "qwen");
+
+    assert_eq!(t.svc.pending_observations.len(), 1);
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 1);
+    let dispatches = t.pools[0].inflight_prefixes.dispatches_for("10.0.0.1:8000");
+    assert_eq!(dispatches.len(), 1);
+    assert_eq!(
+        dispatches[0].total_at_dispatch, 0,
+        "no tokens, so no blocks"
+    );
+
+    let out = t.metrics();
+    for line in [
+        r#"kinference_score_degraded_total{reason="tokenize"} 1"#,
+        r#"kinference_tokenize_total{path="unavailable"} 1"#,
+        r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#,
+    ] {
+        assert!(out.contains(line), "missing {line}:\n{out}");
+    }
+    assert!(nonzero(&out, "kinference_prefix_requested_blocks_total").is_empty());
+}
+
+/// `/render` answering with an error degrades the pick.
+#[tokio::test]
+async fn a_failing_render_degrades_to_a_load_only_pick() {
+    degraded_pick(Render::Failing).await;
+}
+
+/// No worker to tokenize against degrades the pick the same way.
+#[tokio::test]
+async fn no_render_endpoint_degrades_to_a_load_only_pick() {
+    degraded_pick(Render::Absent).await;
+}
+
+/// The rule for batch sends the request to the provider, with the body naming
+/// the vendor's model and no pool state touched. The interactive request
+/// before it stayed local.
+#[tokio::test]
+async fn a_batch_request_fails_over_to_the_provider() {
+    let (t, [local, cloud]) = local_and_cloud_picks().await;
+    assert!(
+        matches!(local, PickAndRecordOutcome::Ok { .. }),
+        "{local:?}"
+    );
+    let PickAndRecordOutcome::Provider {
+        pick,
+        response_id,
+        body,
+    } = cloud
+    else {
+        panic!("{cloud:?}");
+    };
+    assert_eq!(pick.provider.name, "cloud");
+    assert_eq!(pick.upstream_model, "vendor/qwen");
+    assert_eq!(pick.canonical_model, "qwen");
+    assert_eq!(response_id, 2);
+    assert_eq!(model_in(&body), "vendor/qwen");
+
+    // Only the local pick reserved pool state.
+    assert_eq!(t.svc.pending_observations.len(), 1);
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 1);
+    let labels = t
+        .svc
+        .request_labels
+        .provider_pick_for(2)
+        .expect("provider labels for the reports");
+    assert_eq!(labels.provider.name, "cloud");
+    assert_eq!(labels.model, "vendor/qwen");
+
+    let out = t.metrics();
+    for line in [
+        r#"kinference_routed_requests_total{destination="cloud",tenant="default",type="Provider"} 1"#,
+        r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#,
+        r#"kinference_policy_decisions_total{outcome="chosen"} 1"#,
+        r#"kinference_policy_decisions_total{outcome="unmatched_served"} 1"#,
+        r#"kinference_policy_rule_matches_total{rule="batch-to-cloud"} 1"#,
+    ] {
+        assert!(out.contains(line), "missing {line}:\n{out}");
+    }
+}
+
+/// A named pool the snapshot does not hold routes on load alone.
+#[tokio::test]
+async fn a_named_pool_the_snapshot_lacks_fails_open() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+
+    let out = t
+        .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    let out = t.metrics();
+    assert!(out.contains(r#"kinference_policy_decisions_total{outcome="unknown_pool"} 1"#));
+    assert!(out.contains(
+        r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#
+    ));
+}
+
+/// With policy off, a named pool is ignored and no decision is recorded.
+#[tokio::test]
+async fn with_policy_off_a_named_pool_is_ignored() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .without_policy()
+        .build()
+        .await;
+
+    let out = t
+        .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert!(nonzero(&t.metrics(), "kinference_policy_decisions_total").is_empty());
+}
+
+/// A worker that has not finished its initial sync is not picked, though its
+/// pool claims the model.
+#[tokio::test]
+async fn a_worker_still_syncing_is_not_picked() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .still_syncing()
+        .build()
+        .await;
+
+    let out = t.pick(BODY, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::NoWorkers { model } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "qwen");
+    assert_eq!(t.render_calls(), 0);
+}
+
+/// Two worker sets serving one model: the pick goes to the one with the
+/// shorter predicted wait, tokenizing once for both.
+#[tokio::test]
+async fn two_pools_serving_one_model_pick_the_less_loaded() {
+    let t = ServiceBuilder::new()
+        .pool("busy-ws", "qwen", &["10.0.0.1:8000"])
+        .pool("idle-ws", "qwen", &["10.0.0.2:8000"])
+        .build()
+        .await;
+    // Worker 1 was scraped with a deep queue; worker 2 reads as idle.
+    t.svc.metrics.record_sample_for_test(
+        1,
+        kinference_fleet::scrape::MetricsSample {
+            waiting: 64,
+            scraped_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+
+    let out = t.pick(BODY, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::Ok { endpoint, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.2:8000");
+    assert_eq!(t.render_calls(), 1, "the second pool reuses the tokens");
+    assert!(t.metrics().contains(
+        r#"kinference_routed_requests_total{destination="idle-ws",tenant="default",type="Local"} 1"#
+    ));
 }
