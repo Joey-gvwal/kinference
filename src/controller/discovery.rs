@@ -23,18 +23,20 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use std::sync::Arc;
+
 use futures::TryStreamExt;
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
-use kube::Api;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector;
-use kube::runtime::watcher::{self, watcher as start_watcher};
+use kube::runtime::watcher;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::controller::api::{ApiServer, KubeApi};
 use kinference_fleet::discovery::{
-    DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs, WorkerChange, WorkerConfig,
+    DiscoveryConfig, DiscoveryDefaults, DiscoveryFactory, DiscoveryTask, PortRef, PortRefs,
+    WorkerChange, WorkerConfig,
 };
 
 /// The K8s standard label that the EndpointSlice controller stamps on
@@ -52,48 +54,58 @@ fn fnv1a_u64(bytes: &[u8]) -> u64 {
     h
 }
 
-pub struct KubeDiscovery {
-    cfg: DiscoveryConfig,
-    client: kube::Client,
+/// The fleet's discovery factory over the in-cluster client, acquired once
+/// here so pool creation stays synchronous. `required` (the config declares
+/// a worker set) makes missing credentials fatal; with only `enabled`
+/// (`kubernetes.enabled`) they are logged and discovery is off, so CR
+/// resolution can run outside a cluster.
+pub fn factory(enabled: bool, required: bool) -> anyhow::Result<Option<DiscoveryFactory>> {
+    let api = if required {
+        Some(KubeApi::in_cluster()?)
+    } else if enabled {
+        match KubeApi::in_cluster() {
+            Ok(api) => Some(api),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "kubernetes.enabled is set but in-cluster credentials are \
+                     unavailable; InferenceWorkerSets will resolve but their pools \
+                     cannot start discovery"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(api.map(|api| {
+        Arc::new(move |cfg, tx, cancel| {
+            Box::pin(KubeDiscovery::new(cfg, api.clone()).run(tx, cancel)) as DiscoveryTask
+        }) as DiscoveryFactory
+    }))
 }
 
-impl KubeDiscovery {
-    /// Build in-cluster credentials once, so pool creation can be synchronous
-    /// and infallible.
-    ///
-    /// Called once at startup, where failing hard is right; [`Self::from_client`]
-    /// then binds each pool's config without I/O.
-    pub async fn client() -> Result<kube::Client> {
-        let kube_cfg = kube::Config::incluster_env().context(
-            "failed to read in-cluster Kubernetes service-account credentials. \
-             KubeDiscovery only works when the monitor runs as a pod inside the \
-             cluster it should watch (~/.kube/config is intentionally NOT honored — \
-             discovered pod IPs would not be reachable from outside the cluster \
-             network).",
-        )?;
-        kube::Client::try_from(kube_cfg)
-            .context("failed to build Kubernetes client from in-cluster config")
-    }
+pub struct KubeDiscovery<A: ApiServer> {
+    cfg: DiscoveryConfig,
+    api: A,
+}
 
-    /// Bind a config to an already-acquired client. Synchronous and infallible:
+impl<A: ApiServer> KubeDiscovery<A> {
+    /// Bind a config to the API server. Synchronous and infallible:
     /// `service_name` is validated at config load or by the desired-set
     /// resolution.
-    pub fn from_client(cfg: DiscoveryConfig, client: kube::Client) -> Self {
+    pub fn new(cfg: DiscoveryConfig, api: A) -> Self {
         debug_assert!(
             !cfg.service_name.as_deref().unwrap_or("").is_empty(),
             "service_name is validated before a pool spec reaches here"
         );
-        Self { cfg, client }
+        Self { cfg, api }
     }
 
     /// Emit worker-membership events until `cancel` fires, under the contract
     /// of `kinference_fleet::discovery::DiscoveryTask`.
     pub async fn run(self, tx: mpsc::Sender<WorkerChange>, cancel: CancellationToken) {
-        let slices: Api<EndpointSlice> = match self.cfg.namespace.as_deref() {
-            Some(ns) => Api::namespaced(self.client.clone(), ns),
-            None => Api::all(self.client.clone()),
-        };
-        // Validated before the pool spec reaches here; see `from_client`.
+        // Validated before the pool spec reaches here; see `new`.
         let service_name = self.cfg.service_name.clone().unwrap_or_default();
         // Only the named Service's EndpointSlices.
         let wcfg = watcher::Config::default().labels(&format!("{SVC_NAME_LABEL}={service_name}"));
@@ -119,8 +131,12 @@ impl KubeDiscovery {
             let (store, writer) = reflector::store::<EndpointSlice>();
             // The reflector updates `store` before each event is yielded, so
             // `store.state()` reflects the event being handled.
-            let stream = reflector::reflector(writer, start_watcher(slices.clone(), wcfg.clone()))
-                .default_backoff();
+            let stream = reflector::reflector(
+                writer,
+                self.api
+                    .watch::<EndpointSlice>(self.cfg.namespace.as_deref(), wcfg.clone()),
+            )
+            .default_backoff();
             tokio::pin!(stream);
 
             // This generation's store starts empty, so reconciling before

@@ -95,7 +95,7 @@ Rows name a module by its group; in code the fleet's are under
 | `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |
 | `router::tokenizer::local` | `LocalTokenizer`: in-process tokenizers, chat templates, the warm-up that follows the model index, and the fallback to `/render` |
 | `controller::api` | `ApiServer`, the one door to the API server: get, create, replace; `KubeApi` over a `kube::Client`, and in tests `Recorded`, the same over objects the test supplies |
-| `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers |
+| `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers; `factory`, which binds the in-cluster client into the fleet's discovery factory |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
 | `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile |

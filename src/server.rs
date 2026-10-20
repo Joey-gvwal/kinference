@@ -11,13 +11,12 @@ use tonic::transport::Server;
 
 use crate::config::Config;
 use crate::controller::api::KubeApi;
-use crate::controller::discovery::KubeDiscovery;
+use crate::controller::discovery;
 use crate::controller::leader;
 use crate::controller::metrics::ControllerMetrics;
 use crate::controller::policy;
 use crate::{admin, metrics, version};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use kinference_fleet::discovery::{DiscoveryFactory, DiscoveryTask};
 use kinference_fleet::metrics::FleetMetrics;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool;
@@ -179,34 +178,7 @@ pub async fn run() -> Result<()> {
     )
     .context("starting the router")?;
 
-    // In-cluster credentials, acquired once here so pool creation stays
-    // synchronous and infallible. Required (fatal) when the config declares
-    // a worker set; with only `kubernetes.enabled`, a failure surfaces per
-    // pool instead, so CR resolution can run outside a cluster.
-    let kube_client = if !specs.is_empty() {
-        Some(KubeDiscovery::client().await?)
-    } else if cfg.kubernetes.enabled {
-        match KubeDiscovery::client().await {
-            Ok(c) => Some(c),
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "kubernetes.enabled is set but in-cluster credentials are \
-                     unavailable; InferenceWorkerSets will resolve but their pools \
-                     cannot start discovery"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let kubernetes: Option<DiscoveryFactory> = kube_client.map(|client| {
-        Arc::new(move |cfg, tx, cancel| {
-            Box::pin(KubeDiscovery::from_client(cfg, client.clone()).run(tx, cancel))
-                as DiscoveryTask
-        }) as DiscoveryFactory
-    });
+    let kubernetes = discovery::factory(cfg.kubernetes.enabled, !specs.is_empty())?;
 
     // Pools can be built now. `PoolManager` owns the live set and
     // publishes it to the registry; the coordinator starts each pool's

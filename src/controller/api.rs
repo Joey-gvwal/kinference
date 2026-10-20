@@ -105,8 +105,23 @@ pub struct KubeApi {
 }
 
 impl KubeApi {
-    /// In-cluster credentials, else `~/.kube/config`, so the control plane
-    /// can run against a local cluster.
+    /// In-cluster credentials only; a kubeconfig is refused. Discovery's
+    /// client: the pod IPs it finds are unreachable from outside the cluster.
+    pub fn in_cluster() -> anyhow::Result<Self> {
+        let cfg = kube::Config::incluster_env().context(
+            "failed to read in-cluster Kubernetes service-account credentials. \
+             KubeDiscovery only works when kinference runs as a pod inside the \
+             cluster it should watch (~/.kube/config is intentionally NOT honored: \
+             discovered pod IPs would not be reachable from outside the cluster \
+             network).",
+        )?;
+        let client = kube::Client::try_from(cfg)
+            .context("failed to build Kubernetes client from in-cluster config")?;
+        Ok(Self { client })
+    }
+
+    /// In-cluster credentials, else `~/.kube/config`, so the CRD side can
+    /// run against a local cluster.
     pub async fn infer() -> anyhow::Result<Self> {
         let cfg = kube::Config::infer().await.map_err(|e| {
             anyhow::anyhow!(

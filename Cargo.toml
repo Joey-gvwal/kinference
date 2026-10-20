@@ -81,11 +81,10 @@ serde_json.workspace = true
 prometheus.workspace = true
 axum.workspace = true
 # K8s discovery and the kinference.buoyant.io CRD watch/status writer. Two
-# client-construction policies live in the tree deliberately:
-# `Config::incluster_env()` in `controller::discovery` (kubeconfig is refused
-# there because pod IPs are unroutable from outside the cluster) and
-# `KubeApi::infer` in `controller::api` so the CRD side runs against a local
-# cluster.
+# client-construction policies live in `controller::api` deliberately:
+# `KubeApi::in_cluster` for discovery (kubeconfig is refused there because pod
+# IPs are unroutable from outside the cluster) and `KubeApi::infer` for the
+# CRDs and the Lease, so that side runs against a local cluster.
 kube = { workspace = true, features = ["client", "runtime", "rustls-tls"] }
 k8s-openapi.workspace = true
 futures.workspace = true
