@@ -55,6 +55,7 @@ use kube::{Resource, ResourceExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::controller::Error;
 use crate::controller::api::ApiServer;
 use kinference_policy::store::PolicyStore;
 
@@ -292,14 +293,14 @@ impl<A: ApiServer> BindingWriter<A> {
                     }
                     if let Err(e) = self.reconcile_once().await {
                         // Never fatal; already-programmed routes keep working.
-                        tracing::warn!(error = %e, "backend binding writer: reconcile failed");
+                        tracing::warn!(error = %e.chain(), "backend binding writer: reconcile failed");
                     }
                 }
             }
         }
     }
 
-    async fn reconcile_once(&self) -> anyhow::Result<()> {
+    async fn reconcile_once(&self) -> Result<(), Error> {
         let snapshot = self.store.snapshot();
         // Before the first complete list every pool looks deleted, and pruning
         // on that view would delete every binding in the cluster.
@@ -358,7 +359,12 @@ impl<A: ApiServer> BindingWriter<A> {
                 ]));
                 return Ok(());
             }
-            Err(e) => return Err(e.into()),
+            Err(source) => {
+                return Err(Error::Api {
+                    op: "list BackendBinding",
+                    source,
+                });
+            }
         };
 
         let mut by_key: HashMap<(String, String), &BackendBinding> = HashMap::new();

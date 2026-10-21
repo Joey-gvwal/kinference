@@ -4,9 +4,11 @@
 
 pub mod api;
 pub mod discovery;
+pub mod error;
 pub mod leader;
 pub mod metrics;
 pub mod policy;
 pub mod start;
 
+pub use error::Error;
 pub use start::{ControllerConfig, ControllerHandles, start};

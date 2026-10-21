@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use kinference_fleet::pool::{PoolManager, PoolRegistry};
 use kinference_fleet::profile::ProfileConfig;
 use kinference_fleet::scrape::MetricsRegistry;
@@ -12,6 +11,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::Error;
 use super::api::KubeApi;
 use super::leader::{self, LeaderElectionConfig};
 use super::metrics::ControllerMetrics;
@@ -76,7 +76,7 @@ pub async fn start(
     handles: ControllerHandles,
     registry: &prometheus::Registry,
     cancel: CancellationToken,
-) -> Result<Controller> {
+) -> Result<Controller, Error> {
     let ControllerHandles {
         mut manager,
         pools,

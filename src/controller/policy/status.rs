@@ -943,10 +943,7 @@ impl<A: ApiServer> StatusWriter<A> {
                     if !*self.leader.borrow() {
                         continue;
                     }
-                    if let Err(e) = self.reconcile_once().await {
-                        // Never fatal to routing.
-                        tracing::warn!(error = %e, "policy status writer: reconcile failed");
-                    }
+                    self.reconcile_once().await;
                 }
             }
         }
@@ -981,12 +978,12 @@ impl<A: ApiServer> StatusWriter<A> {
         tracing::info!("policy status writer: demoted; stopping writes");
     }
 
-    async fn reconcile_once(&self) -> anyhow::Result<()> {
+    async fn reconcile_once(&self) {
         let snapshot = self.store.snapshot();
         // Not `snapshot.is_empty()`, which only counts pools: worker sets and
         // policies need status even with no pools.
         if !snapshot.listed() {
-            return Ok(());
+            return;
         }
         // One snapshot for the whole reconcile, so every CR describes the same
         // fleet.
@@ -1127,7 +1124,6 @@ impl<A: ApiServer> StatusWriter<A> {
             )
             .await;
         }
-        Ok(())
     }
 
     /// Log warnings that are new since the last pass, and publish per-policy

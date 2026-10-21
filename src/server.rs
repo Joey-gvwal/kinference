@@ -168,7 +168,8 @@ pub async fn run() -> Result<()> {
     )
     .context("starting the router")?;
 
-    let kubernetes = controller::discovery::factory(cfg.kubernetes.enabled, !specs.is_empty())?;
+    let kubernetes = controller::discovery::factory(cfg.kubernetes.enabled, !specs.is_empty())
+        .context("building Kubernetes discovery")?;
 
     // Pools can be built now. `PoolManager` owns the live set and
     // publishes it to the registry; the coordinator starts each pool's

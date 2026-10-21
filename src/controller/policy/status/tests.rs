@@ -745,7 +745,7 @@ async fn a_listed_snapshot_patches_every_object_it_describes() {
     let ((w, _tx), _) = writer_over(api.clone(), true);
     w.store.publish(index);
 
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
 
     assert_eq!(
         patched_keys(&api),
@@ -769,9 +769,9 @@ async fn an_unchanged_snapshot_issues_no_second_patch() {
     let ((w, _tx), _) = writer_over(api.clone(), true);
     w.store.publish(index);
 
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     let first = api.writes();
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     assert_eq!(
         api.writes(),
         first,
@@ -786,7 +786,7 @@ async fn a_failed_patch_is_retried_on_the_next_tick() {
     w.store.publish(index);
     api.failing::<InferencePool>("infra", "chat");
 
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     assert_eq!(
         patched_keys(&api).len(),
         3,
@@ -794,7 +794,7 @@ async fn a_failed_patch_is_retried_on_the_next_tick() {
     );
 
     api.heal();
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     assert_eq!(
         patched_keys(&api).last(),
         Some(&key::<InferencePool>("infra", "chat")),
