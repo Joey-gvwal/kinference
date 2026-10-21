@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::config::Config;
-use crate::controller::{self, ControllerConfig, ControllerHandles};
 use crate::{admin, metrics, version};
+use kinference_controller::{self as controller, ControllerConfig, ControllerHandles};
 use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
 use kinference_fleet::metrics::FleetMetrics;
 use kinference_fleet::models::ModelIndex;

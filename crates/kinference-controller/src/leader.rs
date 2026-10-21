@@ -20,7 +20,7 @@ use kube::api::ObjectMeta;
 use serde::Deserialize;
 use tokio::sync::watch;
 
-use crate::controller::api::ApiServer;
+use crate::api::ApiServer;
 
 /// `leader_election`: elect a single CRD status writer across replicas.
 ///

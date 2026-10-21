@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use kinference_policy::PoolKey;
 use serde::Deserialize;
 
-use crate::controller::leader::{self, LeaderElectionConfig};
-use crate::controller::policy::PolicyConfig;
-use crate::controller::policy::worker_sets::KubernetesConfig;
+use kinference_controller::leader::{self, LeaderElectionConfig};
+use kinference_controller::policy::PolicyConfig;
+use kinference_controller::policy::worker_sets::KubernetesConfig;
 use kinference_fleet::discovery::DiscoveryConfig;
 use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
 use kinference_fleet::pool::PoolSpec;

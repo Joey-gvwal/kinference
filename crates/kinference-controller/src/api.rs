@@ -12,7 +12,7 @@ use kube::runtime::watcher;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::controller::Error;
+use crate::Error;
 
 /// A namespaced object the control plane reads or writes.
 pub trait Object:

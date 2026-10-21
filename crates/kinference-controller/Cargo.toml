@@ -1,0 +1,37 @@
+[package]
+name = "kinference-controller"
+description = "The Kubernetes control plane: the CRD watch, the status and binding writers, the worker-set reconcile, leader election and EndpointSlice discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kinference-policy.workspace = true
+kinference-fleet.workspace = true
+# Two client-construction policies live in `api` deliberately:
+# `KubeApi::in_cluster` for discovery (kubeconfig is refused there because pod
+# IPs are unroutable from outside the cluster) and `KubeApi::infer` for the
+# CRDs and the Lease, so that side runs against a local cluster.
+kube = { workspace = true, features = ["client", "runtime", "rustls-tls"] }
+k8s-openapi.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+prometheus.workspace = true
+# `Utc::now` for the status writer's timestamps.
+chrono.workspace = true
+# A random holder identity when neither `POD_NAME` nor the hostname is set.
+getrandom.workspace = true
+
+[dev-dependencies]
+# `PoolId::from_raw`, for tests that need a specific pool id.
+kinference-policy = { workspace = true, features = ["test-util"] }
+# A capturing subscriber, for the test that reads discovery's warnings.
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true

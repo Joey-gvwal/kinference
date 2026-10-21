@@ -6,7 +6,6 @@
 
 mod admin;
 mod config;
-mod controller;
 mod metrics;
 mod version;
 

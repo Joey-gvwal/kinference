@@ -245,8 +245,8 @@ async fn simulate_rejects_an_unnamespaced_policy() {
 
 /// An index holding one unattached policy, which needs no pool or worker set.
 fn index_with_policy(name: &str, spec: serde_json::Value) -> Arc<PolicyIndex> {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kinference_policy::crd::{InferencePolicy, InferencePolicySpec};
-    use kube::core::ObjectMeta;
     let p = Arc::new(InferencePolicy {
         metadata: ObjectMeta {
             name: Some(name.into()),
@@ -442,10 +442,10 @@ async fn an_uncomputable_prediction_is_disclosed_rather_than_shown_as_zero() {
 /// alias admits it.
 #[tokio::test]
 async fn a_local_worker_is_seeded_under_every_declared_alias() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kinference_policy::crd::{
         InferencePool, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec,
     };
-    use kube::core::ObjectMeta;
 
     let meta = |name: &str| ObjectMeta {
         name: Some(name.into()),
@@ -545,10 +545,10 @@ async fn a_local_worker_is_seeded_under_every_declared_alias() {
 /// for it, as in production.
 #[tokio::test]
 async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kinference_policy::crd::{
         InferencePool, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec,
     };
-    use kube::core::ObjectMeta;
 
     let meta = |name: &str| ObjectMeta {
         name: Some(name.into()),
@@ -699,10 +699,10 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
 /// coefficients and block size differ per set.
 #[tokio::test]
 async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kinference_policy::crd::{
         InferencePool, InferencePoolSpec, InferenceWorkerSet, InferenceWorkerSetSpec,
     };
-    use kube::core::ObjectMeta;
 
     let meta = |name: &str| ObjectMeta {
         name: Some(name.into()),
@@ -1276,11 +1276,11 @@ fn gemma_fleet(policy: serde_json::Value) -> axum::Router {
 
 /// [`gemma_fleet`], with labels on the worker set.
 fn gemma_fleet_labelled(policy: serde_json::Value, labels: &[(&str, &str)]) -> axum::Router {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kinference_policy::crd::{
         InferencePolicy, InferencePolicySpec, InferencePool, InferencePoolSpec, InferenceWorkerSet,
         InferenceWorkerSetSpec,
     };
-    use kube::core::ObjectMeta;
     let meta = |name: &str| ObjectMeta {
         name: Some(name.into()),
         namespace: Some("default".into()),

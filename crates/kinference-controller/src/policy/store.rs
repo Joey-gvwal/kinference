@@ -2,7 +2,7 @@
 //!
 //! Six reflectors feed [`resolve`]: `InferencePool`, `InferencePolicy`,
 //! `InferenceWorkerSet`, `InferenceProvider`, and (read-only) `HTTPRoute` and
-//! `ReferenceGrant`. As in [`crate::controller::discovery`], watch events are
+//! `ReferenceGrant`. As in [`crate::discovery`], watch events are
 //! bare wakeups and all state is re-derived from the stores on each one.
 //!
 //! A seventh reflector, on core `Service`, is not an input to [`resolve`] and
@@ -26,7 +26,7 @@ use kube::runtime::reflector;
 use kube::runtime::watcher;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::api::ApiServer;
+use crate::api::ApiServer;
 
 /// Build the identity index from a live pool snapshot.
 pub fn pool_index(pools: &kinference_fleet::pool::PoolMap) -> PoolIndex {
@@ -62,7 +62,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
         }
     }
 
-    fn watch<K: crate::controller::api::Object>(
+    fn watch<K: crate::api::Object>(
         &self,
         cfg: &watcher::Config,
     ) -> futures::stream::BoxStream<'static, Result<watcher::Event<K>, watcher::Error>> {

@@ -23,8 +23,8 @@ use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::api::ApiServer;
-use crate::controller::sync;
+use crate::api::ApiServer;
+use crate::sync;
 use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
@@ -264,7 +264,7 @@ pub struct WorkerSetWatcher {
     /// The current generation's store. Rebuilt with the watch.
     store: Option<reflector::Store<InferenceWorkerSet>>,
     rejection_store: std::sync::Arc<RejectionStore>,
-    prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
+    prom: std::sync::Arc<crate::metrics::ControllerMetrics>,
 }
 
 impl WorkerSetWatcher {
@@ -275,7 +275,7 @@ impl WorkerSetWatcher {
         profiles: Vec<ProfileConfig>,
         manager: kinference_fleet::pool::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,
-        prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
+        prom: std::sync::Arc<crate::metrics::ControllerMetrics>,
     ) -> Self {
         Self {
             namespace: kube_cfg.namespace.clone(),

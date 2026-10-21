@@ -1,5 +1,5 @@
 use super::*;
-use crate::controller::api::recorded::{Key, Recorded, Write, key};
+use crate::api::recorded::{Key, Recorded, Write, key};
 use kinference_policy::compile::CompiledPolicy;
 use kinference_policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
 use kinference_policy::resolve::{Unresolved, UnresolvedReason};
@@ -629,13 +629,11 @@ fn writer_over(
     let handles = StatusHandles {
         store: kinference_policy::store::PolicyStore::new(),
         pools: kinference_fleet::pool::PoolRegistry::new(),
-        rejections: crate::controller::policy::worker_sets::RejectionStore::new(),
+        rejections: crate::policy::worker_sets::RejectionStore::new(),
         metrics: Arc::new(MetricsRegistry::new()),
         provider_health: Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         leader: rx,
-        prom: Arc::new(crate::controller::metrics::ControllerMetrics::new(
-            &registry,
-        )),
+        prom: Arc::new(crate::metrics::ControllerMetrics::new(&registry)),
     };
     let w = StatusWriter::new(api, handles);
     ((w, tx), registry)

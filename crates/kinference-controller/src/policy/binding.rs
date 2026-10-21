@@ -55,9 +55,9 @@ use kube::{Resource, ResourceExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::Error;
-use crate::controller::api::ApiServer;
-use crate::controller::sync;
+use crate::Error;
+use crate::api::ApiServer;
+use crate::sync;
 use kinference_policy::store::PolicyStore;
 
 /// Server-side-apply field manager. A field this writer stops setting is

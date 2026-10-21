@@ -518,7 +518,7 @@ fn watcher_with(
             profiles,
             manager,
             RejectionStore::new(),
-            std::sync::Arc::new(crate::controller::metrics::ControllerMetrics::new(
+            std::sync::Arc::new(crate::metrics::ControllerMetrics::new(
                 &prometheus::Registry::new(),
             )),
         )
@@ -602,7 +602,7 @@ async fn re_reconciling_an_unchanged_store_keeps_the_same_pools() {
 /// The watch over a recorded API server lists the set and materializes it.
 #[tokio::test]
 async fn a_recorded_set_materializes_through_the_watch() {
-    use crate::controller::api::recorded::Recorded;
+    use crate::api::recorded::Recorded;
 
     let (w, registry) = watcher_with(&[], vec![profile("h100")]);
     let api = Recorded::default().with([iws("infra", "a", full_spec())]);

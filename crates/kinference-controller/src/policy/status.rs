@@ -31,8 +31,8 @@ use kinference_policy::resolve::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::api::{ApiServer, Object};
-use crate::controller::sync;
+use crate::api::{ApiServer, Object};
+use crate::sync;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_policy::store::PolicyStore;
@@ -860,7 +860,7 @@ pub struct StatusHandles {
     /// Whether this replica may write. Always `true` when leader election is
     /// disabled.
     pub leader: watch::Receiver<bool>,
-    pub prom: Arc<crate::controller::metrics::ControllerMetrics>,
+    pub prom: Arc<crate::metrics::ControllerMetrics>,
 }
 
 /// Patches status onto the CRDs, on a tick, only when something changed.
@@ -875,7 +875,7 @@ pub struct StatusWriter<A: ApiServer> {
     /// source of stable `lastTransitionTime`s.
     last: Mutex<HashMap<CacheKey, serde_json::Value>>,
     leader: watch::Receiver<bool>,
-    prom: Arc<crate::controller::metrics::ControllerMetrics>,
+    prom: Arc<crate::metrics::ControllerMetrics>,
     /// Policy warnings already logged, as `ns/name: warning`, so each is logged
     /// once when it first appears.
     warned: Mutex<HashSet<String>>,

@@ -33,8 +33,8 @@ use kube::runtime::watcher;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::Error;
-use crate::controller::api::{ApiServer, KubeApi};
+use crate::Error;
+use crate::api::{ApiServer, KubeApi};
 use kinference_fleet::discovery::{
     DiscoveryConfig, DiscoveryDefaults, DiscoveryFactory, DiscoveryTask, PortRef, PortRefs,
     WorkerChange, WorkerConfig,

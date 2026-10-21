@@ -4,6 +4,7 @@ members = [
     "crates/kinference-policy",
     "crates/kinference-fleet",
     "crates/kinference-router",
+    "crates/kinference-controller",
     "crates/kinfctl",
 ]
 default-members = [
@@ -11,6 +12,7 @@ default-members = [
     "crates/kinference-policy",
     "crates/kinference-fleet",
     "crates/kinference-router",
+    "crates/kinference-controller",
     "crates/kinfctl",
 ]
 resolver = "3"
@@ -26,6 +28,7 @@ license = "Apache-2.0"
 kinference-policy = { path = "crates/kinference-policy" }
 kinference-fleet = { path = "crates/kinference-fleet" }
 kinference-router = { path = "crates/kinference-router" }
+kinference-controller = { path = "crates/kinference-controller" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -65,6 +68,7 @@ license.workspace = true
 kinference-policy.workspace = true
 kinference-fleet.workspace = true
 kinference-router.workspace = true
+kinference-controller.workspace = true
 dynamo-kv-router.workspace = true
 tonic.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
@@ -80,17 +84,6 @@ serde_json.workspace = true
 # /metrics endpoint. The scrape side, `prometheus-parse`, is the fleet's.
 prometheus.workspace = true
 axum.workspace = true
-# K8s discovery and the kinference.buoyant.io CRD watch/status writer. Two
-# client-construction policies live in `controller::api` deliberately:
-# `KubeApi::in_cluster` for discovery (kubeconfig is refused there because pod
-# IPs are unroutable from outside the cluster) and `KubeApi::infer` for the
-# CRDs and the Lease, so that side runs against a local cluster.
-kube = { workspace = true, features = ["client", "runtime", "rustls-tls"] }
-k8s-openapi.workspace = true
-futures.workspace = true
-# `Utc::now` for the status writer's timestamps.
-chrono.workspace = true
-getrandom.workspace = true
 
 [lints]
 workspace = true
@@ -100,6 +93,9 @@ workspace = true
 kinference-policy = { workspace = true, features = ["test-util"] }
 # `test_pool` and friends, for tests that need a pool or a scrape sample.
 kinference-fleet = { workspace = true, features = ["test-util"] }
+# `ObjectMeta`, for the policy objects the admin tests build. Already in the
+# tree through kinference-policy; this only names it.
+k8s-openapi.workspace = true
 # `ServiceExt::oneshot`, to drive the admin router in tests exactly as a
 # client would. Already in the tree through axum; this only names the feature.
 tower = { version = "0.5", features = ["util"] }
