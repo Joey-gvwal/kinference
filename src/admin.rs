@@ -127,7 +127,7 @@ pub async fn serve(
     registry: prometheus::Registry,
     metrics_registry: Arc<MetricsRegistry>,
     cancel: CancellationToken,
-) -> anyhow::Result<()> {
+) -> std::io::Result<()> {
     let state = AppState {
         policy_api: policy_api::PolicyApiState::new(
             policy.clone(),
