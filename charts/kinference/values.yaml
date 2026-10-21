@@ -177,9 +177,18 @@ config:
     # that names a pool; it has no schema for the kind and never reads one.
     # Needs the BackendBinding CRD, which ships with the gateway.
     backend_bindings: true
+    # Watch all namespaces. This keeps every Service in the cluster in memory;
+    # InferenceWorkerSets and InferenceProviders may then live outside their
+    # InferencePool's namespace, with a ReferenceGrant in theirs. On big
+    # clusters name a namespace instead and have the kinference CRs live in
+    # it.
+    namespace: ""
 
   kubernetes:
     enabled: true
+    # Watch InferenceWorkerSets in all namespaces. A worker set outside this
+    # namespace gets no workers, so match `policy.namespace`.
+    namespace: ""
     discovery_defaults:
       # Last-resort ports, used only when a Pod advertises neither named
       # container ports nor kinference.buoyant.io/* annotations, and the CR
