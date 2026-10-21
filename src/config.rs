@@ -21,7 +21,6 @@ use kinference_router::metrics::MetricsConfig;
 use kinference_router::service::RouterConfig;
 use kinference_router::tokenizer::TokenizeConfig;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 // Unknown top-level keys are a startup error, so a mistyped or renamed key
 // can't silently fall back to its default. Not applied to the nested sections
@@ -118,7 +117,6 @@ pub struct Config {
 
 /// A `workerset` entry: one config-declared worker set. The Kubernetes equivalent is an
 /// `InferenceWorkerSet`; both reduce to a [`PoolSpec`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkerSetConfig {
     /// Must be unique.
