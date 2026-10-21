@@ -27,15 +27,13 @@ permissions:
   contents: read
 
 env:
-  # TODO: change to ghcr.io/kinference-ai (and the login username below to
-  # kinference-ai) when we move this repo to the kinference-ai org.
-  DOCKER_REGISTRY: ghcr.io/buoyantio
+  DOCKER_REGISTRY: ghcr.io/kinference-ai
   # This repo is private, so a GitHub release here can't be downloaded with
   # plain curl. Releases (the kinfctl binaries + artifact-only notes) go to
   # this public, source-less repo instead; the image and charts are public
   # on GHCR already. Written with the KINFERENCE_RELEASES_TOKEN secret: a
   # fine-grained PAT scoped to that one repo, Contents read/write.
-  RELEASES_REPO: BuoyantIO/kinference-releases
+  RELEASES_REPO: Kinference-AI/kinference-releases
 
 jobs:
   meta:
@@ -201,8 +199,7 @@ jobs:
       - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
         with:
           registry: ghcr.io
-          # TODO: change to kinference-ai along with DOCKER_REGISTRY.
-          username: buoyantio
+          username: kinference-ai
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push image
         run: |
