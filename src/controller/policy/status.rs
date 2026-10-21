@@ -32,6 +32,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::controller::api::{ApiServer, Object};
+use crate::controller::sync;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_policy::store::PolicyStore;
@@ -957,7 +958,7 @@ impl<A: ApiServer> StatusWriter<A> {
     /// `lastTransitionTime`s.
     fn on_promotion(&self) {
         let dropped = {
-            let mut last = self.last.lock().expect("status cache poisoned");
+            let mut last = sync::lock(&self.last);
             let n = last.len();
             last.clear();
             n
@@ -1143,7 +1144,7 @@ impl<A: ApiServer> StatusWriter<A> {
             rows.extend(by_code.into_iter().map(|(code, n)| (key.clone(), code, n)));
         }
         self.prom.set_policy_warnings(&rows);
-        let mut warned = self.warned.lock().expect("policy warn set poisoned");
+        let mut warned = sync::lock(&self.warned);
         for line in &current {
             if !warned.contains(line) {
                 tracing::warn!("policy warning: {line}");
@@ -1159,7 +1160,7 @@ impl<A: ApiServer> StatusWriter<A> {
         name: &str,
         uid: Option<&str>,
     ) -> Option<T> {
-        let last = self.last.lock().expect("status cache poisoned");
+        let last = sync::lock(&self.last);
         let v = last.get(&cache_key(kind, ns, name, uid))?;
         serde_json::from_value(v.clone()).ok()
     }
@@ -1179,7 +1180,7 @@ impl<A: ApiServer> StatusWriter<A> {
         };
         let key = cache_key(kind, ns, name, uid);
         {
-            let last = self.last.lock().expect("status cache poisoned");
+            let last = sync::lock(&self.last);
             if last.get(&key) == Some(&value) {
                 return;
             }
@@ -1187,10 +1188,7 @@ impl<A: ApiServer> StatusWriter<A> {
         match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
                 tracing::debug!(kind, ns, name, "policy status: patched");
-                self.last
-                    .lock()
-                    .expect("status cache poisoned")
-                    .insert(key, value);
+                sync::lock(&self.last).insert(key, value);
             }
             Err(e) => {
                 // Don't cache on failure, so the next tick retries.

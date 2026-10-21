@@ -24,6 +24,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::controller::api::ApiServer;
+use crate::controller::sync;
 use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
@@ -42,14 +43,11 @@ impl RejectionStore {
     }
 
     pub fn snapshot(&self) -> std::sync::Arc<Vec<Rejection>> {
-        self.current
-            .read()
-            .expect("rejection store poisoned")
-            .clone()
+        sync::read(&self.current).clone()
     }
 
     fn publish(&self, v: Vec<Rejection>) {
-        *self.current.write().expect("rejection store poisoned") = std::sync::Arc::new(v);
+        *sync::write(&self.current) = std::sync::Arc::new(v);
     }
 }
 

@@ -57,6 +57,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::controller::Error;
 use crate::controller::api::ApiServer;
+use crate::controller::sync;
 use kinference_policy::store::PolicyStore;
 
 /// Server-side-apply field manager. A field this writer stops setting is
@@ -456,7 +457,7 @@ impl<A: ApiServer> BindingWriter<A> {
     /// Log the conditions that were not standing at the last reconcile, and
     /// remember the current set as the baseline for the next one.
     fn warn_new(&self, warnings: HashSet<String>) {
-        let mut warned = self.warned.lock().expect("binding warn set poisoned");
+        let mut warned = sync::lock(&self.warned);
         for w in &warnings {
             if !warned.contains(w) {
                 tracing::warn!("{w}");
