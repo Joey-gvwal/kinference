@@ -2,7 +2,7 @@ use super::*;
 use crate::service::test_support::{Render, ServiceBuilder, TestService};
 use std::time::Duration;
 
-use kinference_fleet::pool::test_pool;
+use kinference_fleet::pool::{PoolRegistry, test_pool};
 
 fn score(endpoint: &str, queue_waiting: u32) -> WorkerScore {
     WorkerScore {

@@ -12,14 +12,12 @@ use tonic::transport::Server;
 use crate::config::Config;
 use crate::{admin, metrics, version};
 use kinference_controller::{self as controller, ControllerConfig, ControllerHandles};
-use kinference_fleet::coordinator::{Coordinator, Handles, WorkerTaskSettings};
-use kinference_fleet::metrics::FleetMetrics;
-use kinference_fleet::models::ModelIndex;
-use kinference_fleet::pool;
-use kinference_fleet::scrape::MetricsRegistry;
+use kinference_fleet::coordinator::WorkerTaskSettings;
+use kinference_fleet::pool::ReapPolicy;
+use kinference_fleet::{Fleet, FleetConfig};
 use kinference_router::body_store::BodyLimits;
 use kinference_router::grpc;
-use kinference_router::service::{FleetHandles, KinferenceService, PolicyHandles, RouterConfig};
+use kinference_router::service::{KinferenceService, PolicyHandles, RouterConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -70,36 +68,12 @@ pub async fn run() -> Result<()> {
         wait_for_shutdown_signal().await;
     };
 
-    let metrics = Arc::new(MetricsRegistry::new());
     // One Prometheus registry; each group registers its families, and
     // the admin listener renders it on `/metrics`.
     let registry = metrics::registry();
-    let fleet_prom = Arc::new(FleetMetrics::new(&registry));
     let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
     let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
     let ingest_cfg = cfg.ingest;
-
-    // One `PoolSpec` per `workerset` entry, resolved against its profile.
-    // Each pool owns its own KvIndexer, WorkerRegistry, InflightPrefixes,
-    // InflightRegistry and pick lock.
-    //
-    // The pools themselves are built by `PoolManager` further down, once
-    // the coordinator and eviction channels exist; publishing one earlier
-    // would make it visible to picks while nothing fed it.
-    let specs = cfg.pool_specs()?;
-    // The published pool set every consumer reads.
-    let pool_registry = pool::PoolRegistry::new();
-    for spec in &specs {
-        tracing::info!(
-            workerset = spec.name,
-            profile = spec.profile,
-            block_size = spec.kv_block_size,
-            service = ?spec.discovery.service_name,
-            "Worker set configured"
-        );
-    }
-
-    let models = Arc::new(ModelIndex::new());
 
     // TTL for a pick's in-flight bookkeeping (pending observation +
     // inflight counter + inflight-prefix entry). Must exceed worst-case
@@ -146,6 +120,31 @@ pub async fn run() -> Result<()> {
         .then(kinference_policy::store::PolicyStore::new);
     let provider_health = Arc::new(kinference_policy::provider_health::ProviderHealthStore::new());
 
+    let kubernetes =
+        controller::discovery::factory(cfg.kubernetes.enabled, !cfg.worker_sets.is_empty())
+            .context("building Kubernetes discovery")?;
+    let fleet = Fleet::new(
+        FleetConfig {
+            specs: cfg.pool_specs()?,
+            workers: WorkerTaskSettings {
+                poll_ms,
+                models_refresh_secs,
+                ingest: ingest_cfg,
+                observation_ttl,
+            },
+            reap: ReapPolicy {
+                linger: std::time::Duration::from_secs(30),
+                // A retired pool must outlive observations that may still
+                // reference it.
+                backstop: observation_ttl.max(std::time::Duration::from_secs(600)),
+            },
+        },
+        kubernetes,
+        &registry,
+        cancel.clone(),
+    );
+    let handles = fleet.handles.clone();
+
     let service = KinferenceService::start(
         RouterConfig {
             tokenize: cfg.tokenize.clone(),
@@ -154,11 +153,7 @@ pub async fn run() -> Result<()> {
             observation_ttl,
             observations_csv: cfg.observations_csv.clone(),
         },
-        FleetHandles {
-            pools: pool_registry.clone(),
-            models: models.clone(),
-            scrape: metrics.clone(),
-        },
+        handles.clone(),
         PolicyHandles {
             store: policy_store.clone(),
             provider_health: provider_health.clone(),
@@ -168,58 +163,10 @@ pub async fn run() -> Result<()> {
     )
     .context("starting the router")?;
 
-    let kubernetes = controller::discovery::factory(cfg.kubernetes.enabled, !specs.is_empty())
-        .context("building Kubernetes discovery")?;
-
-    // Pools can be built now. `PoolManager` owns the live set and
-    // publishes it to the registry; the coordinator starts each pool's
-    // discovery and owns its workers.
-    let (coordinator, inbox) = Coordinator::new(
-        Handles {
-            cancel: cancel.clone(),
-            kubernetes,
-            metrics: metrics.clone(),
-            prom: fleet_prom,
-            models: models.clone(),
-        },
-        WorkerTaskSettings {
-            poll_ms,
-            models_refresh_secs,
-            ingest: ingest_cfg,
-            observation_ttl,
-        },
-    );
-    let mut pool_manager = pool::PoolManager::new(
-        pool_registry.clone(),
-        coordinator.clone(),
-        cancel.clone(),
-        models.clone(),
-        pool::ReapPolicy {
-            linger: std::time::Duration::from_secs(30),
-            // A retired pool must outlive observations that may still
-            // reference it.
-            backstop: observation_ttl.max(std::time::Duration::from_secs(600)),
-        },
-    );
     // Config-declared sets are materialized now, CR-declared ones with the
     // watch. Their keys can't collide: CR keys are namespaced, config keys
     // never are.
-    let report = pool_manager.reconcile(specs.clone());
-    if !report.failed.is_empty() {
-        // Fatal at startup, unlike at runtime, so a misconfigured set
-        // doesn't silently shrink the fleet.
-        anyhow::bail!(
-            "failed to start worker set(s): {}",
-            report
-                .failed
-                .iter()
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    let live_pools = pool_registry.snapshot();
-    tokio::spawn(coordinator.run(inbox));
+    let manager = fleet.start().context("starting the fleet")?;
 
     let controller = controller::start(
         ControllerConfig {
@@ -229,9 +176,9 @@ pub async fn run() -> Result<()> {
             profiles: cfg.profiles.clone(),
         },
         ControllerHandles {
-            manager: pool_manager,
-            pools: pool_registry.clone(),
-            scrape: metrics.clone(),
+            manager,
+            pools: handles.pools.clone(),
+            scrape: handles.scrape.clone(),
             store: policy_store.clone(),
             provider_health,
         },
@@ -245,9 +192,9 @@ pub async fn run() -> Result<()> {
     if let Some(dash_addr) = cfg.admin_listen {
         // `/readyz` gates on the policy store being listed, so picks don't
         // bypass policy at startup.
-        let dash_pools = pool_registry.clone();
+        let dash_pools = handles.pools.clone();
         let dash_policy = policy_store.clone();
-        let dash_metrics = metrics.clone();
+        let dash_metrics = handles.scrape.clone();
         let dash_registry = registry.clone();
         let dash_cancel = cancel.clone();
         tokio::spawn(async move {
@@ -269,7 +216,7 @@ pub async fn run() -> Result<()> {
 
     tracing::info!(
         listen = %listen_addr,
-        worker_sets = live_pools.len(),
+        worker_sets = handles.pools.snapshot().len(),
         "READY: gRPC accepting connections"
     );
 

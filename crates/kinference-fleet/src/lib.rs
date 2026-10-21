@@ -13,7 +13,9 @@ pub mod models;
 pub mod pool;
 pub mod profile;
 pub mod scrape;
+pub mod start;
 mod sync;
 pub mod workers;
 
 pub use error::Error;
+pub use start::{Fleet, FleetConfig, FleetHandles};

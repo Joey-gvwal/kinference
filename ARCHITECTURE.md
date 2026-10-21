@@ -39,8 +39,9 @@ modules and holds nothing else beyond re-exports.
   Pools, the worker registry, the discovery factory and its config,
   the coordinator that adds and evicts workers, the scrape of engine
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
-  collector behind the fleet gauges, the fleet's own metric families, and
-  its error type.
+  collector behind the fleet gauges, the fleet's own metric families, its
+  error type, and `start`, the one call the server builds and starts it
+  with.
 - Router, `crates/kinference-router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, the
   request-path metric families, and its error type.
@@ -83,6 +84,7 @@ controller's under `kinference_controller::`.
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::profile` | the profile tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
+| `fleet::start` | `Fleet`: builds the shared state, the coordinator and the pool manager, materializes the config-declared worker sets and runs the coordinator; `FleetHandles`, what the router and the control plane read |
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the `PushBody` drain with its idle budget, and the buffer metrics |

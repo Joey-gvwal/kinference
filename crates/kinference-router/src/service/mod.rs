@@ -21,8 +21,9 @@ use crate::metrics::{MetricsConfig, RouterMetrics};
 use crate::observations::{ObservationSink, Observations, Qos, RequestMeta};
 use crate::picker::WorkerScore;
 use crate::tokenizer::{self, TokenizeConfig, TokenizeInput};
+use kinference_fleet::FleetHandles;
 use kinference_fleet::models::ModelIndex;
-use kinference_fleet::pool::{Pool, PoolRegistry};
+use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
 use kinference_policy::provider_health::ProviderHealthStore;
@@ -291,13 +292,6 @@ pub struct KinferenceService {
     pub(crate) policy: Option<Arc<PolicyStore>>,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<RouterMetrics>,
-}
-
-/// What the router reads from the fleet.
-pub struct FleetHandles {
-    pub pools: Arc<PoolRegistry>,
-    pub models: Arc<ModelIndex>,
-    pub scrape: Arc<MetricsRegistry>,
 }
 
 /// What the control plane publishes and the router reads.

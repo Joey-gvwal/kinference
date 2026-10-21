@@ -25,7 +25,7 @@ use crate::pool::{Pool, PoolHooks, PoolSpec, WorkerContext};
 use crate::scrape::{MetricsRegistry, spawn_metrics_poller, spawn_one_shot_warmup};
 use crate::workers::{ServedModelsVerdict, WorkerEntry};
 
-/// Shared handles, built once in `server`.
+/// Shared handles, built by `Fleet::new`.
 pub struct Handles {
     /// Process token. Pool and discovery tokens are its children.
     pub cancel: CancellationToken,

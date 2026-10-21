@@ -1,5 +1,7 @@
 //! The fleet's error type.
 
+use kinference_policy::PoolKey;
+
 /// Why a fleet operation failed. `Display` says what failed; the cause is
 /// reachable through `source`.
 #[derive(Debug)]
@@ -27,6 +29,9 @@ pub enum Error {
     },
     /// A `/metrics` body is not Prometheus text.
     MetricsParse { url: String, source: std::io::Error },
+    /// Config-declared worker sets whose pool could not start; fatal at
+    /// startup.
+    WorkerSetsFailed(Vec<PoolKey>),
 }
 
 impl std::fmt::Display for Error {
@@ -42,6 +47,14 @@ impl std::fmt::Display for Error {
             Error::Http { url, .. } => write!(f, "GET {url}"),
             Error::HttpStatus { url, status } => write!(f, "GET {url}: HTTP {status}"),
             Error::MetricsParse { url, .. } => write!(f, "parsing Prometheus body from {url}"),
+            Error::WorkerSetsFailed(keys) => write!(
+                f,
+                "failed to start worker set(s): {}",
+                keys.iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -49,9 +62,10 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::KubeDiscoveryUnavailable | Error::NoZmqEndpoint | Error::HttpStatus { .. } => {
-                None
-            }
+            Error::KubeDiscoveryUnavailable
+            | Error::NoZmqEndpoint
+            | Error::HttpStatus { .. }
+            | Error::WorkerSetsFailed(_) => None,
             Error::Zmq { source, .. } => Some(source),
             Error::Io { source, .. } => Some(source),
             Error::Http { source, .. } => Some(source),
