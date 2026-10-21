@@ -108,7 +108,7 @@ controller's under `kinference_controller::`.
 | `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile; each over `controller::api` |
 | `controller::start` | `start`: connects, then runs the worker-set watch or the reap sweep, the CRD watch, the elector and the writers; `Controller`, whose `shutdown` waits for the Lease to be vacated |
 | `controller::sync` | lock helpers that recover from poisoning |
-| `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
+| `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api`; `spawn`, which the server starts it with |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
 | `server` | `run`: config, wiring and shutdown |

@@ -9,8 +9,9 @@ use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
+use crate::admin::{self, AdminHandles};
 use crate::config::Config;
-use crate::{admin, metrics, version};
+use crate::{metrics, version};
 use kinference_controller::{self as controller, ControllerHandles};
 use kinference_fleet::Fleet;
 use kinference_router::grpc;
@@ -117,30 +118,17 @@ pub async fn run() -> Result<()> {
     .await
     .context("starting the control plane")?;
 
-    // Admin listener, when configured.
-    if let Some(dash_addr) = cfg.admin_listen {
-        // `/readyz` gates on the policy store being listed, so picks don't
-        // bypass policy at startup.
-        let dash_pools = handles.pools.clone();
-        let dash_policy = policy_store.clone();
-        let dash_metrics = handles.scrape.clone();
-        let dash_registry = registry.clone();
-        let dash_cancel = cancel.clone();
-        tokio::spawn(async move {
-            if let Err(err) = admin::serve(
-                dash_addr,
-                dash_pools,
-                dash_policy,
-                dash_registry,
-                dash_metrics,
-                dash_cancel,
-            )
-            .await
-            {
-                tracing::error!(error = %err, "admin server exited with error");
-            }
-        });
-        tracing::info!(listen = %dash_addr, "Admin listener enabled");
+    if let Some(addr) = cfg.admin_listen {
+        admin::spawn(
+            addr,
+            AdminHandles {
+                pools: handles.pools.clone(),
+                policy: policy_store,
+                registry: registry.clone(),
+                scrape: handles.scrape,
+            },
+            cancel.clone(),
+        );
     }
 
     tracing::info!(

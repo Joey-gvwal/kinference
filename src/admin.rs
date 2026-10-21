@@ -22,6 +22,7 @@ use crate::metrics;
 use kinference_fleet::gauges::FleetGauges;
 use kinference_fleet::pool::PoolRegistry;
 use kinference_fleet::scrape::MetricsRegistry;
+use kinference_policy::store::PolicyStore;
 
 mod policy_api;
 
@@ -120,21 +121,40 @@ async fn fallback(uri: axum::http::Uri) -> Response {
     policy_api::not_found(uri).await.into_response()
 }
 
+/// What the admin routes read, built by the server.
+pub struct AdminHandles {
+    pub pools: Arc<PoolRegistry>,
+    /// CRD policy, when enabled; `/readyz` gates on it having listed.
+    pub policy: Option<Arc<PolicyStore>>,
+    /// The Prometheus registry `/metrics` renders.
+    pub registry: prometheus::Registry,
+    pub scrape: Arc<MetricsRegistry>,
+}
+
+/// Serve the admin listener in the background until `cancel`.
+pub fn spawn(addr: SocketAddr, handles: AdminHandles, cancel: CancellationToken) {
+    tokio::spawn(async move {
+        if let Err(err) = serve(addr, handles, cancel).await {
+            tracing::error!(error = %err, "admin server exited with error");
+        }
+    });
+    tracing::info!(listen = %addr, "Admin listener enabled");
+}
+
 pub async fn serve(
     addr: SocketAddr,
-    pools: Arc<PoolRegistry>,
-    policy: Option<Arc<kinference_policy::store::PolicyStore>>,
-    registry: prometheus::Registry,
-    metrics_registry: Arc<MetricsRegistry>,
+    handles: AdminHandles,
     cancel: CancellationToken,
 ) -> std::io::Result<()> {
+    let AdminHandles {
+        pools,
+        policy,
+        registry,
+        scrape,
+    } = handles;
     let state = AppState {
-        policy_api: policy_api::PolicyApiState::new(
-            policy.clone(),
-            pools.clone(),
-            metrics_registry.clone(),
-        ),
-        gauges: FleetGauges::new(pools.clone(), metrics_registry, &registry),
+        policy_api: policy_api::PolicyApiState::new(policy.clone(), pools.clone(), scrape.clone()),
+        gauges: FleetGauges::new(pools.clone(), scrape, &registry),
         pools,
         policy,
         registry,
