@@ -11,13 +11,10 @@ use tonic::transport::Server;
 
 use crate::config::Config;
 use crate::{admin, metrics, version};
-use kinference_controller::{self as controller, ControllerConfig, ControllerHandles};
-use kinference_fleet::coordinator::WorkerTaskSettings;
-use kinference_fleet::pool::ReapPolicy;
-use kinference_fleet::{Fleet, FleetConfig};
-use kinference_router::body_store::BodyLimits;
+use kinference_controller::{self as controller, ControllerHandles};
+use kinference_fleet::Fleet;
 use kinference_router::grpc;
-use kinference_router::service::{KinferenceService, PolicyHandles, RouterConfig};
+use kinference_router::service::{KinferenceService, PolicyHandles};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,44 +68,6 @@ pub async fn run() -> Result<()> {
     // One Prometheus registry; each group registers its families, and
     // the admin listener renders it on `/metrics`.
     let registry = metrics::registry();
-    let poll_ms = cfg.metrics_poll_ms.unwrap_or(1000);
-    let models_refresh_secs = cfg.models_refresh_secs.unwrap_or(30);
-    let ingest_cfg = cfg.ingest;
-
-    // TTL for a pick's in-flight bookkeeping (pending observation +
-    // inflight counter + inflight-prefix entry). Must exceed worst-case
-    // *full* response time; see `Config::observation_ttl_secs`.
-    let observation_ttl = std::time::Duration::from_secs(cfg.observation_ttl_secs.unwrap_or(600));
-
-    // Buffered bodies for PushBody, Pick, PullBody. A much shorter TTL than
-    // `observation_ttl`: bodies are large and consumed immediately.
-    let body_ttl = std::time::Duration::from_secs(cfg.body_ttl_secs.unwrap_or(60));
-    let body_idle_timeout =
-        std::time::Duration::from_secs(cfg.body_idle_timeout_secs.unwrap_or(30));
-    // Config is in KB; everything downstream is in bytes. `saturating_mul`
-    // so an absurd value clamps instead of wrapping to a tiny cap.
-    const KB: u64 = 1024;
-    let body_max_request_bytes = cfg
-        .body_max_request_kb
-        .unwrap_or(8 * 1024)
-        .saturating_mul(KB);
-    let body_max_total_bytes = cfg
-        .body_max_total_kb
-        .unwrap_or(256 * 1024)
-        .saturating_mul(KB);
-    let bodies = BodyLimits {
-        max_total_bytes: body_max_total_bytes,
-        max_request_bytes: body_max_request_bytes,
-        ttl: body_ttl,
-        idle_timeout: body_idle_timeout,
-    };
-    tracing::info!(
-        max_total_bytes = body_max_total_bytes,
-        max_request_bytes = body_max_request_bytes,
-        ttl_secs = body_ttl.as_secs(),
-        idle_timeout_secs = body_idle_timeout.as_secs(),
-        "Body buffer configured"
-    );
 
     // One `PolicyStore` for the process, made before anything reads it.
     // `None` when policy is off, which `/readyz` treats as nothing to wait
@@ -123,36 +82,11 @@ pub async fn run() -> Result<()> {
     let kubernetes =
         controller::discovery::factory(cfg.kubernetes.enabled, !cfg.worker_sets.is_empty())
             .context("building Kubernetes discovery")?;
-    let fleet = Fleet::new(
-        FleetConfig {
-            specs: cfg.pool_specs()?,
-            workers: WorkerTaskSettings {
-                poll_ms,
-                models_refresh_secs,
-                ingest: ingest_cfg,
-                observation_ttl,
-            },
-            reap: ReapPolicy {
-                linger: std::time::Duration::from_secs(30),
-                // A retired pool must outlive observations that may still
-                // reference it.
-                backstop: observation_ttl.max(std::time::Duration::from_secs(600)),
-            },
-        },
-        kubernetes,
-        &registry,
-        cancel.clone(),
-    );
+    let fleet = Fleet::new(cfg.fleet()?, kubernetes, &registry, cancel.clone());
     let handles = fleet.handles.clone();
 
     let service = KinferenceService::start(
-        RouterConfig {
-            tokenize: cfg.tokenize.clone(),
-            metrics: cfg.metrics.clone(),
-            bodies,
-            observation_ttl,
-            observations_csv: cfg.observations_csv.clone(),
-        },
+        cfg.router(),
         handles.clone(),
         PolicyHandles {
             store: policy_store.clone(),
@@ -169,12 +103,7 @@ pub async fn run() -> Result<()> {
     let manager = fleet.start().context("starting the fleet")?;
 
     let controller = controller::start(
-        ControllerConfig {
-            kubernetes: cfg.kubernetes.clone(),
-            policy: cfg.policy.clone(),
-            leader_election: cfg.leader_election.clone(),
-            profiles: cfg.profiles.clone(),
-        },
+        cfg.controller(),
         ControllerHandles {
             manager,
             pools: handles.pools.clone(),

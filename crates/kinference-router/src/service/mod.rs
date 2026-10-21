@@ -352,6 +352,13 @@ impl KinferenceService {
     ) -> Result<Arc<Self>, Error> {
         let prom = Arc::new(RouterMetrics::new(registry, &config.metrics));
         let limits = config.bodies;
+        tracing::info!(
+            max_total_bytes = limits.max_total_bytes,
+            max_request_bytes = limits.max_request_bytes,
+            ttl_secs = limits.ttl.as_secs(),
+            idle_timeout_secs = limits.idle_timeout.as_secs(),
+            "Body buffer configured"
+        );
         let store =
             body_store::shared(limits.max_total_bytes, limits.max_request_bytes, limits.ttl);
         let tokenizer = tokenizer::build(

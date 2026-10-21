@@ -6,14 +6,19 @@ use anyhow::{Context, Result};
 use kinference_policy::PoolKey;
 use serde::Deserialize;
 
+use kinference_controller::ControllerConfig;
 use kinference_controller::leader::{self, LeaderElectionConfig};
 use kinference_controller::policy::PolicyConfig;
 use kinference_controller::policy::worker_sets::KubernetesConfig;
+use kinference_fleet::FleetConfig;
+use kinference_fleet::coordinator::WorkerTaskSettings;
 use kinference_fleet::discovery::DiscoveryConfig;
 use kinference_fleet::ingest::{DEFAULT_REPLAY_TIMEOUT, IngestConfig};
-use kinference_fleet::pool::PoolSpec;
+use kinference_fleet::pool::{PoolSpec, ReapPolicy};
 use kinference_fleet::profile::ProfileConfig;
+use kinference_router::body_store::BodyLimits;
 use kinference_router::metrics::MetricsConfig;
+use kinference_router::service::RouterConfig;
 use kinference_router::tokenizer::TokenizeConfig;
 
 #[allow(dead_code)]
@@ -236,6 +241,70 @@ impl Config {
                 })
             })
             .collect()
+    }
+
+    /// TTL of a pick's in-flight bookkeeping: the pending observation, the
+    /// inflight counter and the inflight-prefix entry. Must exceed the
+    /// worst-case full response time; see `observation_ttl_secs`.
+    fn observation_ttl(&self) -> Duration {
+        Duration::from_secs(self.observation_ttl_secs.unwrap_or(600))
+    }
+
+    /// The router's settings.
+    pub fn router(&self) -> RouterConfig {
+        // Config is in KB; everything downstream is in bytes. `saturating_mul`
+        // so an absurd value clamps instead of wrapping to a tiny cap.
+        const KB: u64 = 1024;
+        RouterConfig {
+            tokenize: self.tokenize.clone(),
+            metrics: self.metrics.clone(),
+            bodies: BodyLimits {
+                max_total_bytes: self
+                    .body_max_total_kb
+                    .unwrap_or(256 * 1024)
+                    .saturating_mul(KB),
+                max_request_bytes: self
+                    .body_max_request_kb
+                    .unwrap_or(8 * 1024)
+                    .saturating_mul(KB),
+                // Much shorter than `observation_ttl`: bodies are large and
+                // consumed immediately.
+                ttl: Duration::from_secs(self.body_ttl_secs.unwrap_or(60)),
+                idle_timeout: Duration::from_secs(self.body_idle_timeout_secs.unwrap_or(30)),
+            },
+            observation_ttl: self.observation_ttl(),
+            observations_csv: self.observations_csv.clone(),
+        }
+    }
+
+    /// The fleet's settings, with every `workerset` entry resolved.
+    pub fn fleet(&self) -> Result<FleetConfig> {
+        let observation_ttl = self.observation_ttl();
+        Ok(FleetConfig {
+            specs: self.pool_specs()?,
+            workers: WorkerTaskSettings {
+                poll_ms: self.metrics_poll_ms.unwrap_or(1000),
+                models_refresh_secs: self.models_refresh_secs.unwrap_or(30),
+                ingest: self.ingest,
+                observation_ttl,
+            },
+            reap: ReapPolicy {
+                linger: Duration::from_secs(30),
+                // A retired pool must outlive observations that may still
+                // reference it.
+                backstop: observation_ttl.max(Duration::from_secs(600)),
+            },
+        })
+    }
+
+    /// The control plane's settings.
+    pub fn controller(&self) -> ControllerConfig {
+        ControllerConfig {
+            kubernetes: self.kubernetes.clone(),
+            policy: self.policy.clone(),
+            leader_election: self.leader_election.clone(),
+            profiles: self.profiles.clone(),
+        }
     }
 
     /// Validate cross-set invariants.

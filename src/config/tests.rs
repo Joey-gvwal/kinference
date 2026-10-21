@@ -360,3 +360,60 @@ fn unknown_top_level_key_fails_load() {
         "the error must name the offending key, got: {err:#}"
     );
 }
+
+fn minimal() -> Config {
+    parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [workerset("p", "t", 16, "svc")],
+    }))
+    .expect("parses")
+}
+
+/// The router's defaults: 256 MiB and 8 MiB in bytes, 60 s, 30 s, 600 s.
+#[test]
+fn router_settings_default() {
+    let router = minimal().router();
+    assert_eq!(router.bodies.max_total_bytes, 256 * 1024 * 1024);
+    assert_eq!(router.bodies.max_request_bytes, 8 * 1024 * 1024);
+    assert_eq!(router.bodies.ttl, Duration::from_secs(60));
+    assert_eq!(router.bodies.idle_timeout, Duration::from_secs(30));
+    assert_eq!(router.observation_ttl, Duration::from_secs(600));
+}
+
+/// An absurd KB value clamps at `u64::MAX` instead of wrapping to a tiny cap.
+#[test]
+fn body_limits_saturate_instead_of_wrapping() {
+    let mut cfg = minimal();
+    cfg.body_max_total_kb = Some(u64::MAX);
+    cfg.body_max_request_kb = Some(u64::MAX / 2);
+    let bodies = cfg.router().bodies;
+    assert_eq!(bodies.max_total_bytes, u64::MAX);
+    assert_eq!(bodies.max_request_bytes, u64::MAX);
+}
+
+/// The fleet's defaults: one spec per workerset, 1000 ms, 30 s, a 30 s
+/// linger and a 600 s backstop.
+#[test]
+fn fleet_settings_default() {
+    let fleet = minimal().fleet().expect("resolves");
+    assert_eq!(fleet.specs.len(), 1);
+    assert_eq!(fleet.specs[0].name, "p");
+    assert_eq!(fleet.workers.poll_ms, 1000);
+    assert_eq!(fleet.workers.models_refresh_secs, 30);
+    assert_eq!(fleet.workers.observation_ttl, Duration::from_secs(600));
+    assert_eq!(fleet.reap.linger, Duration::from_secs(30));
+    assert_eq!(fleet.reap.backstop, Duration::from_secs(600));
+}
+
+/// A retired pool must outlive observations, so a longer TTL raises the
+/// reap backstop with it.
+#[test]
+fn reap_backstop_follows_a_longer_observation_ttl() {
+    let mut cfg = minimal();
+    cfg.observation_ttl_secs = Some(900);
+    let fleet = cfg.fleet().expect("resolves");
+    assert_eq!(fleet.workers.observation_ttl, Duration::from_secs(900));
+    assert_eq!(fleet.reap.backstop, Duration::from_secs(900));
+    assert_eq!(cfg.router().observation_ttl, Duration::from_secs(900));
+}
