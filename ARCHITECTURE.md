@@ -30,7 +30,7 @@ code goes. Change it in the same pull request as any move.
 ## Groups
 
 A module belongs to one group. A group is a directory under `src`, or a
-crate under `crates` once it has moved. Its `mod.rs` or `lib.rs` lists the
+crate under `crates` once it has moved. Its `<group>.rs` or `lib.rs` lists the
 modules and holds nothing else beyond re-exports.
 
 - Fleet, `crates/kinference-fleet`. Which workers exist and what state they are in.
