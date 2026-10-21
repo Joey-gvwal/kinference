@@ -1,5 +1,6 @@
-//! The `kinference` server: the gRPC picker, the admin listener, discovery and
-//! the policy machinery, wired together and run until shutdown.
+//! The `kinference` server. `run` loads the config, builds the fleet and the
+//! router, starts the control plane and the admin listener, serves gRPC
+//! until a signal, and shuts down.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +15,8 @@ use crate::config::Config;
 use crate::{metrics, version};
 use kinference_controller::{self as controller, ControllerHandles};
 use kinference_fleet::Fleet;
+use kinference_policy::provider_health::ProviderHealthStore;
+use kinference_policy::store::PolicyStore;
 use kinference_router::grpc;
 use kinference_router::service::{KinferenceService, PolicyHandles};
 
@@ -31,22 +34,9 @@ struct Args {
 
 /// Parse the command line and run the server until it is told to stop.
 pub async fn run() -> Result<()> {
-    // ANSI colors only on a TTY, and not with NO_COLOR (https://no-color.org).
-    // Read here, before the config file, because it configures the log
-    // subscriber; every other env var is read by `Config::load`.
-    let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && std::env::var_os("NO_COLOR").is_none();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_ansi(use_ansi)
-        .init();
-
+    init_logging();
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
-
     let listen_addr = cfg.listen;
     tracing::info!(
         version = version::VERSION,
@@ -62,23 +52,14 @@ pub async fn run() -> Result<()> {
     let incoming = tonic::transport::server::TcpIncoming::new(listen_addr, true, None)
         .map_err(|e| anyhow::anyhow!("failed to bind gRPC listener on {listen_addr}: {e}"))?;
 
-    let shutdown = async {
-        wait_for_shutdown_signal().await;
-    };
-
     // One Prometheus registry; each group registers its families, and
     // the admin listener renders it on `/metrics`.
     let registry = metrics::registry();
-
-    // One `PolicyStore` for the process, made before anything reads it.
     // `None` when policy is off, which `/readyz` treats as nothing to wait
-    // for. Provider health exists even with policy off, so the feedback RPCs
-    // needn't check; the status writer publishes what the service records.
-    let policy_store = cfg
-        .policy
-        .enabled
-        .then(kinference_policy::store::PolicyStore::new);
-    let provider_health = Arc::new(kinference_policy::provider_health::ProviderHealthStore::new());
+    // for. Provider health exists either way: the feedback RPCs record it
+    // and the status writer publishes it.
+    let policy_store = cfg.policy.enabled.then(PolicyStore::new);
+    let provider_health = Arc::new(ProviderHealthStore::new());
 
     let kubernetes =
         controller::discovery::factory(cfg.kubernetes.enabled, !cfg.worker_sets.is_empty())
@@ -136,22 +117,34 @@ pub async fn run() -> Result<()> {
         worker_sets = handles.pools.snapshot().len(),
         "READY: gRPC accepting connections"
     );
-
-    let server_result = Server::builder()
+    let served = Server::builder()
         .add_service(grpc::server(service))
-        .serve_with_incoming_shutdown(incoming, shutdown)
+        .serve_with_incoming_shutdown(incoming, wait_for_shutdown_signal())
         .await;
 
     cancel.cancel();
-
     controller.shutdown().await;
-
-    server_result?;
+    served?;
     tracing::info!("Shut down complete");
     Ok(())
 }
 
-/// Resolve on SIGINT **or SIGTERM**.
+/// The log subscriber, from `RUST_LOG` or `info`. ANSI colors only on a TTY,
+/// and not with NO_COLOR (https://no-color.org): read here, before the
+/// config file, because every other env var is read by `Config::load`.
+fn init_logging() {
+    let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && std::env::var_os("NO_COLOR").is_none();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_ansi(use_ansi)
+        .init();
+}
+
+/// Resolve on SIGINT or SIGTERM.
 ///
 /// SIGTERM is what Kubernetes and `docker stop` send; without handling it
 /// there is no graceful shutdown (no draining, no Lease vacate).

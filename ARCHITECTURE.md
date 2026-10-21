@@ -27,8 +27,6 @@ code goes. Change it in the same pull request as any move.
 - `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
   only.
 
-What remains of the restructure (#32) is the server module itself, #51.
-
 ## Groups
 
 A module belongs to one group. A group is a directory under `src`, or a
@@ -111,7 +109,7 @@ controller's under `kinference_controller::`.
 | `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api`; `spawn`, which the server starts it with |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
-| `server` | `run`: config, wiring and shutdown |
+| `server` | `run`: load the config, build the fleet, build the router, start the control plane and the admin listener, serve, shut down |
 | `version` | the build version string |
 
 `src/bin/compute_hash.rs` is a developer tool, not a module of the crate.
