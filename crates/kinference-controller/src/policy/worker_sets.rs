@@ -229,7 +229,6 @@ fn port_ref(v: &IntOrString) -> Option<PortRef> {
 
 /// `kubernetes`: worker sets derived from `InferenceWorkerSet` CRs. Profiles
 /// still come from the config.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct KubernetesConfig {
     #[serde(default)]

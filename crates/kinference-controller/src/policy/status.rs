@@ -12,8 +12,6 @@
 //! Status computation is pure over `(snapshot, PoolFacts)`; only the patching
 //! is async.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
