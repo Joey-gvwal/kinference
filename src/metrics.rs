@@ -5,7 +5,7 @@
 //!
 //! The server creates the one `Registry` here and lends it to each group,
 //! which registers its own families: `fleet::metrics`, `router::metrics`,
-//! `controller::metrics`.
+//! `kinference_controller::metrics`.
 
 use prometheus::{Encoder, Registry, TextEncoder};
 

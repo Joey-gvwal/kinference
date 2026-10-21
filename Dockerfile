@@ -35,8 +35,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY src ./src
-# The other workspace members: the policy, fleet and router crates the server depends
-# on, and `kinfctl`.
+# The other workspace members: the policy, fleet, router and controller
+# crates the server depends on, and `kinfctl`.
 COPY crates ./crates
 
 # Build-time version override. Passed in via `docker build --build-arg

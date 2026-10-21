@@ -94,7 +94,7 @@ fn holder_currency_respects_expiry() {
 /// and vacated when shutdown fires.
 #[tokio::test]
 async fn a_free_lease_is_claimed_and_vacated_on_shutdown() {
-    use crate::controller::api::recorded::{Recorded, Write, key};
+    use crate::api::recorded::{Recorded, Write, key};
 
     let api = Recorded::default();
     let (tx, mut rx) = watch::channel(false);

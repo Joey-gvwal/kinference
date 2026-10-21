@@ -577,7 +577,7 @@ async fn two_ready_endpoints_yield_two_added() {
 /// and each Ready endpoint is announced once.
 #[tokio::test]
 async fn run_announces_each_ready_endpoint_of_the_named_service() {
-    use crate::controller::api::recorded::Recorded;
+    use crate::api::recorded::Recorded;
     use std::time::Duration;
 
     let of_service = |mut s: EndpointSlice, svc: &str| {

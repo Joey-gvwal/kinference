@@ -33,7 +33,8 @@ use kube::runtime::watcher;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::api::{ApiServer, KubeApi};
+use crate::Error;
+use crate::api::{ApiServer, KubeApi};
 use kinference_fleet::discovery::{
     DiscoveryConfig, DiscoveryDefaults, DiscoveryFactory, DiscoveryTask, PortRef, PortRefs,
     WorkerChange, WorkerConfig,
@@ -59,7 +60,7 @@ fn fnv1a_u64(bytes: &[u8]) -> u64 {
 /// a worker set) makes missing credentials fatal; with only `enabled`
 /// (`kubernetes.enabled`) they are logged and discovery is off, so CR
 /// resolution can run outside a cluster.
-pub fn factory(enabled: bool, required: bool) -> anyhow::Result<Option<DiscoveryFactory>> {
+pub fn factory(enabled: bool, required: bool) -> Result<Option<DiscoveryFactory>, Error> {
     let api = if required {
         Some(KubeApi::in_cluster()?)
     } else if enabled {
@@ -67,7 +68,7 @@ pub fn factory(enabled: bool, required: bool) -> anyhow::Result<Option<Discovery
             Ok(api) => Some(api),
             Err(err) => {
                 tracing::error!(
-                    error = %err,
+                    error = %err.chain(),
                     "kubernetes.enabled is set but in-cluster credentials are \
                      unavailable; InferenceWorkerSets will resolve but their pools \
                      cannot start discovery"

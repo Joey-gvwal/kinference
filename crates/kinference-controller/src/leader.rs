@@ -20,13 +20,12 @@ use kube::api::ObjectMeta;
 use serde::Deserialize;
 use tokio::sync::watch;
 
-use crate::controller::api::ApiServer;
+use crate::api::ApiServer;
 
 /// `leader_election`: elect a single CRD status writer across replicas.
 ///
 /// Only status writing is gated; every replica still routes. Two writers that
 /// disagree would overwrite each other's status forever.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct LeaderElectionConfig {
     /// Enable before scaling past one replica. Fails closed: a replica that

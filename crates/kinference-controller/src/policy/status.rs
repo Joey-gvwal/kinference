@@ -12,8 +12,6 @@
 //! Status computation is pure over `(snapshot, PoolFacts)`; only the patching
 //! is async.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +29,8 @@ use kinference_policy::resolve::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::api::{ApiServer, Object};
+use crate::api::{ApiServer, Object};
+use crate::sync;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_policy::store::PolicyStore;
@@ -859,7 +858,7 @@ pub struct StatusHandles {
     /// Whether this replica may write. Always `true` when leader election is
     /// disabled.
     pub leader: watch::Receiver<bool>,
-    pub prom: Arc<crate::controller::metrics::ControllerMetrics>,
+    pub prom: Arc<crate::metrics::ControllerMetrics>,
 }
 
 /// Patches status onto the CRDs, on a tick, only when something changed.
@@ -874,7 +873,7 @@ pub struct StatusWriter<A: ApiServer> {
     /// source of stable `lastTransitionTime`s.
     last: Mutex<HashMap<CacheKey, serde_json::Value>>,
     leader: watch::Receiver<bool>,
-    prom: Arc<crate::controller::metrics::ControllerMetrics>,
+    prom: Arc<crate::metrics::ControllerMetrics>,
     /// Policy warnings already logged, as `ns/name: warning`, so each is logged
     /// once when it first appears.
     warned: Mutex<HashSet<String>>,
@@ -943,10 +942,7 @@ impl<A: ApiServer> StatusWriter<A> {
                     if !*self.leader.borrow() {
                         continue;
                     }
-                    if let Err(e) = self.reconcile_once().await {
-                        // Never fatal to routing.
-                        tracing::warn!(error = %e, "policy status writer: reconcile failed");
-                    }
+                    self.reconcile_once().await;
                 }
             }
         }
@@ -960,7 +956,7 @@ impl<A: ApiServer> StatusWriter<A> {
     /// `lastTransitionTime`s.
     fn on_promotion(&self) {
         let dropped = {
-            let mut last = self.last.lock().expect("status cache poisoned");
+            let mut last = sync::lock(&self.last);
             let n = last.len();
             last.clear();
             n
@@ -981,12 +977,12 @@ impl<A: ApiServer> StatusWriter<A> {
         tracing::info!("policy status writer: demoted; stopping writes");
     }
 
-    async fn reconcile_once(&self) -> anyhow::Result<()> {
+    async fn reconcile_once(&self) {
         let snapshot = self.store.snapshot();
         // Not `snapshot.is_empty()`, which only counts pools: worker sets and
         // policies need status even with no pools.
         if !snapshot.listed() {
-            return Ok(());
+            return;
         }
         // One snapshot for the whole reconcile, so every CR describes the same
         // fleet.
@@ -1127,7 +1123,6 @@ impl<A: ApiServer> StatusWriter<A> {
             )
             .await;
         }
-        Ok(())
     }
 
     /// Log warnings that are new since the last pass, and publish per-policy
@@ -1147,7 +1142,7 @@ impl<A: ApiServer> StatusWriter<A> {
             rows.extend(by_code.into_iter().map(|(code, n)| (key.clone(), code, n)));
         }
         self.prom.set_policy_warnings(&rows);
-        let mut warned = self.warned.lock().expect("policy warn set poisoned");
+        let mut warned = sync::lock(&self.warned);
         for line in &current {
             if !warned.contains(line) {
                 tracing::warn!("policy warning: {line}");
@@ -1163,7 +1158,7 @@ impl<A: ApiServer> StatusWriter<A> {
         name: &str,
         uid: Option<&str>,
     ) -> Option<T> {
-        let last = self.last.lock().expect("status cache poisoned");
+        let last = sync::lock(&self.last);
         let v = last.get(&cache_key(kind, ns, name, uid))?;
         serde_json::from_value(v.clone()).ok()
     }
@@ -1183,7 +1178,7 @@ impl<A: ApiServer> StatusWriter<A> {
         };
         let key = cache_key(kind, ns, name, uid);
         {
-            let last = self.last.lock().expect("status cache poisoned");
+            let last = sync::lock(&self.last);
             if last.get(&key) == Some(&value) {
                 return;
             }
@@ -1191,10 +1186,7 @@ impl<A: ApiServer> StatusWriter<A> {
         match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
                 tracing::debug!(kind, ns, name, "policy status: patched");
-                self.last
-                    .lock()
-                    .expect("status cache poisoned")
-                    .insert(key, value);
+                sync::lock(&self.last).insert(key, value);
             }
             Err(e) => {
                 // Don't cache on failure, so the next tick retries.

@@ -23,7 +23,8 @@ use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::controller::api::ApiServer;
+use crate::api::ApiServer;
+use crate::sync;
 use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
@@ -42,14 +43,11 @@ impl RejectionStore {
     }
 
     pub fn snapshot(&self) -> std::sync::Arc<Vec<Rejection>> {
-        self.current
-            .read()
-            .expect("rejection store poisoned")
-            .clone()
+        sync::read(&self.current).clone()
     }
 
     fn publish(&self, v: Vec<Rejection>) {
-        *self.current.write().expect("rejection store poisoned") = std::sync::Arc::new(v);
+        *sync::write(&self.current) = std::sync::Arc::new(v);
     }
 }
 
@@ -231,7 +229,6 @@ fn port_ref(v: &IntOrString) -> Option<PortRef> {
 
 /// `kubernetes`: worker sets derived from `InferenceWorkerSet` CRs. Profiles
 /// still come from the config.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct KubernetesConfig {
     #[serde(default)]
@@ -266,7 +263,7 @@ pub struct WorkerSetWatcher {
     /// The current generation's store. Rebuilt with the watch.
     store: Option<reflector::Store<InferenceWorkerSet>>,
     rejection_store: std::sync::Arc<RejectionStore>,
-    prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
+    prom: std::sync::Arc<crate::metrics::ControllerMetrics>,
 }
 
 impl WorkerSetWatcher {
@@ -277,7 +274,7 @@ impl WorkerSetWatcher {
         profiles: Vec<ProfileConfig>,
         manager: kinference_fleet::pool::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,
-        prom: std::sync::Arc<crate::controller::metrics::ControllerMetrics>,
+        prom: std::sync::Arc<crate::metrics::ControllerMetrics>,
     ) -> Self {
         Self {
             namespace: kube_cfg.namespace.clone(),

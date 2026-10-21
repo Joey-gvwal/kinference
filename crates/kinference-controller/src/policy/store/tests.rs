@@ -1,6 +1,6 @@
 //! Event classification and the reflector stores that feed `resolve`.
 use super::*;
-use crate::controller::api::recorded::Recorded;
+use crate::api::recorded::Recorded;
 use kinference_policy::crd::{Destination, InferencePoolSpec, InferenceWorkerSetSpec, ServiceRef};
 use kinference_policy::resolve::RejectionIndex;
 use kube::api::ObjectMeta;
@@ -159,7 +159,7 @@ async fn run_once_over(api: Recorded) -> Arc<kinference_policy::resolve::PolicyI
         api,
         Some("infra".into()),
         kinference_fleet::pool::PoolRegistry::new(),
-        crate::controller::policy::worker_sets::RejectionStore::new(),
+        crate::policy::worker_sets::RejectionStore::new(),
         store.clone(),
     );
     let cancel = CancellationToken::new();

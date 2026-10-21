@@ -3,7 +3,6 @@
 
 use std::future::Future;
 
-use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use kube::Api;
@@ -12,6 +11,8 @@ use kube::core::NamespaceResourceScope;
 use kube::runtime::watcher;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+use crate::Error;
 
 /// A namespaced object the control plane reads or writes.
 pub trait Object:
@@ -107,30 +108,23 @@ pub struct KubeApi {
 impl KubeApi {
     /// In-cluster credentials only; a kubeconfig is refused. Discovery's
     /// client: the pod IPs it finds are unreachable from outside the cluster.
-    pub fn in_cluster() -> anyhow::Result<Self> {
-        let cfg = kube::Config::incluster_env().context(
-            "failed to read in-cluster Kubernetes service-account credentials. \
-             KubeDiscovery only works when kinference runs as a pod inside the \
-             cluster it should watch (~/.kube/config is intentionally NOT honored: \
-             discovered pod IPs would not be reachable from outside the cluster \
-             network).",
-        )?;
-        let client = kube::Client::try_from(cfg)
-            .context("failed to build Kubernetes client from in-cluster config")?;
+    pub fn in_cluster() -> Result<Self, Error> {
+        let cfg = kube::Config::incluster_env().map_err(Error::InCluster)?;
+        let client = kube::Client::try_from(cfg).map_err(|source| Error::Client {
+            what: "the in-cluster config",
+            source,
+        })?;
         Ok(Self { client })
     }
 
     /// In-cluster credentials, else `~/.kube/config`, so the CRD side can
     /// run against a local cluster.
-    pub async fn infer() -> anyhow::Result<Self> {
-        let cfg = kube::Config::infer().await.map_err(|e| {
-            anyhow::anyhow!(
-                "failed to build a Kubernetes client (kubernetes.enabled or policy.enabled is \
-                 set): no in-cluster service-account token and no usable kubeconfig. Turn both \
-                 off to run without a cluster. ({e})"
-            )
+    pub async fn infer() -> Result<Self, Error> {
+        let cfg = kube::Config::infer().await.map_err(Error::Infer)?;
+        let client = kube::Client::try_from(cfg).map_err(|source| Error::Client {
+            what: "the inferred config",
+            source,
         })?;
-        let client = kube::Client::try_from(cfg).context("failed to build Kubernetes client")?;
         Ok(Self { client })
     }
 

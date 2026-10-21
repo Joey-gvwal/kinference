@@ -20,7 +20,6 @@ pub mod store;
 pub mod worker_sets;
 
 /// `policy`: routing policy from `kinference.buoyant.io` CRDs.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PolicyConfig {
     /// Watch the CRDs and honor `PickRequest.inference_pool`. When off, a

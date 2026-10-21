@@ -1,5 +1,5 @@
 use super::*;
-use crate::controller::api::recorded::{Key, Recorded, Write, key};
+use crate::api::recorded::{Key, Recorded, Write, key};
 use kinference_policy::compile::CompiledPolicy;
 use kinference_policy::crd::{InferencePolicySpec, ModelAlias, ParentRef};
 use kinference_policy::resolve::{Unresolved, UnresolvedReason};
@@ -629,13 +629,11 @@ fn writer_over(
     let handles = StatusHandles {
         store: kinference_policy::store::PolicyStore::new(),
         pools: kinference_fleet::pool::PoolRegistry::new(),
-        rejections: crate::controller::policy::worker_sets::RejectionStore::new(),
+        rejections: crate::policy::worker_sets::RejectionStore::new(),
         metrics: Arc::new(MetricsRegistry::new()),
         provider_health: Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
         leader: rx,
-        prom: Arc::new(crate::controller::metrics::ControllerMetrics::new(
-            &registry,
-        )),
+        prom: Arc::new(crate::metrics::ControllerMetrics::new(&registry)),
     };
     let w = StatusWriter::new(api, handles);
     ((w, tx), registry)
@@ -745,7 +743,7 @@ async fn a_listed_snapshot_patches_every_object_it_describes() {
     let ((w, _tx), _) = writer_over(api.clone(), true);
     w.store.publish(index);
 
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
 
     assert_eq!(
         patched_keys(&api),
@@ -769,9 +767,9 @@ async fn an_unchanged_snapshot_issues_no_second_patch() {
     let ((w, _tx), _) = writer_over(api.clone(), true);
     w.store.publish(index);
 
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     let first = api.writes();
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     assert_eq!(
         api.writes(),
         first,
@@ -786,7 +784,7 @@ async fn a_failed_patch_is_retried_on_the_next_tick() {
     w.store.publish(index);
     api.failing::<InferencePool>("infra", "chat");
 
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     assert_eq!(
         patched_keys(&api).len(),
         3,
@@ -794,7 +792,7 @@ async fn a_failed_patch_is_retried_on_the_next_tick() {
     );
 
     api.heal();
-    w.reconcile_once().await.unwrap();
+    w.reconcile_once().await;
     assert_eq!(
         patched_keys(&api).last(),
         Some(&key::<InferencePool>("infra", "chat")),

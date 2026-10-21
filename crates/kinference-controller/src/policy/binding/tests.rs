@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::controller::api::recorded::{Recorded, Write, key};
+use crate::api::recorded::{Recorded, Write, key};
 
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
@@ -430,10 +430,10 @@ fn no_configured_extension_lists_none() {
 /// A blank `backend_binding_extension` reads as none.
 #[test]
 fn a_blank_configured_name_is_no_extension() {
-    let cfg = crate::controller::policy::PolicyConfig::default();
+    let cfg = crate::policy::PolicyConfig::default();
     assert_eq!(cfg.binding_extension(), Some("chat-picker"));
 
-    let cleared = crate::controller::policy::PolicyConfig {
+    let cleared = crate::policy::PolicyConfig {
         backend_binding_extension: "  ".into(),
         ..Default::default()
     };
@@ -561,7 +561,7 @@ fn writer_over(api: &Recorded) -> BindingWriter<Recorded> {
     )
 }
 
-fn chat() -> crate::controller::api::recorded::Key {
+fn chat() -> crate::api::recorded::Key {
     key::<BackendBinding>("infra", "chat")
 }
 

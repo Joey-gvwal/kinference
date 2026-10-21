@@ -10,8 +10,8 @@ code goes. Change it in the same pull request as any move.
 
 ## Crates
 
-- `kinference`, this crate. The server. The controller lives here as a
-  directory today.
+- `kinference`, this crate. The server: wiring, config assembly, the
+  admin listener and the metrics exposition.
 - `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types, pure
   policy logic and the policy snapshot holder. No client and no runtime.
 - `kinference-fleet`, in `crates/kinference-fleet`. Which workers exist
@@ -20,12 +20,14 @@ code goes. Change it in the same pull request as any move.
 - `kinference-router`, in `crates/kinference-router`. The request path.
   Imports `kinference-fleet` and `kinference-policy`; no `kube`, no
   `axum`, no `anyhow`.
+- `kinference-controller`, in `crates/kinference-controller`. The
+  Kubernetes control plane. Imports `kinference-fleet` and
+  `kinference-policy`, never the router; the one crate that depends on
+  `kube`; no `anyhow`.
 - `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
   only.
 
-Target: the controller becomes a crate too. The server crate
-keeps wiring, config assembly, the admin listener and the metrics
-exposition. The plan is #32.
+What remains of the restructure (#32) is the server module itself, #51.
 
 ## Groups
 
@@ -42,11 +44,11 @@ modules and holds nothing else beyond re-exports.
 - Router, `crates/kinference-router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, the
   request-path metric families, and its error type.
-- Controller, `src/controller`. The Kubernetes control plane. The API
-  server trait and its client, the CRD watch and its snapshot, the status
-  and binding writers, the worker-set reconcile, leader election,
-  EndpointSlice discovery, the control plane's metric families, and
-  `start`, the one call the server makes.
+- Controller, `crates/kinference-controller`. The Kubernetes control
+  plane. The API server trait and its client, the CRD watch and its
+  snapshot, the status and binding writers, the worker-set reconcile,
+  leader election, EndpointSlice discovery, the control plane's metric
+  families, its error type, and `start`, the one call the server makes.
 - Operator surface, the top of `src`. Config, wiring, the admin
   listener, the Prometheus exposition, and the version string.
 
@@ -64,7 +66,8 @@ Imports point down, never up or sideways:
 ## Module map
 
 Rows name a module by its group; in code the fleet's are under
-`kinference_fleet::` and the router's under `kinference_router::`.
+`kinference_fleet::`, the router's under `kinference_router::` and the
+controller's under `kinference_controller::`.
 
 | Module | Owns |
 | --- | --- |
@@ -96,11 +99,13 @@ Rows name a module by its group; in code the fleet's are under
 | `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |
 | `router::tokenizer::local` | `LocalTokenizer`: in-process tokenizers, chat templates, the warm-up that follows the model index, and the fallback to `/render` |
 | `controller::api` | `ApiServer`, the one door to the API server: watch, list, get, create, replace, apply, delete, patch status; `KubeApi` over a `kube::Client`, and in tests `Recorded`, the same over objects the test supplies |
+| `controller::error` | `Error`, the control plane's error type |
 | `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers; `factory`, which binds the in-cluster client into the fleet's discovery factory |
 | `controller::leader` | Lease-based leader election |
 | `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
 | `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile; each over `controller::api` |
 | `controller::start` | `start`: connects, then runs the worker-set watch or the reap sweep, the CRD watch, the elector and the writers; `Controller`, whose `shutdown` waits for the Lease to be vacated |
+| `controller::sync` | lock helpers that recover from poisoning |
 | `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
