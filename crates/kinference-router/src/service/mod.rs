@@ -21,8 +21,9 @@ use crate::metrics::{MetricsConfig, RouterMetrics};
 use crate::observations::{ObservationSink, Observations, Qos, RequestMeta};
 use crate::picker::WorkerScore;
 use crate::tokenizer::{self, TokenizeConfig, TokenizeInput};
+use kinference_fleet::FleetHandles;
 use kinference_fleet::models::ModelIndex;
-use kinference_fleet::pool::{Pool, PoolRegistry};
+use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
 use kinference_policy::provider_health::ProviderHealthStore;
@@ -293,13 +294,6 @@ pub struct KinferenceService {
     pub(crate) prom: Arc<RouterMetrics>,
 }
 
-/// What the router reads from the fleet.
-pub struct FleetHandles {
-    pub pools: Arc<PoolRegistry>,
-    pub models: Arc<ModelIndex>,
-    pub scrape: Arc<MetricsRegistry>,
-}
-
 /// What the control plane publishes and the router reads.
 pub struct PolicyHandles {
     /// `None` when policy is off: a request naming a pool falls back to
@@ -358,6 +352,13 @@ impl KinferenceService {
     ) -> Result<Arc<Self>, Error> {
         let prom = Arc::new(RouterMetrics::new(registry, &config.metrics));
         let limits = config.bodies;
+        tracing::info!(
+            max_total_bytes = limits.max_total_bytes,
+            max_request_bytes = limits.max_request_bytes,
+            ttl_secs = limits.ttl.as_secs(),
+            idle_timeout_secs = limits.idle_timeout.as_secs(),
+            "Body buffer configured"
+        );
         let store =
             body_store::shared(limits.max_total_bytes, limits.max_request_bytes, limits.ttl);
         let tokenizer = tokenizer::build(

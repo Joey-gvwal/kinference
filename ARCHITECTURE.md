@@ -27,8 +27,6 @@ code goes. Change it in the same pull request as any move.
 - `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
   only.
 
-What remains of the restructure (#32) is the server module itself, #51.
-
 ## Groups
 
 A module belongs to one group. A group is a directory under `src`, or a
@@ -39,8 +37,9 @@ modules and holds nothing else beyond re-exports.
   Pools, the worker registry, the discovery factory and its config,
   the coordinator that adds and evicts workers, the scrape of engine
   metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
-  collector behind the fleet gauges, the fleet's own metric families, and
-  its error type.
+  collector behind the fleet gauges, the fleet's own metric families, its
+  error type, and `start`, the one call the server builds and starts it
+  with.
 - Router, `crates/kinference-router`. The request path. The service, scoring, the
   picker, the body store, the tokenizer, observations, the gRPC glue, the
   request-path metric families, and its error type.
@@ -83,6 +82,7 @@ controller's under `kinference_controller::`.
 | `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
 | `fleet::profile` | the profile tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
 | `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
+| `fleet::start` | `Fleet`: builds the shared state, the coordinator and the pool manager, materializes the config-declared worker sets and runs the coordinator; `FleetHandles`, what the router and the control plane read |
 | `fleet::sync` | lock helpers that recover from poisoning |
 | `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
 | `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the `PushBody` drain with its idle budget, and the buffer metrics |
@@ -106,10 +106,10 @@ controller's under `kinference_controller::`.
 | `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile; each over `controller::api` |
 | `controller::start` | `start`: connects, then runs the worker-set watch or the reap sweep, the CRD watch, the elector and the writers; `Controller`, whose `shutdown` waits for the Lease to be vacated |
 | `controller::sync` | lock helpers that recover from poisoning |
-| `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api` |
+| `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api`; `spawn`, which the server starts it with |
 | `config` | `Config`: load, validation, and the one read of the environment at startup |
 | `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
-| `server` | `run`: config, wiring and shutdown |
+| `server` | `run`: load the config, build the fleet, build the router, start the control plane and the admin listener, serve, shut down |
 | `version` | the build version string |
 
 `src/bin/compute_hash.rs` is a developer tool, not a module of the crate.
