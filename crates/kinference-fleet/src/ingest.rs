@@ -4,7 +4,7 @@
 //! parses vLLM's wire-format events through `dynamo_kv_router::zmq_wire`, and
 //! feeds them into the pool's `KvIndexer` (radix tree) and our bookkeeping
 //! (`InflightPrefixes`, `FleetMetrics`, `WorkerRegistry`), all reached
-//! through the [`WorkerContext`], in [`apply_frame`].
+//! through the [`WorkerContext`], in `apply_frame`.
 //!
 //! Modelled after dynamo's `standalone_indexer` listener
 //! (`lib/kv-router/src/standalone_indexer/listener.rs`): the SUB socket and
