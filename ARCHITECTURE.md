@@ -1,141 +1,223 @@
 # Architecture
 
-kinference picks the endpoint that serves an LLM request fastest. It reads
-each worker's KV-cache events and engine metrics, scores the workers for a
-request, and hands the gateway the winner. Kubernetes custom resources
-layer routing policy on top.
+kinference picks the endpoint that serves an LLM request fastest. A gateway
+streams it the request body and asks for a pick. kinference tokenizes the
+prompt, matches its prefix against the blocks each worker has cached, reads
+each worker's load from the last metrics scrape, predicts a wait time per
+worker, and hands back the winner. If the request named an `InferencePool`,
+the pool's `InferencePolicy` narrows and ranks the candidates first, and the
+winner may be an off-cluster provider. The caller reports first and final
+token later, which closes the pick's in-flight state and leaves a row for
+tuning the predictor. A control plane watches the custom resources, turns
+worker sets into pools, writes their status, and elects one replica to do
+the writing.
 
-This page says how the code is grouped, which way imports go, and where new
-code goes. Change it in the same pull request as any move.
+This page is the map: where code lives, which way imports go, what must
+stay true, and where new code goes. Change it in the same pull request as
+any move.
 
-## Crates
+## Vocabulary
 
-- `kinference`, this crate. The server: wiring, config assembly, the
-  admin listener and the metrics exposition.
-- `kinference-policy`, in `crates/kinference-policy`. Ids, CRD types, pure
-  policy logic and the policy snapshot holder. No client and no runtime.
-- `kinference-fleet`, in `crates/kinference-fleet`. Which workers exist
-  and what state they are in. Imports `kinference-policy` only; no `kube`,
-  no `anyhow`.
-- `kinference-router`, in `crates/kinference-router`. The request path.
-  Imports `kinference-fleet` and `kinference-policy`; no `kube`, no
-  `axum`, no `anyhow`.
-- `kinference-controller`, in `crates/kinference-controller`. The
-  Kubernetes control plane. Imports `kinference-fleet` and
-  `kinference-policy`, never the router; the one crate that depends on
-  `kube`; no `anyhow`.
-- `kinfctl`, in `crates/kinfctl`. The CLI. Imports `kinference-policy`
-  only.
+- Worker: one engine process, vLLM or SGLang. It exposes `/metrics` and
+  `/v1/models` over HTTP and publishes KV-cache events over ZMQ.
+- Worker set: a group of workers with one block size and one profile,
+  declared as an `InferenceWorkerSet` or in the config. Both resolve to a
+  `PoolSpec`.
+- Pool: the runtime state of exactly one worker set. Its radix tree, its
+  worker registry, its in-flight bookkeeping and the lock that serializes
+  commits. Pools are never merged; one pick may score several.
+- Profile: the tuning a pool carries. Predictor coefficients, picker policy
+  and the tokenize mode. Named in the config, referenced by worker sets.
+- Block: a fixed run of tokens, the worker set's `kvBlockSize`. Engines
+  publish cache events per block, so it is the unit of prefix matching.
+- Index: the radix tree of blocks each worker has cached, built from the
+  KV events. One per pool.
+- Pick: one routing decision. The body in, an endpoint and a request id out.
+- In-flight: picks dispatched but not yet observed, and prefixes dispatched
+  but not yet in the index. Both credit a worker before the engine reports.
+- Observation: what a pick leaves behind until the caller reports. Finishing
+  it releases the in-flight state and writes the predicted-versus-observed
+  CSV row.
+- `InferencePool`: the resource naming the destinations a route may reach
+  and the policy that chooses among them. Not a pool.
+- Provider: an off-cluster destination, an `InferenceProvider`. The caller
+  dials it; kinference learns its health only from what the caller reports.
+- Snapshot: the resolved view of pools, worker sets, providers and compiled
+  policies. The controller publishes it, the router and the admin API read
+  it.
+- `BackendBinding`: the object the controller writes per `InferencePool`, so
+  the gateway can resolve a backend reference it has no schema for.
+- Leader: the one replica that writes status and bindings. Every replica
+  routes.
 
-## Groups
+## Entry points
 
-A module belongs to one group. A group is a directory under `src`, or a
-crate under `crates` once it has moved. Its `<group>.rs` or `lib.rs` lists the
-modules and holds nothing else beyond re-exports.
+- `server::run`, in `src/server.rs`. The binary. It loads the config, makes
+  the one metrics registry, builds the fleet, starts the router, starts the
+  fleet, starts the control plane, spawns the admin listener, serves gRPC
+  until a signal, then cancels and waits for the control plane.
+- `Fleet::new` and `Fleet::start`, `KinferenceService::start` and
+  `controller::start`. The three subsystems, each built once from the
+  server's settings and a struct of shared handles.
+- `router::grpc`, the `Picker` handlers. `lifecycle::pick_and_record` is
+  the pick itself, five typed steps.
+- `crates/kinfctl/src/main.rs`, the CLI. It reads manifests and runs the
+  policy crate's checks with no cluster.
+- `crates/kinference-router/proto/kinference.proto`, the wire contract.
+  Its header documents the per-request flow and the error model.
 
-- Fleet, `crates/kinference-fleet`. Which workers exist and what state they are in.
-  Pools, the worker registry, the discovery factory and its config,
-  the coordinator that adds and evicts workers, the scrape of engine
-  metrics, the ZMQ ingest of KV-cache events, the in-flight state, the
-  collector behind the fleet gauges, the fleet's own metric families, its
-  error type, and `start`, the one call the server builds and starts it
-  with.
-- Router, `crates/kinference-router`. The request path. The service, scoring, the
-  picker, the body store, the tokenizer, observations, the gRPC glue, the
-  request-path metric families, and its error type.
-- Controller, `crates/kinference-controller`. The Kubernetes control
-  plane. The API server trait and its client, the CRD watch and its
-  snapshot, the status and binding writers, the worker-set reconcile,
-  leader election, EndpointSlice discovery, the control plane's metric
-  families, its error type, and `start`, the one call the server makes.
-- Operator surface, the top of `src`. Config, wiring, the admin
-  listener, the Prometheus exposition, and the version string.
+## Code map
 
-## Import direction
+One crate per concern. Each crate's `lib.rs` lists its modules and what
+they own; this map stays at the crate level.
 
-Imports point down, never up or sideways:
+### `kinference-policy`, in `crates/kinference-policy`
+
+The ids, the CRD types, and everything about routing policy that can be
+computed without a cluster: the predicate grammar, compiling an
+`InferencePolicy` once per revision, resolving the resources into the
+snapshot, candidate generation and selection, the explain trace, the lint
+and the manifest checks behind `kinfctl check`. It also holds the snapshot
+store the controller fills and the router reads.
+
+**Invariant.** No client, no runtime, no I/O. `resolve` is a pure function
+over the CRD contents, so the router's watcher and `kinfctl` reach the same
+answer from the same inputs.
+
+### `kinference-fleet`, in `crates/kinference-fleet`
+
+Which workers exist and what state they are in. Pools and the pool
+manager, the worker registry, the model index, the coordinator that takes
+discovery and eviction events, the scrape of engine metrics, the ZMQ ingest
+of KV events, the in-flight trackers and the fleet's gauges.
+
+**Invariants.** The fleet never holds a Kubernetes client: discovery is a
+task the server supplies through a factory. Fleet-wide state is keyed by
+worker id, and the first pool to register a worker owns it. Pools are
+independent, with no shared radix trees.
+
+### `kinference-router`, in `crates/kinference-router`
+
+The request path. The gRPC glue, the body store that holds bodies between
+push and pull, the tokenizer, scoring, the policy driver, the picker, the
+pick lifecycle and the observations a pick leaves behind.
+
+**Invariants.** The picker is pure: it takes inputs already fetched and
+returns a ranking. `grpc` maps proto types to service calls and holds no
+logic. Only `commit` writes state, under the pool's pick lock. Policy
+ranking holds no pool lock.
+
+### `kinference-controller`, in `crates/kinference-controller`
+
+The Kubernetes control plane. The CRD watch that feeds the snapshot, the
+worker-set reconcile that turns `InferenceWorkerSet`s into pools, the status
+and binding writers, leader election over a Lease, and the EndpointSlice
+discovery the fleet runs.
+
+**Invariants.** The one crate that depends on `kube`. Everything that talks
+to the API server goes through `api::ApiServer`, which has a live
+implementation and a recorded one for tests. Only the leader writes.
+
+### `kinference`, the server crate at the top of `src`
+
+The operator surface: the config and its validation, the wiring in
+`server`, the admin listener with `/readyz`, `/metrics` and the read-only
+policy API, the Prometheus exposition and the version string.
+
+**Invariant.** The only crate that reads the environment, and only at
+startup. The only crate that uses `anyhow`.
+
+### `kinfctl`, in `crates/kinfctl`
+
+The CLI. It imports `kinference-policy` and nothing else of ours.
+
+### Import direction
+
+Imports point down, never up or sideways.
 
 - `kinference-policy` imports nothing of ours.
 - The fleet imports `kinference-policy`.
 - The router imports the fleet and `kinference-policy`.
-- The controller imports the fleet and `kinference-policy`. Never the
+- The controller imports the fleet and `kinference-policy`, never the
   router.
-- The operator surface imports all of the above.
+- The server crate imports all of the above.
 
-## Module map
+`kube`, `reqwest`, `tonic`, `axum` and `zmq` stay at the edges. Decision
+logic takes data and returns data.
 
-Rows name a module by its group; in code the fleet's are under
-`kinference_fleet::`, the router's under `kinference_router::` and the
-controller's under `kinference_controller::`.
+## Cross-cutting concerns
 
-| Module | Owns |
-| --- | --- |
-| `fleet::coordinator` | the worker lifecycle: the loop that takes discovery and eviction events, add, evict and drop, and the pool hooks that start and stop a pool's discovery |
-| `fleet::discovery` | the discovery config types, `WorkerChange`, and the factory the server supplies for Kubernetes discovery |
-| `fleet::error` | `Error`, the fleet's error type |
-| `fleet::eviction` | the channel that asks the coordinator to drop a worker |
-| `fleet::gauges` | the Prometheus collector for the fleet gauges: worker health and saturation computed at gather, the index size from a tree dump at most once every 10s |
-| `fleet::inflight` | per-endpoint picks not yet observed, and prefixes dispatched but not yet in the KV index |
-| `fleet::ingest` | the ZMQ KV-event listener per worker, replay, and block-size checks |
-| `fleet::metrics` | `FleetMetrics`, the fleet's Prometheus families, and the helpers every group registers its families with |
-| `fleet::models` | `ModelIndex`: which pools serve each model, and the stream of new claims |
-| `fleet::pool` | `Pool`, the runtime instance of one worker set; `WorkerContext`, the handles one worker's tasks share; `PoolRegistry`; `PoolManager`: create, update, retire, reap |
-| `fleet::profile` | the profile tuning a pool carries: predictor coefficients, picker policy and the tokenize mode |
-| `fleet::scrape` | the scrape of worker `/metrics` and `/v1/models`, and the registry of samples |
-| `fleet::start` | `Fleet`: builds the shared state, the coordinator and the pool manager, materializes the config-declared worker sets and runs the coordinator; `FleetHandles`, what the router and the control plane read |
-| `fleet::sync` | lock helpers that recover from poisoning |
-| `fleet::workers` | `WorkerRegistry`: per-worker entries, served models, readiness |
-| `router::body_store` | `BodyStore`: request bodies held between `PushBody` and `PullBody`, with byte budgets and a TTL; `Bodies`, the service's part: the store, the `PushBody` drain with its idle budget, and the buffer metrics |
-| `router::error` | `Error`, the router's error type |
-| `router::grpc` | the `Picker` gRPC service and `server`, the tonic service over it; maps proto types to service calls |
-| `router::metrics` | `RouterMetrics`, the request-path families, the tenant label policy and its `metrics` config |
-| `router::observations` | `Observations`, the service's part: per-pick state kept until the caller reports, request labels, the CSV row and the CSV sink, and the provider feedback the caller reports |
-| `router::pick_body` | rewrites of the request body that `PullBody` serves |
-| `router::picker` | the wait-time predictor and the top-K picker; pure functions |
-| `router::proto` | the generated tonic types for `kinference.v1` |
-| `router::service` | `KinferenceService` and its parts: `Scoring` (the pools, the model index and the scrape reads), `Bodies`, `Observations`, the pick path and the policy driver; `start`, which builds the service from the server's settings and handles and runs its sweeps |
-| `router::tokenizer` | the `Tokenizer` trait, the request and outcome types, the `tokenize` config, and `ByMode`, which picks a backend by the pool's mode and records the tokenize metrics |
-| `router::tokenizer::compare` | `Compare`: `/render` is authoritative; the local result is compared in the background for the divergence counters |
-| `router::tokenizer::http` | `HttpRender`: vLLM's `/render`, a dedicated URL or the pool's workers in turn |
-| `router::tokenizer::local` | `LocalTokenizer`: in-process tokenizers, chat templates, the warm-up that follows the model index, and the fallback to `/render` |
-| `controller::api` | `ApiServer`, the one door to the API server: watch, list, get, create, replace, apply, delete, patch status; `KubeApi` over a `kube::Client`, and in tests `Recorded`, the same over objects the test supplies |
-| `controller::error` | `Error`, the control plane's error type |
-| `controller::discovery` | `KubeDiscovery`: the EndpointSlice watch that turns a Service's Ready endpoints into workers; `factory`, which binds the in-cluster client into the fleet's discovery factory |
-| `controller::leader` | Lease-based leader election |
-| `controller::metrics` | `ControllerMetrics`: worker-set rejections, the leader gauge, policy warning counts |
-| `controller::policy` | the CRD watch, which publishes into `kinference_policy::store`; the status writer, the binding writer, the worker-set reconcile; each over `controller::api` |
-| `controller::start` | `start`: connects, then runs the worker-set watch or the reap sweep, the CRD watch, the elector and the writers; `Controller`, whose `shutdown` waits for the Lease to be vacated |
-| `controller::sync` | lock helpers that recover from poisoning |
-| `admin` | `/readyz`, `/metrics`, and the read-only policy API under `/api`; `spawn`, which the server starts it with |
-| `config` | `Config`: load, validation, and the one read of the environment at startup |
-| `metrics` | the one Prometheus registry, with `build_info`, and the text exposition over it |
-| `server` | `run`: load the config, build the fleet, build the router, start the control plane and the admin listener, serve, shut down |
-| `version` | the build version string |
+### Configuration
 
-`src/bin/compute_hash.rs` is a developer tool, not a module of the crate.
+One `Config`, loaded and validated at startup in the server crate's
+`config`. Each subsystem's settings are a struct next to the code that
+reads them; `config` assembles and checks them. Nothing reads an
+environment variable after startup.
+
+### Errors
+
+Each library crate has its own `Error` enum, written by hand. `anyhow` is
+used only by the binary, where it adds context and exits.
+
+### Metrics
+
+The server creates the one Prometheus registry and lends it to each crate.
+Each crate has a metrics struct that registers its own families through the
+helpers in `fleet::metrics`, and records them where the event happens. Names
+start with `kinference_`. The admin listener renders the registry; it owns
+no family of its own beyond `build_info`.
+
+### Locking
+
+Standard mutexes, taken through the poison-recovering helpers in
+`fleet::sync` and `controller::sync`. Every guarded map changes by single
+inserts and removes or by whole-value swaps, so a panic elsewhere cannot
+leave it torn, and stale-but-whole data beats cascading the panic. The pool's
+pick lock is the one critical section on the request path.
+
+### Shutdown and leadership
+
+One `CancellationToken`, created in `server` and cloned into every task.
+SIGTERM or SIGINT stops the gRPC server, then the token is cancelled, then
+the control plane is given a bounded moment to vacate its Lease so the peer
+takes over at once. Leadership gates only the status and binding writers;
+routing never waits on it.
+
+### Observability
+
+Structured logs through `tracing`, filtered by `RUST_LOG`. Metrics as above.
+The observations CSV, one row per pick with the predicted and observed
+times, is the input for refitting the predictor.
+
+### Testing
+
+Unit tests sit next to the module in a sibling `tests.rs`. The controller
+tests run against `api::Recorded`, which answers from objects the test
+supplies, so no test needs a cluster. The router's tokenizer and service
+have `test_support` modules for the same reason. `tests/fake_vllm.py`
+publishes KV events for local runs, and `tests/e2e/smoke.sh` runs the real
+engine with dummy weights on a kind cluster.
 
 ## Where new code goes
 
 - A new signal for scoring. Collect it in the fleet, in `scrape` or
-  `ingest`. Store it in the registry. Read it in the router's scoring.
-  The picker stays pure: it takes inputs that are already fetched.
-- A new RPC or proto field. `crates/kinference-router/proto/kinference.proto`, then
-  `router::grpc` maps it to a service call. No logic in `grpc`.
-- A new metric. Add it to the metrics struct of the group where the
-  event happens, through the helpers in `fleet::metrics`. Record it there.
-  The server only lends the registry and renders it.
-- A new config setting. The config struct of the subsystem that reads
-  it, next to that code. Validate it in `config`. Give it a type, not a
-  raw string. Read the environment only in `config`, at startup.
+  `ingest`. Store it in the registry. Read it in the router's scoring. The
+  picker stays pure.
+- A new RPC or proto field. The proto, then `router::grpc` maps it to a
+  service call. No logic in `grpc`.
+- A new metric. The metrics struct of the crate where the event happens,
+  through the helpers in `fleet::metrics`. Record it there.
+- A new config setting. The config struct of the subsystem that reads it,
+  next to that code. Validate it in `config`. Give it a type, not a raw
+  string.
 - A new CRD field or policy rule. Types and pure logic in
   `kinference-policy`. The controller writes the status. The router reads
   the snapshot. `kinfctl` gets it for free.
-- A new engine kind. Metric names in `scrape`, event parsing in
-  `ingest`.
-- A new admin endpoint. `admin`. It reads snapshots. It never writes
-  router state.
+- A new engine kind. Metric names in `scrape`, event parsing in `ingest`.
+- A new admin endpoint. `admin`. It reads snapshots. It never writes router
+  state.
 - Anything that talks to the API server. The controller, through
-  `controller::api::ApiServer`; never a `kube::Api` of its own.
+  `api::ApiServer`; never a `kube::Api` of its own.
 
 ## Rules for a move
 
@@ -146,6 +228,5 @@ controller's under `kinference_controller::`.
 - No constructor takes more than six arguments. Group the handles in a
   struct built once in `server`.
 - A trait only where two implementations exist.
-- `kube`, `reqwest`, `tonic`, `axum` and `zmq` stay at the edges. Decision
-  logic takes data and returns data.
-- Nothing reads an env var after startup.
+- A module's `//!` header says what it owns and the one rule a caller must
+  respect. The crate's `lib.rs` lists its modules in a line each.
