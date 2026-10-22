@@ -14,7 +14,8 @@ the writing.
 
 This page is the map: where code lives, which way imports go, what must
 stay true, and where new code goes. Change it in the same pull request as
-any move.
+any move. For the dynamics, one request step by step, read
+[docs/request-flow.md](docs/request-flow.md).
 
 ## Vocabulary
 

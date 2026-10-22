@@ -39,6 +39,8 @@ Read in this order if you are new to the code.
 
 - [Architecture](ARCHITECTURE.md): the map. Vocabulary, entry points, what
   each crate owns and the rules that hold across them.
+- [Request flow](docs/request-flow.md): boot, one pick end to end, and
+  the loops that keep the fleet and the policy current.
 - [Contributing](CONTRIBUTING.md): style, commits, running the tests.
 
 ## kinfctl
