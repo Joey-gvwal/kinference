@@ -5,13 +5,10 @@
 # (`gateway.linkerd.io/v1alpha1`, shipped in its Helm chart) — a cluster
 # without the gateway installed cannot take this object.
 #
-# Namespace matters twice over: the gateway resolves the reference in the
-# BINDING's namespace, and a binding lives in its pool's namespace — so this
-# has to sit alongside the pools. It is created in the release namespace only,
-# which covers the default (`config.policy.namespace` is the release
-# namespace).
-# If policy watches other namespaces, create the Extension in each of them
-# yourself.
+# Every BackendBinding names this object with its namespace, so one object
+# serves pools in any namespace. The gateway honors a reference from another
+# namespace only because allowedReferences admits it; the config below holds
+# no secret, so admitting every namespace exposes nothing.
 apiVersion: gateway.linkerd.io/v1alpha1
 kind: Extension
 metadata:
@@ -21,6 +18,9 @@ metadata:
     {{- include "kinference.labels" . | nindent 4 }}
 spec:
   class: kinference_selector
+  allowedReferences:
+    namespaces:
+      from: All
   config:
     # Past one replica this needs a per-pod DNS name or shared picker state;
     # see the scaling checklist in templates/deployment.yaml.
