@@ -213,7 +213,7 @@ pub async fn start(
             api,
             cfg.policy.namespace.clone(),
             store,
-            cfg.policy.binding_extension().map(str::to_string),
+            cfg.policy.binding_extension(),
             leader_rx,
         );
         tokio::spawn(async move { binding.run(cancel).await });

@@ -10,8 +10,17 @@ use kinference_policy::crd::{Condition, IntOrString};
 use kinference_policy::engine::ObjectKey;
 use kinference_policy::resolve::{ResolvedProvider, ResolvedWorkerSet};
 
-/// The default picker extension name.
-const EXT: Option<&str> = Some("chat-picker");
+/// The default picker extension, in the binding's own namespace.
+fn ext() -> Option<ExtensionReference> {
+    Some(ext_ref("chat-picker", None))
+}
+
+fn ext_ref(name: &str, namespace: Option<&str>) -> ExtensionReference {
+    ExtensionReference {
+        name: name.into(),
+        namespace: namespace.map(String::from),
+    }
+}
 
 fn ws(name: &str, service: &str, namespace: &str) -> ResolvedDestination {
     ws_port(name, service, namespace, None)
@@ -70,7 +79,7 @@ fn index() -> ServiceIndex {
 }
 
 /// `desired_binding` against that index, asserting nothing was omitted.
-fn desired(pool: &ResolvedPool, extension: Option<&str>) -> BackendBinding {
+fn desired(pool: &ResolvedPool, extension: Option<&ExtensionReference>) -> BackendBinding {
     let d = desired_binding(pool, extension, &index());
     assert!(d.omitted.is_empty(), "fixture ports: {:?}", d.omitted);
     d.binding
@@ -106,7 +115,7 @@ fn pool(dests: Vec<ResolvedDestination>) -> ResolvedPool {
 /// The claim is what a route's `InferencePool` backendRef is matched against.
 #[test]
 fn claims_the_pool_by_group_kind_name() {
-    let b = desired(&pool(vec![]), EXT);
+    let b = desired(&pool(vec![]), ext().as_ref());
     assert_eq!(b.spec.claim.group, "kinference.buoyant.io");
     assert_eq!(b.spec.claim.kind, "InferencePool");
     assert_eq!(b.spec.claim.name, "chat");
@@ -118,7 +127,10 @@ fn claims_the_pool_by_group_kind_name() {
 /// A worker set becomes its Service, on the port the Service exposes.
 #[test]
 fn worker_set_becomes_a_service_ref_on_its_service_port() {
-    let b = desired(&pool(vec![ws("workers-h100", "vllm-h100", "infra")]), EXT);
+    let b = desired(
+        &pool(vec![ws("workers-h100", "vllm-h100", "infra")]),
+        ext().as_ref(),
+    );
     assert_eq!(b.spec.backend_refs.len(), 1);
     let r = &b.spec.backend_refs[0];
     // The entry name is the destination's.
@@ -147,7 +159,7 @@ fn a_named_service_ref_port_resolves_to_its_number() {
         "infra",
         Some(IntOrString::Str("http".into())),
     )]);
-    let d = desired_binding(&p, EXT, &idx);
+    let d = desired_binding(&p, ext().as_ref(), &idx);
     assert!(d.omitted.is_empty());
     // 80, the Service port, not the pod's target port.
     assert_eq!(d.binding.spec.backend_refs[0].target.port, Some(80));
@@ -167,7 +179,7 @@ fn a_cross_namespace_port_is_read_from_the_targets_own_namespace() {
         "gpu",
         Some(IntOrString::Str("http".into())),
     )]);
-    let d = desired_binding(&p, EXT, &idx);
+    let d = desired_binding(&p, ext().as_ref(), &idx);
     let r = &d.binding.spec.backend_refs[0];
     assert_eq!(r.target.namespace.as_deref(), Some("gpu"));
     assert_eq!(r.target.port, Some(9000));
@@ -186,7 +198,7 @@ fn a_destination_whose_port_does_not_resolve_is_omitted_with_its_reason() {
     // Two ports and no name: ambiguous, so kinference won't guess.
     let d = desired_binding(
         &pool(vec![ws("workers-h100", "vllm-h100", "infra")]),
-        EXT,
+        ext().as_ref(),
         &idx,
     );
     assert!(d.binding.spec.backend_refs.is_empty());
@@ -210,7 +222,7 @@ fn a_destination_whose_port_does_not_resolve_is_omitted_with_its_reason() {
             Some(IntOrString::Str("http".into())),
         ),
     ]);
-    let d = desired_binding(&p, EXT, &idx);
+    let d = desired_binding(&p, ext().as_ref(), &idx);
     assert!(d.binding.spec.backend_refs.is_empty());
     assert_eq!(
         d.omitted,
@@ -233,7 +245,7 @@ fn an_omitted_destination_leaves_the_rest_of_the_binding_intact() {
         ws("workers-a100", "vllm-a100", "infra"),
         provider("openai", "infra", "openai-backend"),
     ]);
-    let d = desired_binding(&p, EXT, &idx);
+    let d = desired_binding(&p, ext().as_ref(), &idx);
     let names: Vec<&str> = d
         .binding
         .spec
@@ -253,7 +265,7 @@ fn an_unlisted_index_omits_every_service_ref() {
         ws("workers-h100", "vllm-h100", "infra"),
         provider("openai", "infra", "openai-backend"),
     ]);
-    let d = desired_binding(&p, EXT, &ServiceIndex::unlisted());
+    let d = desired_binding(&p, ext().as_ref(), &ServiceIndex::unlisted());
     // Providers don't need a Service.
     assert_eq!(d.binding.spec.backend_refs.len(), 1);
     assert_eq!(d.binding.spec.backend_refs[0].name, "openai");
@@ -268,7 +280,7 @@ fn an_unlisted_index_omits_every_service_ref() {
 fn provider_becomes_a_gateway_backend_ref() {
     let b = desired(
         &pool(vec![provider("openai", "infra", "openai-backend")]),
-        EXT,
+        ext().as_ref(),
     );
     let r = &b.spec.backend_refs[0];
     assert_eq!(r.name, "openai");
@@ -287,7 +299,7 @@ fn only_cross_namespace_targets_carry_a_namespace() {
             ws("remote", "vllm-a100", "gpu"),
             provider("openai", "vendors", "openai-backend"),
         ]),
-        EXT,
+        ext().as_ref(),
     );
     assert_eq!(b.spec.backend_refs[0].target.namespace, None);
     assert_eq!(
@@ -309,7 +321,7 @@ fn both_classes_share_one_ordered_list() {
             provider("openai", "infra", "openai-backend"),
             ws("workers-a100", "vllm-a100", "infra"),
         ]),
-        EXT,
+        ext().as_ref(),
     );
     let names: Vec<&str> = b
         .spec
@@ -323,14 +335,14 @@ fn both_classes_share_one_ordered_list() {
 /// A pool with no resolved destinations still gets an empty binding.
 #[test]
 fn a_pool_with_no_resolved_destination_still_gets_a_binding() {
-    let b = desired(&pool(vec![]), EXT);
+    let b = desired(&pool(vec![]), ext().as_ref());
     assert!(b.spec.backend_refs.is_empty());
 }
 
 /// The binding is owned by its pool and labeled as ours.
 #[test]
 fn labels_and_owner_reference_mark_the_binding_as_ours() {
-    let b = desired(&pool(vec![]), EXT);
+    let b = desired(&pool(vec![]), ext().as_ref());
     assert!(is_ours(&b));
     assert_eq!(b.labels().get(POOL_LABEL).map(String::as_str), Some("chat"));
     let owner = &b.metadata.owner_references.as_ref().unwrap()[0];
@@ -345,14 +357,14 @@ fn labels_and_owner_reference_mark_the_binding_as_ours() {
 fn a_pool_without_a_uid_gets_no_owner_reference() {
     let mut p = pool(vec![]);
     p.uid = None;
-    let b = desired(&p, EXT);
+    let b = desired(&p, ext().as_ref());
     assert!(b.metadata.owner_references.is_none());
 }
 
 /// An object without our label is someone else's, whatever it claims.
 #[test]
 fn an_unlabelled_binding_is_not_ours() {
-    let mut b = desired(&pool(vec![]), EXT);
+    let mut b = desired(&pool(vec![]), ext().as_ref());
     b.metadata.labels = None;
     assert!(!is_ours(&b));
 }
@@ -360,16 +372,22 @@ fn an_unlabelled_binding_is_not_ours() {
 /// Equal specs compare in sync, so the writer doesn't patch every tick.
 #[test]
 fn identical_bindings_are_in_sync() {
-    let want = desired(&pool(vec![ws("workers-h100", "vllm-h100", "infra")]), EXT);
+    let want = desired(
+        &pool(vec![ws("workers-h100", "vllm-h100", "infra")]),
+        ext().as_ref(),
+    );
     assert!(in_sync(&want.clone(), &want));
 }
 
 /// ...and a drifted one doesn't, in either direction.
 #[test]
 fn drift_is_not_in_sync() {
-    let want = desired(&pool(vec![ws("workers-h100", "vllm-h100", "infra")]), EXT);
+    let want = desired(
+        &pool(vec![ws("workers-h100", "vllm-h100", "infra")]),
+        ext().as_ref(),
+    );
 
-    let fewer = desired(&pool(vec![]), EXT);
+    let fewer = desired(&pool(vec![]), ext().as_ref());
     assert!(!in_sync(&fewer, &want));
 
     let mut edited = want.clone();
@@ -378,14 +396,14 @@ fn drift_is_not_in_sync() {
 
     // An extension added out of band is drift too.
     let mut extended = want.clone();
-    extended.spec.extensions = vec!["kinference-selector".into()];
+    extended.spec.extensions = vec![ext_ref("kinference-selector", None)];
     assert!(!in_sync(&extended, &want));
 }
 
 /// Owners compare by UID, since a recreated pool keeps its name.
 #[test]
 fn an_owner_reference_to_a_dead_pool_is_not_in_sync() {
-    let want = desired(&pool(vec![]), EXT);
+    let want = desired(&pool(vec![]), ext().as_ref());
     let mut stale = want.clone();
     stale.metadata.owner_references.as_mut().unwrap()[0].uid = "older-pool-uid".into();
     assert!(!in_sync(&stale, &want));
@@ -394,7 +412,7 @@ fn an_owner_reference_to_a_dead_pool_is_not_in_sync() {
 /// Fields kinference does not set are not compared.
 #[test]
 fn foreign_metadata_does_not_count_as_drift() {
-    let want = desired(&pool(vec![]), EXT);
+    let want = desired(&pool(vec![]), ext().as_ref());
     let mut annotated = want.clone();
     annotated.metadata.annotations = Some(BTreeMap::from([(
         "example.com/owner".to_string(),
@@ -412,11 +430,28 @@ fn foreign_metadata_does_not_count_as_drift() {
 /// The binding lists the picker extension.
 #[test]
 fn the_configured_extension_is_listed() {
-    let b = desired(&pool(vec![]), EXT);
-    assert_eq!(b.spec.extensions, ["chat-picker"]);
+    let b = desired(&pool(vec![]), ext().as_ref());
+    assert_eq!(b.spec.extensions, [ext_ref("chat-picker", None)]);
 
-    let renamed = desired(&pool(vec![]), Some("infra-picker"));
-    assert_eq!(renamed.spec.extensions, ["infra-picker"]);
+    let renamed = desired(&pool(vec![]), Some(&ext_ref("infra-picker", None)));
+    assert_eq!(renamed.spec.extensions, [ext_ref("infra-picker", None)]);
+}
+
+/// An extension in another namespace is named with it; one in the pool's
+/// namespace is written without, so equivalent bindings compare equal.
+#[test]
+fn the_extension_namespace_is_written_only_when_it_differs() {
+    let elsewhere = desired(
+        &pool(vec![]),
+        Some(&ext_ref("chat-picker", Some("kinference"))),
+    );
+    assert_eq!(
+        elsewhere.spec.extensions,
+        [ext_ref("chat-picker", Some("kinference"))]
+    );
+
+    let beside = desired(&pool(vec![]), Some(&ext_ref("chat-picker", Some("infra"))));
+    assert_eq!(beside.spec.extensions, [ext_ref("chat-picker", None)]);
 }
 
 /// A cleared extension lists none, for routes carrying their own
@@ -431,7 +466,7 @@ fn no_configured_extension_lists_none() {
 #[test]
 fn a_blank_configured_name_is_no_extension() {
     let cfg = crate::policy::PolicyConfig::default();
-    assert_eq!(cfg.binding_extension(), Some("chat-picker"));
+    assert_eq!(cfg.binding_extension(), ext());
 
     let cleared = crate::policy::PolicyConfig {
         backend_binding_extension: "  ".into(),
@@ -440,11 +475,30 @@ fn a_blank_configured_name_is_no_extension() {
     assert_eq!(cleared.binding_extension(), None);
 }
 
+/// A configured namespace is carried; a blank one reads as the binding's own.
+#[test]
+fn the_configured_extension_namespace_is_carried() {
+    let cfg = crate::policy::PolicyConfig {
+        backend_binding_extension_namespace: Some("kinference".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        cfg.binding_extension(),
+        Some(ext_ref("chat-picker", Some("kinference")))
+    );
+
+    let blank = crate::policy::PolicyConfig {
+        backend_binding_extension_namespace: Some(" ".into()),
+        ..Default::default()
+    };
+    assert_eq!(blank.binding_extension(), ext());
+}
+
 /// Renaming the extension registers as drift on existing bindings.
 #[test]
 fn a_changed_extension_is_drift() {
-    let want = desired(&pool(vec![]), EXT);
-    let stale = desired(&pool(vec![]), Some("infra-picker"));
+    let want = desired(&pool(vec![]), ext().as_ref());
+    let stale = desired(&pool(vec![]), Some(&ext_ref("infra-picker", None)));
     assert!(!in_sync(&stale, &want));
     // And so does clearing it.
     let cleared = desired(&pool(vec![]), None);
@@ -465,7 +519,7 @@ fn condition(status: &str) -> Condition {
 /// Only an explicit `Accepted=False` counts as a rejection.
 #[test]
 fn only_a_false_accepted_condition_reads_as_rejected() {
-    let mut b = desired(&pool(vec![]), EXT);
+    let mut b = desired(&pool(vec![]), ext().as_ref());
     assert_eq!(
         rejected_reason(&b),
         None,
@@ -552,13 +606,7 @@ fn writer_over(api: &Recorded) -> BindingWriter<Recorded> {
     store.publish(listed_snapshot());
     let (tx, rx) = watch::channel(true);
     std::mem::forget(tx);
-    BindingWriter::new(
-        api.clone(),
-        Some("infra".into()),
-        store,
-        Some("chat-picker".into()),
-        rx,
-    )
+    BindingWriter::new(api.clone(), Some("infra".into()), store, ext(), rx)
 }
 
 fn chat() -> crate::api::recorded::Key {
@@ -593,7 +641,10 @@ async fn an_in_sync_binding_is_left_alone() {
 
 #[tokio::test]
 async fn a_binding_that_is_not_ours_is_never_adopted() {
-    let mut foreign = desired(listed_snapshot().lookup("infra", "chat").unwrap(), EXT);
+    let mut foreign = desired(
+        listed_snapshot().lookup("infra", "chat").unwrap(),
+        ext().as_ref(),
+    );
     foreign.metadata.labels = None;
     foreign.spec.extensions.clear();
     let api = Recorded::default().with([foreign]);
@@ -603,7 +654,10 @@ async fn a_binding_that_is_not_ours_is_never_adopted() {
 
 #[tokio::test]
 async fn an_orphaned_binding_of_ours_is_deleted() {
-    let mut orphan = desired(listed_snapshot().lookup("infra", "chat").unwrap(), EXT);
+    let mut orphan = desired(
+        listed_snapshot().lookup("infra", "chat").unwrap(),
+        ext().as_ref(),
+    );
     orphan.metadata.name = Some("gone".into());
     let api = Recorded::default().with([orphan]);
     writer_over(&api).reconcile_once().await.unwrap();

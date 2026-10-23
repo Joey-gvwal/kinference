@@ -966,10 +966,20 @@ pub struct BackendBindingSpec {
     pub claim: BindingClaim,
     /// What the claimed ref resolves to. Native kinds only.
     pub backend_refs: Vec<BindingBackendRef>,
-    /// `Extension` objects in the binding's namespace, prepended to the filter
-    /// chain of any rule whose ref this binding claims.
+    /// `Extension` objects prepended to the filter chain of any rule whose ref
+    /// this binding claims.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extensions: Vec<String>,
+    pub extensions: Vec<ExtensionReference>,
+}
+
+/// An `Extension` a binding lists. One in another namespace is used only if
+/// its `allowedReferences` admits the binding's namespace.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub struct ExtensionReference {
+    pub name: String,
+    /// Absent means the binding's own namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 /// The `(group, kind, name)` of the backendRef a binding answers for, held as
