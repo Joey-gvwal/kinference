@@ -165,7 +165,7 @@ config:
       # /v1/chat/completions/render for byte-perfect token IDs; ramp to
       # "compare" then "local" once parity is confirmed.
       tokenize:
-        mode: local
+        mode: render
 
   # EndpointSlice-discovered worker sets, in addition to the ones
   # `kubernetes` derives from InferenceWorkerSet CRs. None by default.
