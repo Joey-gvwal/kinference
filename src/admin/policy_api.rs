@@ -863,7 +863,7 @@ fn build_candidate(
             prefix_cache_hit_ratio: if is_local { hit_ratio } else { None },
             queued_prompts: if is_local { o.queued_prompts } else { None },
             kv_cache_usage: if is_local { o.kv_cache_usage } else { None },
-            model_name: Some(o.canonical_model.clone()),
+            model_names: vec![o.canonical_model.clone()],
             backend_name: Some(o.backend_name.clone()),
             backend_type: Some(if is_local { "Local" } else { "Provider" }.to_string()),
             backend_ready_endpoints: if is_local { ready_endpoints } else { None },

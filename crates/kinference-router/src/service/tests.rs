@@ -491,6 +491,114 @@ async fn an_unscraped_worker_has_no_saturation_signals() {
     assert_eq!(endpoint, "10.0.0.1:8000");
 }
 
+/// `policy_select` for `qwen` on worker set `qwen-ws`, which declares it with
+/// aliases `q` and `qwen-latest`. The request's `model` contains all three
+/// names, as when `pick_and_record` builds it.
+async fn select_aliased(
+    spec: serde_json::Value,
+) -> (TestService, Result<PolicySelection, PickAndRecordOutcome>) {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000", "10.0.0.2:8000"])
+        .alias("qwen-ws", "qwen", &["q", "qwen-latest"])
+        .policy(spec)
+        .build()
+        .await;
+    let pref = TestService::pool_ref();
+    let mut names = vec!["qwen".to_string()];
+    names.extend(t.svc.declared_aliases(Some(&pref), "qwen"));
+    assert_eq!(names, ["qwen", "q", "qwen-latest"], "the fixture's aliases");
+    let start = primary(
+        &t.pools[0],
+        "qwen",
+        &[("10.0.0.1:8000", 0), ("10.0.0.2:8000", 5)],
+    );
+    let spare = Some(ScoreInput {
+        input: Input::Messages(vec![serde_json::json!({"role": "user", "content": "hi"})]),
+        chat_extras: ChatExtras::default(),
+        raw_body: Some(b"{}".to_vec()),
+    });
+    let attrs = kinference_policy::predicate::RequestAttrs {
+        model: names,
+        ..Default::default()
+    };
+    let out = t
+        .svc
+        .policy_select(&pref, t.store(), Some(start), "qwen", spare, attrs, "test")
+        .await;
+    (t, out)
+}
+
+/// A model that has several names yields one candidate per endpoint, not one
+/// per name, so the router records each endpoint's prediction once.
+#[tokio::test]
+async fn an_aliased_model_is_one_candidate_per_endpoint() {
+    let (t, out) = select_aliased(serde_json::json!({"rules": []})).await;
+    let Ok(PolicySelection::Local { endpoint, .. }) = out else {
+        panic!("expected a local pick");
+    };
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    let metrics = t.metrics();
+    for worker in ["10.0.0.1:8000", "10.0.0.2:8000"] {
+        let line =
+            format!(r#"kinference_predicted_ttft_ms_count{{model="qwen",worker="{worker}"}} 1"#);
+        assert!(metrics.contains(&line), "missing `{line}`:\n{metrics}");
+    }
+}
+
+/// A `drop` on one alias removes the model under every name.
+#[tokio::test]
+async fn dropping_an_alias_drops_the_model_under_every_name() {
+    let (_, out) = select_aliased(serde_json::json!({"rules": [{"name": "no-q", "route": {
+        "exclude": [{"name": "q", "drop": {"model": {"name": "q"}}}],
+        "select": [{"minimize": "PredictedTTFT"}]}}]}))
+    .await;
+    assert!(
+        !matches!(out, Ok(PolicySelection::Local { .. })),
+        "every endpoint answers to `q`, so none is left to pick"
+    );
+}
+
+/// A provider that declares a model under two names yields one candidate, so a
+/// `drop` on either name removes the provider.
+#[tokio::test]
+async fn dropping_an_alias_drops_a_provider_model_under_every_name() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .provider(
+            "cloud",
+            serde_json::json!([{"name": "vendor/qwen", "aliases": ["qwen", "q"]}]),
+        )
+        .policy(
+            serde_json::json!({"rules": [{"name": "cloud-but-not-q", "route": {
+            "consider": [{"type": "Provider"}],
+            "exclude": [{"name": "q", "drop": {"model": {"name": "q"}}}],
+            "select": [{"order": ["cloud"]}]}}]}),
+        )
+        .build()
+        .await;
+    let start = primary(&t.pools[0], "qwen", &[("10.0.0.1:8000", 0)]);
+    let attrs = kinference_policy::predicate::RequestAttrs {
+        model: vec!["qwen".into(), "q".into()],
+        ..Default::default()
+    };
+    let out = t
+        .svc
+        .policy_select(
+            &TestService::pool_ref(),
+            t.store(),
+            Some(start),
+            "qwen",
+            None,
+            attrs,
+            "test",
+        )
+        .await;
+    assert!(
+        !matches!(out, Ok(PolicySelection::Provider(_))),
+        "the provider's one candidate answers to `q`, so it is dropped"
+    );
+}
+
 /// A service where `qwen` is served by worker set `qwen-ws` and by provider
 /// `cloud`, whose row names it `vendor/qwen`, after two picks for tenant
 /// `acme`: response 1 interactive, which is unmatched and stays local, and

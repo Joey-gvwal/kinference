@@ -31,7 +31,7 @@ fn local(backend: &str, model: &str, ttft: f32, queued: i64) -> Candidate {
             predicted_ttft_ms: ttft,
         },
         attrs: CandidateAttrs {
-            model_name: Some(model.to_string()),
+            model_names: vec![model.to_string()],
             backend_name: Some(backend.to_string()),
             backend_type: Some("Local".to_string()),
             predicted_ttft_ms: Some(ttft as f64),
@@ -54,7 +54,7 @@ fn provider(name: &str, model: &str, observed: Option<f32>) -> Candidate {
             observed_ttft_ms: observed,
         },
         attrs: CandidateAttrs {
-            model_name: Some(model.to_string()),
+            model_names: vec![model.to_string()],
             backend_name: Some(name.to_string()),
             backend_type: Some("Provider".to_string()),
             backend_observed_ttft_ms: observed.map(|v| v as f64),

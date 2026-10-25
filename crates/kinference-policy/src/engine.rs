@@ -34,7 +34,8 @@ use super::predicate::{CandidateAttrs, RequestAttrs};
 /// decision covers both which model serves the request and where it runs.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    /// Client-facing name, as the request asked for it.
+    /// Client-facing name: the first name that led to this candidate.
+    /// `attrs.model_names` holds every name that led to it.
     pub canonical_model: String,
     /// What the engine actually wants in the body. Differs from
     /// `canonical_model` when an alias resolved, and usually differs for a
@@ -251,8 +252,7 @@ pub fn matching_rules<'a>(
 /// Takes the request's whole model set (upstream plus every declared alias, as
 /// in `RequestAttrs::model`), so each destination can resolve it through its
 /// own alias table. Otherwise a provider spelling the model differently would
-/// never become a candidate. As a result, a local endpoint routable under three
-/// names yields three candidates that score identically.
+/// never become a candidate.
 pub fn models_to_score(route: &CompiledRoute, requested_models: &[String]) -> Vec<ScoreTarget> {
     let groups: Vec<&super::compile::CompiledConsiderGroup> = if route.consider.is_empty() {
         // Default: every name the request answers to, on every destination the

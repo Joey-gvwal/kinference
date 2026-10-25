@@ -121,6 +121,13 @@ impl KinferenceService {
             // spelling the model differently are reached.
             let targets = engine::models_to_score(route, &attrs.model);
             let mut candidates: Vec<engine::Candidate> = Vec::new();
+            // For each (destination, upstream), the indices of the candidates
+            // that the loop has built so far. All of the request's names lead to
+            // the same destinations, so a later name joins the candidates that
+            // already exist. A copy per name would record its prediction once
+            // per copy and tilt `tieBreak: Random` toward destinations with
+            // more aliases.
+            let mut built: HashMap<(CandidateDest, String), Vec<usize>> = HashMap::new();
 
             for target in &targets {
                 for dest in &resolved.destinations {
@@ -135,17 +142,29 @@ impl KinferenceService {
                     let dest = match dest {
                         kinference_policy::resolve::ResolvedDestination::Local(local) => local,
                         kinference_policy::resolve::ResolvedDestination::Provider(prov) => {
-                            candidates.extend(provider_candidates_for(
+                            let dest =
+                                CandidateDest::Provider(prov.namespace.clone(), prov.name.clone());
+                            for c in provider_candidates_for(
                                 &self.observations.provider_health,
                                 prov,
                                 &target.model,
-                            ));
+                            ) {
+                                let key = (dest.clone(), c.upstream_model.clone());
+                                if !add_name(&mut candidates, &built, &key, &target.model) {
+                                    built.insert(key, vec![candidates.len()]);
+                                    candidates.push(c);
+                                }
+                            }
                             continue;
                         }
                     };
                     // A canonical name can map to several upstream models, each
                     // its own candidate.
                     for upstream in dest.upstreams_for(&target.model) {
+                        let key = (CandidateDest::Local(dest.pool_id), upstream.clone());
+                        if add_name(&mut candidates, &built, &key, &target.model) {
+                            continue;
+                        }
                         let idx = match scored
                             .iter()
                             .position(|g| g.pool.id == dest.pool_id && g.model == upstream)
@@ -205,12 +224,12 @@ impl KinferenceService {
                                 scored.len() - 1
                             }
                         };
-                        candidates.extend(self.candidates_for(
-                            &scored[idx],
-                            idx,
-                            dest,
-                            &target.model,
-                        ));
+                        let new = self.candidates_for(&scored[idx], idx, dest, &target.model);
+                        built.insert(
+                            key,
+                            (candidates.len()..candidates.len() + new.len()).collect(),
+                        );
+                        candidates.extend(new);
                     }
                 }
             }
@@ -421,7 +440,7 @@ impl KinferenceService {
                         // scraped.
                         queued_prompts: saturation_by_endpoint.get(&s.endpoint).map(|(q, _)| *q),
                         kv_cache_usage: saturation_by_endpoint.get(&s.endpoint).map(|(_, k)| *k),
-                        model_name: Some(canonical_model.to_string()),
+                        model_names: vec![canonical_model.to_string()],
                         backend_name: Some(dest.name.clone()),
                         backend_type: Some(
                             kinference_policy::crd::BackendType::Local
@@ -437,4 +456,33 @@ impl KinferenceService {
             })
             .collect()
     }
+}
+
+/// A destination that the router builds candidates for: a local worker set,
+/// or a provider by namespace and name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CandidateDest {
+    Local(kinference_policy::PoolId),
+    Provider(String, String),
+}
+
+/// Add `name` to the candidates that the router already built for `key`,
+/// unless they already contain it. Returns `false` if the router has built
+/// nothing for `key` yet.
+fn add_name(
+    candidates: &mut [kinference_policy::engine::Candidate],
+    built: &HashMap<(CandidateDest, String), Vec<usize>>,
+    key: &(CandidateDest, String),
+    name: &str,
+) -> bool {
+    let Some(indices) = built.get(key) else {
+        return false;
+    };
+    for &i in indices {
+        let names = &mut candidates[i].attrs.model_names;
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    true
 }

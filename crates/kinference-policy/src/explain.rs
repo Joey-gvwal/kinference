@@ -239,11 +239,11 @@ fn apply_consider(
     let mut kept = Vec::new();
 
     for c in candidates {
-        let model_ok = targets.iter().any(|t| t.model == c.canonical_model);
-        let hit = targets.iter().any(|t| {
-            t.model == c.canonical_model
-                && t.backends.matches(c.backend_type(), &c.backend, &c.labels)
-        });
+        let answers_to = |t: &ScoreTarget| c.attrs.model_names.contains(&t.model);
+        let model_ok = targets.iter().any(answers_to);
+        let hit = targets
+            .iter()
+            .any(|t| answers_to(t) && t.backends.matches(c.backend_type(), &c.backend, &c.labels));
         if hit {
             admitted.push(c.label());
             kept.push(c.clone());
