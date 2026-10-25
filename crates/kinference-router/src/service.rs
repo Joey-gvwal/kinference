@@ -227,7 +227,7 @@ fn provider_candidates_for(
         .map(
             |(upstream, context_window)| kinference_policy::engine::Candidate {
                 canonical_model: canonical_model.to_string(),
-                upstream_model: upstream,
+                upstream_model: upstream.clone(),
                 backend: prov.name.clone(),
                 labels: labels.clone(),
                 target: kinference_policy::engine::CandidateTarget::Provider {
@@ -246,7 +246,11 @@ fn provider_candidates_for(
                     predicted_ttft_ms: None,
                     prefix_cache_hit_ratio: None,
                     queued_prompts: None,
-                    model_names: vec![canonical_model.to_string()],
+                    model_names: policy_driver::model_names(
+                        &upstream,
+                        prov.aliases_for(&upstream),
+                        canonical_model,
+                    ),
                     backend_name: Some(prov.name.clone()),
                     backend_type: Some(
                         kinference_policy::crd::BackendType::Provider

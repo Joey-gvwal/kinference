@@ -423,6 +423,7 @@ async fn select(
     });
     let attrs = kinference_policy::predicate::RequestAttrs {
         model: vec![model.into()],
+        requested_model: model.into(),
         ..Default::default()
     };
     svc.policy_select(&pref, store, Some(start), model, spare, attrs, "test")
@@ -519,6 +520,7 @@ async fn select_aliased(
     });
     let attrs = kinference_policy::predicate::RequestAttrs {
         model: names,
+        requested_model: "qwen".into(),
         ..Default::default()
     };
     let out = t
@@ -579,6 +581,7 @@ async fn dropping_an_alias_drops_a_provider_model_under_every_name() {
     let start = primary(&t.pools[0], "qwen", &[("10.0.0.1:8000", 0)]);
     let attrs = kinference_policy::predicate::RequestAttrs {
         model: vec!["qwen".into(), "q".into()],
+        requested_model: "qwen".into(),
         ..Default::default()
     };
     let out = t
@@ -597,6 +600,123 @@ async fn dropping_an_alias_drops_a_provider_model_under_every_name() {
         !matches!(out, Ok(PolicySelection::Provider(_))),
         "the provider's one candidate answers to `q`, so it is dropped"
     );
+}
+
+/// Two worker sets that share the alias `coding`: `glm-ws` serves `glm-up` as
+/// `glm`, `coding` and `coding-high`; `qwen-ws` serves `qwen-up` as `qwen`,
+/// `coding` and `coding-low`. The policy has no rules, so every request takes
+/// the unmatched route. `busy` is the set that gets a deep queue.
+async fn shared_alias_fleet(busy: &str) -> TestService {
+    let t = ServiceBuilder::new()
+        .pool("glm-ws", "glm-up", &["10.0.0.1:8000"])
+        .alias("glm-ws", "glm-up", &["glm", "coding", "coding-high"])
+        .pool("qwen-ws", "qwen-up", &["10.0.0.2:8000"])
+        .alias("qwen-ws", "qwen-up", &["qwen", "coding", "coding-low"])
+        .policy(serde_json::json!({"rules": []}))
+        .build()
+        .await;
+    let busy_worker = match busy {
+        "glm-ws" => 1,
+        "qwen-ws" => 2,
+        other => panic!("no worker set {other}"),
+    };
+    t.svc.scoring.scrape.record_sample_for_test(
+        busy_worker,
+        kinference_fleet::scrape::MetricsSample {
+            waiting: 60,
+            scraped_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+    t
+}
+
+/// Pick `model` in a [`shared_alias_fleet`]: the endpoint that the router
+/// chose, and the model in the forwarded body.
+async fn pick_by_name(t: &TestService, model: &str) -> (String, String) {
+    let body = serde_json::json!({"model": model, "messages": [{"role": "user", "content": "hi"}]})
+        .to_string();
+    let out = t
+        .pick(
+            body.as_bytes(),
+            1,
+            Qos::Interactive,
+            Some(&TestService::pool_ref()),
+        )
+        .await;
+    let (endpoint, wire) = match out {
+        PickAndRecordOutcome::Ok { endpoint, body, .. }
+        | PickAndRecordOutcome::Degraded { endpoint, body, .. } => (endpoint, body),
+        other => panic!("{model}: expected a local pick, got {other:?}"),
+    };
+    // Empty when the router left the body unchanged.
+    let sent = if wire.is_empty() {
+        model_in(body.as_bytes())
+    } else {
+        model_in(&wire)
+    };
+    (endpoint, sent)
+}
+
+/// When only one worker set declares a name, the router sends requests for that
+/// name to that set alone, even when the other set is faster and shares a
+/// different alias with it.
+#[tokio::test]
+async fn a_name_one_set_declares_is_served_only_by_that_set() {
+    let glm = ("10.0.0.1:8000".to_string(), "glm-up".to_string());
+    let qwen = ("10.0.0.2:8000".to_string(), "qwen-up".to_string());
+
+    let qwen_faster = shared_alias_fleet("glm-ws").await;
+    for name in ["coding-high", "glm", "glm-up"] {
+        assert_eq!(pick_by_name(&qwen_faster, name).await, glm, "{name}");
+    }
+    let glm_faster = shared_alias_fleet("qwen-ws").await;
+    for name in ["coding-low", "qwen", "qwen-up"] {
+        assert_eq!(pick_by_name(&glm_faster, name).await, qwen, "{name}");
+    }
+}
+
+/// When both sets declare a name, both are eligible: the faster set wins, and
+/// the router rewrites the body to that set's model, whichever upstream the
+/// alias resolved to first.
+#[tokio::test]
+async fn a_name_both_sets_declare_is_served_by_either() {
+    assert_eq!(
+        pick_by_name(&shared_alias_fleet("glm-ws").await, "coding").await,
+        ("10.0.0.2:8000".to_string(), "qwen-up".to_string())
+    );
+    assert_eq!(
+        pick_by_name(&shared_alias_fleet("qwen-ws").await, "coding").await,
+        ("10.0.0.1:8000".to_string(), "glm-up".to_string())
+    );
+}
+
+/// If a provider serves its own build of a model under the alias that the
+/// client asked for, the router can still send requests to it, even though the
+/// alias resolved to the local build before any rule ran.
+#[tokio::test]
+async fn an_alias_reaches_a_provider_serving_its_own_build() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen-awq", &["10.0.0.1:8000"])
+        .alias("qwen-ws", "qwen-awq", &["qwen-2.5"])
+        .provider(
+            "cloud",
+            serde_json::json!([{"name": "vendor/qwen-turbo", "aliases": ["qwen-2.5"]}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["cloud"]}]}}]}))
+        .build()
+        .await;
+    let body = br#"{"model":"qwen-2.5","messages":[{"role":"user","content":"hi"}]}"#;
+    let out = t
+        .pick(body, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    let PickAndRecordOutcome::Provider { pick, body, .. } = out else {
+        panic!("expected the provider, got {out:?}");
+    };
+    assert_eq!(pick.upstream_model, "vendor/qwen-turbo");
+    assert_eq!(model_in(&body), "vendor/qwen-turbo");
 }
 
 /// A service where `qwen` is served by worker set `qwen-ws` and by provider

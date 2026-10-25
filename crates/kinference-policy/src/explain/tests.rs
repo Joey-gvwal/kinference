@@ -66,6 +66,7 @@ fn provider(name: &str, model: &str, observed: Option<f32>) -> Candidate {
 fn attrs(model: &str, qos: &str) -> RequestAttrs {
     RequestAttrs {
         model: vec![model.to_string()],
+        requested_model: model.to_string(),
         qos: Some(qos.to_string()),
         input_tokens: Some(1024),
         max_tokens: Some(256),

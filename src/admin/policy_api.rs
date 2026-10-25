@@ -626,7 +626,8 @@ pub(super) struct SimRequest {
     /// the engine would see. Preferred over `model`; set one or the other.
     #[serde(default)]
     requested_model: Option<String>,
-    /// The raw `model` attribute set, for asserting on an exact set.
+    /// The raw `model` attribute set, for asserting on an exact set. The
+    /// simulation takes its first entry as the name that the client asked for.
     #[serde(default)]
     model: Vec<String>,
     #[serde(default)]
@@ -1165,6 +1166,11 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
             Some(m) => model_attr_set(st, pool, m),
             None => req.model.clone(),
         },
+        requested_model: req
+            .requested_model
+            .clone()
+            .or_else(|| req.model.first().cloned())
+            .unwrap_or_default(),
         input_tokens: req.input_tokens,
         max_tokens: req.max_tokens,
         tenant: req.tenant.clone(),

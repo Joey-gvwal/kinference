@@ -707,6 +707,11 @@ pub struct RequestAttrs {
     /// before predicates run; this way `model:` matches aliases just as
     /// `consider[].models.names[]` does. Upstream first, then aliases sorted.
     pub model: Vec<String>,
+    /// The one name that the client asked for, after `auto` resolves. Not a
+    /// predicate signal. When a route takes its models from the request, the
+    /// router generates candidates for this name, so only destinations that
+    /// declare it are eligible.
+    pub requested_model: String,
     pub input_tokens: Option<i64>,
     pub max_tokens: Option<i64>,
     /// Always present. `""` is "undetermined" and matches only a rule naming
@@ -740,8 +745,9 @@ pub struct CandidateAttrs {
     pub queued_prompts: Option<f64>,
     /// Mean KV-cache utilization over the same window, 0.0..1.0.
     pub kv_cache_usage: Option<f64>,
-    /// Every client-facing name that leads to this candidate. A predicate on
-    /// any of these names matches, as with `model` on the request.
+    /// Every client-facing name that the candidate's destination declares for
+    /// its model. A predicate on any of these names matches, as with `model` on
+    /// the request.
     pub model_names: Vec<String>,
     pub backend_name: Option<String>,
     pub backend_type: Option<String>,

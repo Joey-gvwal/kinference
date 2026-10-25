@@ -639,8 +639,8 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
                 "requestedModel": requested,
                 "inputTokens": 1024,
                 // One candidate per name the endpoint is routable under.
-                // `consider` with no `models:` targets the resolved upstream,
-                // so only that row can be admitted, as in `policy_driver`.
+                // A `consider` with no `models:` targets the requested name, so
+                // the policy admits only that row.
                 "candidates": [
                     { "backendName": "qwen-2-5-32b", "backendType": "Local",
                       "canonicalModel": "Qwen/Qwen2.5-32B-Instruct-AWQ",
@@ -889,8 +889,9 @@ async fn kv_cache_usage_excludes_the_saturated_worker_the_queue_ranks_backwards(
 /// A backed-up local worker fails over to the provider.
 ///
 /// `policy-3` has no `consider`, exclusions that shed a queued local endpoint,
-/// and a second `select` tier of `type: Provider`. The provider serves its own
-/// build (`…-Turbo`) of the model, so it must be considered via the alias.
+/// and a second `select` tier of `type: Provider`. Each destination serves its
+/// own build of the model under the alias that the client asked for, so the
+/// policy considers the provider alongside the local set.
 #[tokio::test]
 async fn a_backed_up_local_worker_fails_over_to_the_provider() {
     let store = kinference_policy::store::PolicyStore::new();
@@ -920,13 +921,13 @@ async fn a_backed_up_local_worker_fails_over_to_the_provider() {
         async move {
             let req = serde_json::from_value(serde_json::json!({
                 "policy": "default/policy-3",
-                // The set a request for `qwen-2.5` carries: resolved upstream
-                // first, then the aliases both destinations declare.
-                "model": ["Qwen/Qwen2.5-32B-Instruct-AWQ", "qwen-2.5", "qwen-simple"],
+                // The client asks for the alias that both destinations declare.
+                "requestedModel": "qwen-2.5",
                 "inputTokens": 4096,
                 "candidates": [
                     { "backendName": "qwen-2-5-32b", "backendType": "Local",
-                      "canonicalModel": "Qwen/Qwen2.5-32B-Instruct-AWQ",
+                      "canonicalModel": "qwen-2.5",
+                      "upstreamModel": "Qwen/Qwen2.5-32B-Instruct-AWQ",
                       "endpoint": "10.0.1.55:8000", "queuedPrompts": queued,
                       "predictedTtftMs": 120.0 },
                     // The provider knows the model only by the ALIAS.

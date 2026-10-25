@@ -230,10 +230,10 @@ fn predicates_for(
 /// Apply `consider` to a caller-supplied candidate set.
 fn apply_consider(
     route: &CompiledRoute,
-    requested_models: &[String],
+    requested_model: &str,
     candidates: &[Candidate],
 ) -> (ConsiderStage, Vec<Candidate>) {
-    let targets: Vec<ScoreTarget> = engine::models_to_score(route, requested_models);
+    let targets: Vec<ScoreTarget> = engine::models_to_score(route, requested_model);
     let mut admitted = Vec::new();
     let mut rejected = Vec::new();
     let mut kept = Vec::new();
@@ -315,10 +315,10 @@ fn run_route(
     rule_name: Option<&str>,
     route: &CompiledRoute,
     attrs: &RequestAttrs,
-    requested_models: &[String],
+    requested_model: &str,
     candidates: &[Candidate],
 ) -> (RuleStep, Option<Candidate>, bool) {
-    let (consider, kept) = apply_consider(route, requested_models, candidates);
+    let (consider, kept) = apply_consider(route, requested_model, candidates);
     let out = engine::evaluate(route, rule_name, attrs, kept.clone());
 
     let (trace, winner) = match out {
@@ -352,14 +352,14 @@ fn run_route(
 
 /// Explain what `policy` would do with `attrs` over `candidates`.
 ///
-/// `consider` is resolved against all of `attrs.model`; see
+/// Resolves `consider` against `attrs.requested_model`; see
 /// [`engine::models_to_score`].
 pub fn explain(
     policy: &CompiledPolicy,
     attrs: &RequestAttrs,
     candidates: &[Candidate],
 ) -> Explanation {
-    let requested_models = attrs.model.clone();
+    let requested_model = attrs.requested_model.as_str();
     let mut steps: Vec<RuleStep> = Vec::new();
 
     // Every rule is reported, matched or not.
@@ -397,7 +397,7 @@ pub fn explain(
             Some(&rule.name),
             &rule.route,
             attrs,
-            &requested_models,
+            requested_model,
             candidates,
         );
         step.predicates = predicates_for(rule, attrs);
@@ -440,7 +440,7 @@ pub fn explain(
                 None,
                 &route,
                 attrs,
-                &requested_models,
+                requested_model,
                 candidates,
             );
             step.matched = true;

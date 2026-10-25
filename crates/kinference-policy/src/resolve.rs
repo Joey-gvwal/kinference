@@ -225,6 +225,19 @@ impl ResolvedProvider {
             .collect()
     }
 
+    /// The client-facing aliases that this provider declares for `upstream`, sorted.
+    pub fn aliases_for(&self, upstream: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .models
+            .iter()
+            .filter(|m| m.name.as_deref() == Some(upstream))
+            .flat_map(|m| m.aliases.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Every client-facing name this provider serves, sorted.
     pub fn served_names(&self) -> Vec<String> {
         let mut out: Vec<String> = self
