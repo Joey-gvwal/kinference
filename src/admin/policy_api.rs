@@ -49,6 +49,7 @@ use kinference_router::picker::{self, WorkerScore};
 pub(super) const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_CANDIDATES: usize = 256;
 const MAX_MODELS: usize = 32;
+const MAX_TAGS: usize = 64;
 const MAX_RUNS: u32 = 500;
 /// Bounds token counts so the block arithmetic in [`predict`] can't overflow.
 const MAX_TOKENS: i64 = 10_000_000;
@@ -632,6 +633,8 @@ pub(super) struct SimRequest {
     #[serde(default)]
     qos: Option<String>,
     #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
     tenant: String,
     #[serde(default)]
     input_tokens: Option<i64>,
@@ -671,6 +674,12 @@ impl SimRequest {
             return Err(ApiError::invalid(
                 "model",
                 format!("at most {MAX_MODELS} names"),
+            ));
+        }
+        if self.tags.len() > MAX_TAGS {
+            return Err(ApiError::invalid(
+                "tags",
+                format!("at most {MAX_TAGS} tags"),
             ));
         }
         if self.candidates.len() > MAX_CANDIDATES {
@@ -1169,7 +1178,7 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
         max_tokens: req.max_tokens,
         tenant: req.tenant.clone(),
         qos: req.qos.clone(),
-        tag: Vec::new(),
+        tag: req.tags.clone(),
     };
 
     // `evaluate` never dereferences the pool id. A fixed placeholder, since
