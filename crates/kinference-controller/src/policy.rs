@@ -12,6 +12,7 @@
 //! - `binding`: publishes one `BackendBinding` per pool, so a gateway can
 //!   resolve an `InferencePool` backendRef it has no schema for.
 
+use kinference_policy::crd::ExtensionReference;
 use serde::Deserialize;
 
 pub mod binding;
@@ -38,6 +39,11 @@ pub struct PolicyConfig {
     /// read this object.
     #[serde(default = "default_binding_extension")]
     pub backend_binding_extension: String,
+    /// Namespace of that `Extension`; `None` is each binding's own. An
+    /// `Extension` elsewhere must admit the pools' namespaces in its
+    /// `allowedReferences`.
+    #[serde(default)]
+    pub backend_binding_extension_namespace: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -49,10 +55,19 @@ fn default_binding_extension() -> String {
 }
 
 impl PolicyConfig {
-    /// The extension name to publish, or `None` when empty or whitespace.
-    pub fn binding_extension(&self) -> Option<&str> {
+    /// The extension to publish, or `None` when the name is empty or
+    /// whitespace. A blank namespace reads as the binding's own.
+    pub fn binding_extension(&self) -> Option<ExtensionReference> {
         let name = self.backend_binding_extension.trim();
-        (!name.is_empty()).then_some(name)
+        let namespace = self
+            .backend_binding_extension_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|ns| !ns.is_empty());
+        (!name.is_empty()).then(|| ExtensionReference {
+            name: name.to_string(),
+            namespace: namespace.map(str::to_string),
+        })
     }
 }
 
@@ -64,6 +79,7 @@ impl Default for PolicyConfig {
             namespace: None,
             backend_bindings: default_true(),
             backend_binding_extension: default_binding_extension(),
+            backend_binding_extension_namespace: None,
         }
     }
 }

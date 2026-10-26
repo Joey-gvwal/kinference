@@ -75,6 +75,7 @@ drops it. */ -}}
 {{- $policy := get $cfg "policy" -}}
 {{- if kindIs "map" $policy -}}
 {{- $_ := set $policy "backend_binding_extension" .Values.extension.name -}}
+{{- $_ := set $policy "backend_binding_extension_namespace" .Release.Namespace -}}
 {{- end -}}
 {{- if or .Values.tokenizers.existingClaim .Values.tokenizers.configMap -}}
 {{- $tokenize := get $cfg "tokenize" | default dict -}}

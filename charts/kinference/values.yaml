@@ -73,10 +73,13 @@ grafanaDashboard:
 # The gateway Extension object that puts kinference in a route's filter
 # chain. Opt-in: the Extension kind is the gateway's CRD
 # (gateway.linkerd.io/v1alpha1), absent on clusters without the gateway.
-# `name` is also the extension every BackendBinding lists
-# (config.policy.backend_binding_extension), whether or not the chart creates
-# the object. With `enabled: false`, set it to the name of an Extension you
-# manage yourself, or to "" for routes that carry their own extensionRef
+# It lives in the release namespace, and `name` is also the extension every
+# BackendBinding lists there (config.policy.backend_binding_extension),
+# whether or not the chart creates the object. The chart's Extension admits
+# bindings from every namespace, so one object serves pools anywhere. With
+# `enabled: false`, set `name` to an Extension you manage yourself in the
+# release namespace, which must admit the pools' namespaces in its
+# allowedReferences, or to "" for routes that carry their own extensionRef
 # filter.
 extension:
   enabled: false
@@ -93,6 +96,7 @@ extension:
 # Derived by the chart, so NOT set here:
 #   - listen / admin_listen: from service.grpcPort / service.adminPort.
 #   - policy.backend_binding_extension: from extension.name.
+#   - policy.backend_binding_extension_namespace: the release namespace.
 #
 # Filled in by the chart when absent:
 #   - policy.namespace, kubernetes.namespace: the release namespace. Set ""

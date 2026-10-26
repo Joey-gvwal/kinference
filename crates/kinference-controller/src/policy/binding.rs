@@ -27,7 +27,9 @@
 //! The binding also lists an `Extension`
 //! (`policy.backend_binding_extension`), which the gateway prepends to the
 //! filter chain of every rule routing to the pool; it asks kinference which
-//! endpoint each request goes to.
+//! endpoint each request goes to. It may live in another namespace
+//! (`policy.backend_binding_extension_namespace`), which the gateway honors
+//! only if the `Extension` admits the pool's namespace.
 //!
 //! Destinations come from the resolved snapshot rather than
 //! `spec.destinations`, so a binding lists exactly what kinference would pick
@@ -44,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kinference_policy::crd::{
     BackendBinding, BackendBindingSpec, BindingBackendRef, BindingClaim, BindingObjectReference,
-    InferencePool,
+    ExtensionReference, InferencePool,
 };
 use kinference_policy::resolve::{
     GATEWAY_BACKEND_GROUP, GATEWAY_BACKEND_KIND, POLICY_GROUP, ResolvedDestination, ResolvedPool,
@@ -90,7 +92,7 @@ pub struct Desired {
 /// worker set is omitted as [`UnresolvedPort::NotListed`].
 pub fn desired_binding(
     pool: &ResolvedPool,
-    extension: Option<&str>,
+    extension: Option<&ExtensionReference>,
     services: &ServiceIndex,
 ) -> Desired {
     let mut backend_refs = Vec::with_capacity(pool.destinations.len());
@@ -172,7 +174,17 @@ pub fn desired_binding(
             backend_refs,
             // Empty when the operator cleared the name; since this writer owns
             // the field, that removes the extension from existing bindings.
-            extensions: extension.map(|e| vec![e.to_string()]).unwrap_or_default(),
+            extensions: extension
+                .map(|e| {
+                    vec![ExtensionReference {
+                        name: e.name.clone(),
+                        namespace: e
+                            .namespace
+                            .as_deref()
+                            .and_then(|ns| qualify(&pool.namespace, ns)),
+                    }]
+                })
+                .unwrap_or_default(),
         },
         status: None,
     };
@@ -231,8 +243,8 @@ pub struct BindingWriter<A: ApiServer> {
     /// namespace.
     namespace: Option<String>,
     store: Arc<PolicyStore>,
-    /// See `PolicyConfig::backend_binding_extension`.
-    extension: Option<String>,
+    /// See `PolicyConfig::binding_extension`.
+    extension: Option<ExtensionReference>,
     /// Whether this replica may write.
     leader: watch::Receiver<bool>,
     /// Warnings logged at the last reconcile, so a standing one is logged once.
@@ -246,7 +258,7 @@ impl<A: ApiServer> BindingWriter<A> {
         api: A,
         namespace: Option<String>,
         store: Arc<PolicyStore>,
-        extension: Option<String>,
+        extension: Option<ExtensionReference>,
         leader: watch::Receiver<bool>,
     ) -> Self {
         Self {
@@ -328,7 +340,7 @@ impl<A: ApiServer> BindingWriter<A> {
             .pools()
             .map(|pool| {
                 let Desired { binding, omitted } =
-                    desired_binding(pool, self.extension.as_deref(), snapshot.services());
+                    desired_binding(pool, self.extension.as_ref(), snapshot.services());
                 for (dest, why) in omitted {
                     port_warnings.insert(format!(
                         "backend bindings: {}/{}: destination {dest} is left out — \
