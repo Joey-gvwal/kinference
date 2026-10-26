@@ -18,17 +18,13 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-24.04
-    # Generous relative to gateway's 15: a cold cache compiles the dynamo
-    # monorepo git dep. Warm-cache runs finish far inside this.
+    # A cold cache compiles the dynamo monorepo git dep.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      # The `zmq` crate links libzmq via pkg-config. No protobuf-compiler:
-      # `protoc-bin-vendored` bundles protoc for tonic-build.
+      # The `zmq` crate links libzmq via pkg-config; protoc is vendored.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libzmq3-dev pkg-config g++
-      # No toolchain action: rust-toolchain.toml pins the version AND the
-      # rustfmt/clippy components, and a bare `rustup toolchain install`
-      # installs exactly that. One place to bump.
+      # Installs what rust-toolchain.toml pins, components included.
       - run: rustup toolchain install
       - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -36,16 +32,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: just lint
 
-  # Installs both charts on a kind cluster and asserts the deployed system
-  # FUNCTIONS against the real engine: kinference goes Ready, discovers a
-  # dummy-weights vLLM worker (CPU, tests/e2e/manifests, image pinned by
-  # digest), ingests the KV events a real completion request produces, and
-  # writes CRD status. This is the release workflow's gate.
-  #
-  # The docker image build is cold on runners (the BuildKit cache mounts in
-  # the Dockerfile don't persist here), so most of the wall clock is one
-  # cargo release build — hence the wide timeout. Wiring buildx's gha cache
-  # backend is a later optimization if this hurts.
+  # Installs both charts on kind against a CPU dummy-weights vLLM and checks
+  # discovery, KV ingest and CRD status. The image build is cold here (the
+  # BuildKit cache mounts don't persist), hence the wide timeout.
   test-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -61,8 +50,7 @@ jobs:
         if: failure()
         run: |
           kubectl get pods -A -o wide || true
-          # Events and describe catch what pod listings can't — e.g. a
-          # Pending pod's FailedScheduling reason.
+          # Events and describe show e.g. a Pending pod's FailedScheduling.
           kubectl get events --sort-by=.lastTimestamp | tail -30 || true
           kubectl describe pods -l app.kubernetes.io/name=kinference || true
           kubectl describe pods -l mm/server-name=dummy-vllm || true
