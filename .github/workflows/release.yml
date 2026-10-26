@@ -65,12 +65,43 @@ jobs:
       is_release: ${{ steps.release.outputs.is_release }}
       version: ${{ steps.version.outputs.version }}
 
-  # The publish gate: smoke-test the release-named image. The tested image
-  # is handed to `publish` as an artifact, so what is pushed is what was
-  # tested. No toolchain needed; the build runs inside docker.
-  test:
+  # Build the release-named image once, for both platforms, as an OCI
+  # archive. Each test leg runs the smoke test against its own platform's
+  # image from it, and publish pushes it unchanged, so the pushed manifest
+  # is exactly the one tested.
+  build:
     needs: meta
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Build image
+        run: |
+          version='${{ needs.meta.outputs.version }}'
+          mkdir -p /tmp/images
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg KINFERENCE_VERSION="$version" \
+            -t "$DOCKER_REGISTRY/kinference:$version" \
+            -o type=oci,dest=/tmp/images/kinference.tar .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kinference-image
+          path: /tmp/images
+          retention-days: 1
+
+  # The publish gate: on each platform, install the charts from source
+  # pointing at the build's image and run the smoke test. Nothing is pushed
+  # unless every leg is green.
+  test:
+    needs: [meta, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -78,9 +109,19 @@ jobs:
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc
         with:
           install_only: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: kinference-image
+          path: /tmp/images
+      - name: Load image
+        run: |
+          image="$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
+          skopeo copy oci-archive:/tmp/images/kinference.tar "docker-archive:/tmp/kinference-docker.tar:$image"
+          docker load -i /tmp/kinference-docker.tar
       - name: Smoke test against the release image
         run: |
-          just IMAGE_REPO="$DOCKER_REGISTRY/kinference" \
+          just --no-deps \
+               IMAGE_REPO="$DOCKER_REGISTRY/kinference" \
                IMAGE_TAG="${{ needs.meta.outputs.version }}" \
                up
           just test-smoke
@@ -96,20 +137,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: kind-logs
+          name: kind-logs-${{ matrix.os }}
           path: /tmp/kind-logs
           retention-days: 3
-      - name: Save image
-        if: ${{ needs.meta.outputs.is_release == 'true' }}
-        run: |
-          docker save -o /tmp/kinference-image.tar \
-            "$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ needs.meta.outputs.is_release == 'true' }}
-        with:
-          name: kinference-image.tar
-          path: /tmp/kinference-image.tar
-          retention-days: 1
 
   # One native build per target; cross-compiling to darwin needs the Apple SDK.
   cli:
@@ -179,8 +209,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: kinference-image.tar
-          path: /tmp
+          name: kinference-image
+          path: /tmp/images
       - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
         with:
           registry: ghcr.io
@@ -188,8 +218,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push image
         run: |
-          docker load -i /tmp/kinference-image.tar
-          docker push "$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
+          skopeo copy --all --preserve-digests oci-archive:/tmp/images/kinference.tar \
+            "docker://$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
       - name: Publish charts
         # Both charts share the release version.
         run: |
