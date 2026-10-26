@@ -3,10 +3,7 @@
 {{- .Chart.Name -}}
 {{- end -}}
 
-{{/*
-Fully qualified name. Cluster-scoped objects (ClusterRole, ClusterRoleBinding)
-prefix with this so two releases can coexist.
-*/}}
+{{/* Fully qualified name; also prefixes cluster-scoped objects. */}}
 {{- define "kinference.fullname" -}}
 {{- if contains .Chart.Name .Release.Name -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}
@@ -15,10 +12,7 @@ prefix with this so two releases can coexist.
 {{- end -}}
 {{- end -}}
 
-{{/*
-Selector labels — the immutable Deployment selector, so keep this minimal.
-`app.kubernetes.io/name: kinference` is what the PodMonitor selects on.
-*/}}
+{{/* Selector labels. The Deployment selector is immutable; keep this minimal. */}}
 {{- define "kinference.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "kinference.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

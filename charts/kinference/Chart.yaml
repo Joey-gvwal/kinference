@@ -5,7 +5,6 @@ description: >-
   vLLM/SGLang workers (metrics, KV-cache events, served models) and answers
   Pick() with the endpoint predicted to serve a request fastest.
 type: application
-# Both are overridden at release time by the release workflow
-# (helm package --version X --app-version X); these are dev placeholders.
+# Dev placeholders; the release workflow sets both.
 version: 0.1.0
 appVersion: "0.1.0"

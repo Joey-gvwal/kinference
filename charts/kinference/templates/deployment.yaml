@@ -1,28 +1,13 @@
-# Deployment of kinference. Ships at one replica; >1 is supported but opt-in.
+# More than one replica multiplies ZMQ ingest traffic and splits in-flight
+# tracking (less precise waits); every replica still sees every KV event.
 #
-# What multiple replicas cost:
-#  - Each replica opens its own ZMQ SUB connection per worker, so ingest
-#    traffic is N×.
-#  - In-flight tracking splits across replicas, so each sees ~1/N of the
-#    dispatches it is compensating for. This costs PRECISION, not correctness:
-#    predicted_wait_ms already charges queue entries it has no dispatch record
-#    for via its unknown-queue term, and vLLM's queue depth is re-scraped every
-#    second as ground truth.
-#  - Prefix-cache quality is UNAFFECTED. ZMQ PUB fans out, so every replica
-#    sees every KV event and their radix trees agree. The expensive signal
-#    replicates for free; only the cheap one degrades.
-#
-# To scale past 1 (replicaCount) you must:
-#  1. Set `config.leader_election.enabled=true`. Exactly one
-#     replica may write CRD status — see the note on POD_NAME below.
-#  2. Set strategyType=RollingUpdate. `Recreate` (the default) exists precisely
-#     to prevent two replicas overlapping, which is the thing you are now
-#     opting into.
+# To scale past one replica:
+#  1. Set `config.leader_election.enabled=true`; one replica writes CRD status.
+#  2. Set strategyType=RollingUpdate.
 #  3. Add a PodDisruptionBudget with minAvailable: 1.
 #
-# And note the caller-side constraint: every call for one request
-# (PushBody -> Pick -> PullBody -> the report calls) must reach the SAME
-# replica, because stream_id and response_id index process-local state.
+# Every call for one request (PushBody, Pick, PullBody, the reports) must
+# reach the same replica: stream_id and response_id are process-local.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,8 +27,7 @@ spec:
       labels:
         {{- include "kinference.selectorLabels" . | nindent 8 }}
       annotations:
-        # Restart the pod when the config changes; the binary reads it once
-        # at startup.
+        # The config is read once at startup.
         checksum/config: {{ include "kinference.config" . | sha256sum }}
     spec:
       serviceAccountName: {{ include "kinference.fullname" . }}
@@ -57,43 +41,20 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["--config", "/etc/kinference/config.json"]
           env:
-            # kinference at debug. dynamo_kv_router at warn, EXCEPT indexer::radix_tree
-            # which is pinned to error: `block_hash mismatch` (radix_tree:389)
-            # fires several times per second under normal load and is COSMETIC
-            # (the tree keys on tokens_hash, which kinference computes itself), but at
-            # that volume it buries everything else in the log — including the
-            # `Failed to find parent block` warning it shares a module with. The
-            # CONSEQUENCE of a broken chain is on the Grafana dashboard instead
-            # (Prefix cache row: matched/requested falling, cold-start rising).
-            # See notes/block-hash-mismatch-warnings.txt for the investigation.
-            #
-            # The other diagnostic WARN stays visible (different module):
-            #   Block not published. Block size must be N tokens ... is: M
-            #     spec.kvBlockSize disagrees with what the engine publishes;
-            #     every block is dropped and the tree stays empty. Set
-            #     kvBlockSize to M.
-            #
-            # For KV-event debugging: kinference=trace,dynamo_kv_router=trace.
-            # Dial kinference back to info for steady-state.
+            # The default pins dynamo_kv_router::indexer::radix_tree to error:
+            # its `block_hash mismatch` warning is harmless (the tree keys on
+            # tokens_hash, computed by kinference) but fires several times a
+            # second. A broken chain shows on the dashboard's prefix cache row
+            # instead. `Block not published. Block size must be N` comes from
+            # another module and stays visible: set kvBlockSize to the engine's.
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
             {{- if .Values.enableReplay }}
-            # KV-event REPLAY. The flag is checked for PRESENCE, not value, so
-            # the template omits it entirely when disabled.
-            #
-            # What it buys: on attach, the listener requests the event history
-            # it missed instead of starting at the live sequence. Without it,
-            # any prefix already cached in an engine is invisible to kinference
-            # forever. What it costs (see src/ingest.rs): the DEALER replay
-            # loop contends with the tokenize HTTP path, and it can adopt state
-            # for blocks the engine has since evicted (hallucinated cache
-            # hits). Watch `replay complete` vs `replay incomplete` in the log.
+            # Checked for presence, not value, so it is omitted when disabled.
             - name: KINFERENCE_ENABLE_REPLAY
               value: "1"
             {{- end }}
-            # holderIdentity on the leader Lease. Harmless at one replica and
-            # required past that: it is what `kubectl get lease -o yaml` shows,
-            # so an operator can tell WHICH pod is writing status.
+            # The leader Lease's holderIdentity.
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -106,9 +67,6 @@ spec:
                   key: HUGGING_FACE_HUB_TOKEN
             {{- end }}
             {{- if .Values.observationsCsv }}
-            # Predicted-vs-observed CSV sink (read once at startup): one
-            # row per streaming observation, for offline tuning of the
-            # wait-time predictor (analysis/analyze-latency.py).
             - name: KINFERENCE_OBSERVATIONS_CSV
               value: {{ .Values.observationsCsv | quote }}
             {{- end }}
@@ -132,12 +90,8 @@ spec:
               mountPath: /etc/tokenizers
               readOnly: true
             {{- end }}
-          # Readiness answers "can this process serve a Pick", NOT "is there
-          # anywhere to route to". A Pick for a model nothing serves answers
-          # NO_WORKERS, which is a correct answer rather than a reason to
-          # refuse traffic. The one 503: policy enabled and the CRD watch not
-          # yet listed, where a Pick naming a pool would silently bypass its
-          # policy.
+          # Ready means able to serve a Pick, not that any worker exists; it
+          # only fails while policy is on and the CRD watch has not listed.
           readinessProbe:
             httpGet:
               path: /readyz
@@ -145,8 +99,7 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 3
-          # Liveness catches hard hangs only. Kept as a cheap TCP probe on the
-          # gRPC port — if the listener thread is alive, the process is alive.
+          # Catches hard hangs only.
           livenessProbe:
             tcpSocket:
               port: grpc
@@ -160,10 +113,7 @@ spec:
           configMap:
             name: {{ include "kinference.fullname" . }}-config
         {{- if .Values.observationsCsv }}
-        # emptyDir is local to the pod and disappears on restart — fine for a
-        # live tuning run, since the operator pulls the file with `kubectl cp`
-        # before redeploying. For durable rows, this is the volume to swap to
-        # a PVC.
+        # Lost on restart; swap to a PVC for durable rows.
         - name: latency-csv
           emptyDir: {}
         {{- end }}

@@ -1,14 +1,7 @@
 {{- if .Values.extension.enabled }}
-# The Extension object that puts kinference in a gateway's request path.
-#
-# Opt-in (extension.enabled) because the Extension kind is the GATEWAY's CRD
-# (`gateway.linkerd.io/v1alpha1`, shipped in its Helm chart) — a cluster
-# without the gateway installed cannot take this object.
-#
-# Every BackendBinding names this object with its namespace, so one object
-# serves pools in any namespace. The gateway honors a reference from another
-# namespace only because allowedReferences admits it; the config below holds
-# no secret, so admitting every namespace exposes nothing.
+# Puts kinference in a gateway's request path. Bindings in every namespace
+# reference this one object; admitting them all is safe because the config
+# holds no secret.
 apiVersion: gateway.linkerd.io/v1alpha1
 kind: Extension
 metadata:
@@ -22,17 +15,13 @@ spec:
     namespaces:
       from: All
   config:
-    # Past one replica this needs a per-pod DNS name or shared picker state;
-    # see the scaling checklist in templates/deployment.yaml.
+    # Past one replica this needs per-pod routing; see templates/deployment.yaml.
     service: {{ include "kinference.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.grpcPort }}
     {{- with .Values.extension.tenantHeader }}
-    # Request header carrying the tenant id — pairs with
-    # `config.metrics.tenant_labels`: without a header to read from,
-    # every request is attributed to tenant="default".
+    # Without it every request is tenant="default" in the metrics.
     tenantHeader: {{ . }}
     {{- end }}
     {{- with .Values.extension.qos }}
-    # Interactive (default) | Batch | Deferrable.
     qos: {{ . }}
     {{- end }}
 {{- end }}
