@@ -23,8 +23,8 @@ The schemas are in [charts/kinference-crds](charts/kinference-crds/templates).
 ## Quick start
 
 ```sh
-helm install kinference-crds oci://ghcr.io/kinference-ai/charts/kinference-crds
-helm install kinference oci://ghcr.io/kinference-ai/charts/kinference \
+helm install kinference-crds oci://cr.kinference.ai/kinference-ai/charts/kinference-crds
+helm install kinference oci://cr.kinference.ai/kinference-ai/charts/kinference \
   --set extension.enabled=true
 ```
 
