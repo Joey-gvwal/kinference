@@ -181,45 +181,49 @@ fn an_empty_model_set_matches_no_named_model() {
     assert!(!p.matches(&attrs));
 }
 
-/// Set semantics on `model`: a scalar is contains (not equality), an array
-/// intersects, `containsAll` is all-of, and `not` is absence from the set.
+/// Set semantics: a scalar is contains (not equality), an array intersects,
+/// `containsAll` is all-of, and `not` is absence from the set.
 #[test]
-fn model_matching_has_set_semantics() {
-    let mut attrs = req("qwen");
-    attrs.model.push("qwen-alias".into());
+fn tag_matching_has_set_semantics() {
+    let have: Vec<String> = ["gpu-heavy", "restricted"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut attrs = req("bar");
+    attrs.tag = have;
 
     for (raw, want, why) in [
+        (json!({"tag": "restricted"}), true, "scalar means contains"),
+        (json!({"tag": "internal"}), false, "a tag not in the set"),
         (
-            json!({"model": "qwen-alias"}),
-            true,
-            "scalar means contains",
-        ),
-        (json!({"model": "llama"}), false, "a name not in the set"),
-        (
-            json!({"model": ["llama", "qwen-alias"]}),
+            json!({"tag": ["internal", "restricted"]}),
             true,
             "array intersects",
         ),
         (
-            json!({"model": ["llama", "mistral"]}),
+            json!({"tag": ["internal", "public"]}),
             false,
             "array with no overlap",
         ),
         (
-            json!({"model": {"containsAll": ["qwen", "qwen-alias"]}}),
+            json!({"tag": {"containsAll": ["restricted", "gpu-heavy"]}}),
             true,
             "containsAll with both present",
         ),
         (
-            json!({"model": {"containsAll": ["qwen", "llama"]}}),
+            json!({"tag": {"containsAll": ["restricted", "internal"]}}),
             false,
             "containsAll missing one",
         ),
-        (json!({"model": {"not": "llama"}}), true, "not means absent"),
         (
-            json!({"model": {"not": "qwen"}}),
+            json!({"tag": {"not": "internal"}}),
+            true,
+            "not means absent",
+        ),
+        (
+            json!({"tag": {"not": "restricted"}}),
             false,
-            "not on a present name",
+            "not on a present tag",
         ),
     ] {
         let mut w = Vec::new();
@@ -227,6 +231,28 @@ fn model_matching_has_set_semantics() {
         let p = CompiledRequestPredicate::compile(&pred, &mut w);
         assert!(w.is_empty(), "{raw} should compile cleanly: {w:?}");
         assert_eq!(p.matches(&attrs), want, "{raw}: {why}");
+    }
+}
+
+/// An empty tag set is present, not absent, so `{not: X}` matches it.
+#[test]
+fn an_empty_tag_set_is_present_but_matches_nothing_positive() {
+    let attrs = RequestAttrs::default();
+    assert_eq!(
+        attrs.get(&RequestAttr::Tag),
+        Some(AttrValue::List(vec![])),
+        "a request with no tags still has the attribute"
+    );
+
+    for (raw, want) in [
+        (json!({"tag": "internal"}), false),
+        (json!({"tag": {"exists": true}}), true),
+        (json!({"tag": {"not": "internal"}}), true),
+    ] {
+        let mut w = Vec::new();
+        let pred: RequestPredicate = serde_json::from_value(raw.clone()).unwrap();
+        let p = CompiledRequestPredicate::compile(&pred, &mut w);
+        assert_eq!(p.matches(&attrs), want, "{raw} against an empty tag set");
     }
 }
 

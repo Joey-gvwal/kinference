@@ -1169,6 +1169,7 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
         max_tokens: req.max_tokens,
         tenant: req.tenant.clone(),
         qos: req.qos.clone(),
+        tag: Vec::new(),
     };
 
     // `evaluate` never dereferences the pool id. A fixed placeholder, since

@@ -6,7 +6,7 @@
 //!
 //! | RHS shape | Meaning                                        | Example                        |
 //! |-----------|------------------------------------------------|--------------------------------|
-//! | scalar    | exact match; CONTAINS for a set-valued attr    | `model: foo`                   |
+//! | scalar    | exact match; CONTAINS for a set-valued attr    | `tag: gpu`, `model: foo`       |
 //! | array     | membership; INTERSECTION for set-valued attrs  | `qos: [batch, deferrable]`     |
 //! | hash      | explicit operator                              | `queuedPrompts: {greaterThan: 8}` |
 //!
@@ -22,8 +22,8 @@
 //! mismatches like `model: {greaterThan: 5}` are caught at compile time.
 //!
 //! A predicate over an attribute that is absent does not match, in both
-//! scopes, except `{exists: false}`. `model` and `tenant` are always present
-//! (see [`RequestAttrs::get`]).
+//! scopes, except `{exists: false}`. `model`, `tenant` and `tag` are always
+//! present (see [`RequestAttrs::get`]).
 
 use std::time::Duration;
 
@@ -80,14 +80,16 @@ pub enum RequestAttr {
     MaxTokens,
     Tenant,
     Qos,
+    /// An unordered set of opaque tags attached to the request.
+    Tag,
 }
 
 impl RequestAttr {
     pub fn kind(&self) -> AttrKind {
         match self {
             RequestAttr::InputTokens | RequestAttr::MaxTokens => AttrKind::Int,
-            // A set; see [`RequestAttrs::model`].
-            RequestAttr::Model => AttrKind::StrList,
+            // Both are sets; see [`RequestAttrs::model`].
+            RequestAttr::Tag | RequestAttr::Model => AttrKind::StrList,
             _ => AttrKind::Str,
         }
     }
@@ -100,6 +102,7 @@ impl RequestAttr {
             RequestAttr::MaxTokens => "maxTokens".into(),
             RequestAttr::Tenant => "tenant".into(),
             RequestAttr::Qos => "qos".into(),
+            RequestAttr::Tag => "tag".into(),
         }
     }
 }
@@ -606,6 +609,7 @@ impl CompiledRequestPredicate {
         push(RequestAttr::InputTokens, &raw.input_tokens);
         push(RequestAttr::MaxTokens, &raw.max_tokens);
         push(RequestAttr::Tenant, &raw.tenant);
+        push(RequestAttr::Tag, &raw.tag);
         // `qos` after the closure's last use, so it can borrow `terms`.
         if let Some(v) = &raw.qos {
             match compile_qos(v) {
@@ -713,18 +717,23 @@ pub struct RequestAttrs {
     /// the empty string.
     pub tenant: String,
     pub qos: Option<String>,
+    /// Empty until something sets tags on requests.
+    pub tag: Vec<String>,
 }
 
 impl RequestAttrs {
     pub fn get(&self, attr: &RequestAttr) -> Option<AttrValue> {
         match attr {
-            // Always `Some`.
+            // Always `Some`, like `tag`.
             RequestAttr::Model => Some(AttrValue::List(self.model.clone())),
             RequestAttr::InputTokens => self.input_tokens.map(AttrValue::Int),
             RequestAttr::MaxTokens => self.max_tokens.map(AttrValue::Int),
             // Always `Some`: an empty tenant is the value "", not an absence.
             RequestAttr::Tenant => Some(AttrValue::Str(self.tenant.clone())),
             RequestAttr::Qos => self.qos.clone().map(AttrValue::Str),
+            // Always `Some`, even when empty, so `{not: t}` matches a request
+            // with no tags.
+            RequestAttr::Tag => Some(AttrValue::List(self.tag.clone())),
         }
     }
 }
