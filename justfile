@@ -3,9 +3,7 @@ set shell := ["bash", "-eo", "pipefail", "-c"]
 IMAGE_REPO := "kinference"
 IMAGE_TAG := "latest"
 IMAGE := IMAGE_REPO + ":" + IMAGE_TAG
-# Baked into both binaries via `option_env!` (src/version.rs and
-# crates/kinfctl/src/version.rs); defaults to the image tag so
-# `kinference --version` identifies the build it came from.
+# Baked into both binaries' `--version`.
 KINFERENCE_VERSION := IMAGE_TAG
 
 default: list
@@ -43,13 +41,8 @@ image:
 install-cli:
     cargo install --path crates/kinfctl --locked
 
-# `cli-bin` builds `kinfctl` for one rust target and lays it out the way
-# the release workflow attaches it to the GitHub release:
-#   target/cli/kinfctl-<version>-<os>-<arch>   (+ a `.sha256` sidecar)
-# <version> is KINFERENCE_VERSION, which is also what the binary's `--version`
-# reports. The target defaults to the host; the release workflow passes each
-# matrix target explicitly. `--target` is always given so the binary lands at
-# the same path whether or not the target is the host.
+# `--target` is always passed so the binary lands at the same path even for
+# the host target.
 
 # build `kinfctl` for one target into target/cli/kinfctl-<version>-<os>-<arch> (+ .sha256)
 [group('build')]
@@ -75,9 +68,7 @@ cli-bin target="":
 
 CLUSTER := "kinference-smoke"
 
-# Build the image, stand up a kind cluster, install both charts, and wait
-# for kinference to go Available. Override the image coordinates the same way
-# CI and the release workflow do: `just IMAGE_REPO=... IMAGE_TAG=... up`.
+# build the image, create a kind cluster and install both charts
 [group('e2e')]
 up: image
     kind create cluster --name {{CLUSTER}}
@@ -87,11 +78,7 @@ up: image
         --set image.repository={{IMAGE_REPO}} --set image.tag={{IMAGE_TAG}}
     kubectl --context kind-{{CLUSTER}} wait --for=condition=available deployment/kinference --timeout=180s
 
-# Deploy the test fixtures from tests/e2e/manifests — the REAL dummy-vllm
-# (CPU, dummy weights, image pinned by digest in the manifest) + a workerset
-# and pool — then assert the installed chart FUNCTIONS against the real
-# engine: discovery, KV ingest (triggered by an actual completion request),
-# CRD status. See tests/e2e/smoke.sh.
+# deploy a CPU dummy-weights vLLM and check discovery, KV ingest and CRD status
 [group('e2e')]
 test-smoke:
     kubectl --context kind-{{CLUSTER}} apply -f tests/e2e/manifests

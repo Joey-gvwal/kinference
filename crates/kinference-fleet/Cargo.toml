@@ -7,14 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-# Fixtures for other crates' tests: `pool::test_pool`, `pool::test_spec`,
-# `gauges::test_stored_event`, `MetricsRegistry::record_sample_for_test`.
+# Fixtures for other crates' tests.
 test-util = []
 
 [dependencies]
 kinference-policy.workspace = true
 dynamo-kv-router.workspace = true
-# `net` for `AsyncFd`, which wraps the ZMQ socket fd in `ingest`.
+# `net` for `AsyncFd` around the ZMQ socket fd.
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
 serde.workspace = true
@@ -22,15 +21,11 @@ zmq.workspace = true
 tracing.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 dashmap.workspace = true
-# `prometheus-parse` parses worker /metrics; `prometheus` is the exposition
-# side, for the fleet's own families.
 prometheus-parse.workspace = true
 prometheus.workspace = true
 
 [dev-dependencies]
-# `tokio::time::pause` and `advance`, for the gauges' dump-interval tests.
 tokio = { workspace = true, features = ["test-util"] }
-# `PoolId::from_raw`, for the model-index tests.
 kinference-policy = { workspace = true, features = ["test-util"] }
 
 [lints]
