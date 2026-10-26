@@ -16,7 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         g++ \
         pkg-config \
-        protobuf-compiler \
         libzmq3-dev \
     && rm -rf /var/lib/apt/lists/*
 
