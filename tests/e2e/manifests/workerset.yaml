@@ -1,6 +1,4 @@
-# Worker set for the smoke test: discovers dummy-vllm (the real CPU engine
-# from tests/e2e/manifests/dummy-vllm.yaml). kvBlockSize 128 matches vLLM's CPU-backend
-# block size — a mismatch drops every published event before insertion.
+# kvBlockSize must match vLLM's CPU block size, or every event is dropped.
 apiVersion: kinference.buoyant.io/v1alpha1
 kind: InferenceWorkerSet
 metadata:

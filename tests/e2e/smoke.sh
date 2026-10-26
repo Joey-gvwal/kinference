@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Smoke assertions against a cluster prepared by `just up` + the manifests in
-# tests/e2e/manifests (kustomize). The worker is the REAL dummy-vllm — vLLM
-# on CPU with dummy weights — so this proves the actual engine contract:
-# real /metrics, real /v1/models, real ZmqEventPublisher KV events. Blocks
-# are only stored on prefill, so the script sends one real completion to
-# trigger events. Every poll is bounded so a failure diagnoses, not hangs.
+# Smoke checks against a cluster prepared by `just up` and the manifests in
+# tests/e2e/manifests, with a real vLLM on CPU as the worker.
 set -euo pipefail
 
 CTX="${KIND_CONTEXT:-kind-kinference-smoke}"
@@ -23,10 +19,7 @@ poll() { # poll <seconds> <description> <command...>
   echo "✓ $what"
 }
 
-# Generous: first run pulls the ~600MB CPU image and vLLM fetches the model
-# config/tokenizer from HF Hub before serving. `rollout status` (not `wait
-# --for=condition=available`) so this tracks the CURRENT generation and never
-# returns on a pod that is about to be replaced.
+# `rollout status` tracks the current generation, unlike `wait`.
 $K rollout status deployment/dummy-vllm --timeout=420s
 
 $K port-forward svc/kinference 19001:9001 >/dev/null 2>&1 &
@@ -40,11 +33,7 @@ poll 60 "dummy-vllm serving" bash -c 'curl -sf localhost:18000/v1/models | grep 
 poll 120 "worker discovered (readyz reports a ready endpoint)" \
   bash -c 'curl -s localhost:19001/readyz | grep -q "with ready endpoints: 1"'
 
-# Trigger a prefill so vLLM publishes BlockStored events. Dummy weights →
-# garbage text, but the KV cache and event stream are real. The prompt must
-# be LONG: vLLM only stores (and thus publishes) FULL blocks, and the CPU
-# backend's block size is 128 tokens — a short prompt produces zero events.
-# ~60 repetitions ≈ 900 tokens ≈ 7 full blocks.
+# vLLM only publishes full 128-token blocks on CPU; this is ~7 of them.
 echo "sending one long completion to trigger KV events..."
 PROMPT=$(printf 'The quick brown fox jumps over the lazy dog near the riverbank at dawn. %.0s' {1..60})
 curl -sf localhost:18000/v1/chat/completions \
