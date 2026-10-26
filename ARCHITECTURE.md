@@ -134,7 +134,6 @@ The CLI. It imports `kinference-policy` and nothing else of ours.
 
 ### Import direction
 
-Imports point down, never up or sideways.
 
 - `kinference-policy` imports nothing of ours.
 - The fleet imports `kinference-policy`.
