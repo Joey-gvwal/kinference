@@ -7,7 +7,7 @@
 //!
 //! A seventh reflector, on core `Service`, is not an input to [`resolve`] and
 //! does not hold the publish gate (see [`kinference_policy::services`]). Its output is
-//! attached to the published snapshot ([`PolicyIndex::services`]) so pools and
+//! attached to the published snapshot ([`PolicyIndex::services`](kinference_policy::resolve::PolicyIndex::services)) so pools and
 //! Service ports are read from one consistent instant.
 
 use std::sync::Arc;
