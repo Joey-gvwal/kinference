@@ -3,7 +3,5 @@
 !Cargo.toml
 !Cargo.lock
 !build.rs
-!proto
 !src
 !crates
-!dashboard/dist
