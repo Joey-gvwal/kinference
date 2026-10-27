@@ -29,9 +29,10 @@ logLevel: "kinference=debug,dynamo_kv_router::indexer::radix_tree=error,dynamo_k
 # Contends with tokenize HTTP and can adopt blocks the engine has evicted.
 enableReplay: false
 
-# Predicted-vs-observed CSV (KINFERENCE_OBSERVATIONS_CSV), "" to disable.
-# Written to an emptyDir that is lost with the pod.
-observationsCsv: /var/log/kinference/latency.csv
+# Predicted-vs-observed CSV (KINFERENCE_OBSERVATIONS_CSV). Off by default;
+# set a path such as /var/log/kinference/latency.csv to record rows. The
+# file lives on an emptyDir that is lost with the pod.
+observationsCsv: ""
 
 # Secret with a HUGGING_FACE_HUB_TOKEN key, for gated models.
 hfTokenSecret: ""
