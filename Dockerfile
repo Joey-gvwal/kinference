@@ -39,8 +39,8 @@ ENV KINFERENCE_VERSION=${KINFERENCE_VERSION}
 
 # The target dir is a cache mount, so the binaries are copied out to /out
 # for the runtime stage.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=cargo-$TARGETARCH,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-$TARGETARCH,target=/src/target \
     target=$(case "$TARGETARCH" in \
         amd64) echo x86_64-unknown-linux-gnu ;; \
         arm64) echo aarch64-unknown-linux-gnu ;; \
