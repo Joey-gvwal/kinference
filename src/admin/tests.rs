@@ -374,6 +374,72 @@ async fn simulate_flips_verdict_when_a_candidate_override_is_edited() {
     );
 }
 
+/// Simulate routes on the `tags` it is given.
+#[tokio::test]
+async fn simulate_routes_on_the_given_tags() {
+    let store = kinference_policy::store::PolicyStore::new();
+    store.publish(index_with_policy(
+        "restricted-only",
+        serde_json::json!({
+            "unmatched": "Reject",
+            "rules": [{
+                "name": "restricted-stays-local",
+                "matches": [{ "tag": "restricted" }],
+                "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] }
+            }]
+        }),
+    ));
+
+    let run = |tags: serde_json::Value| {
+        let store = store.clone();
+        async move {
+            let req = serde_json::from_value(serde_json::json!({
+                "policy": "default/restricted-only",
+                "model": ["qwen-2.5"],
+                "tags": tags,
+                "candidates": [{
+                    "backendName": "ws-qwen",
+                    "backendType": "Local",
+                    "canonicalModel": "qwen-2.5",
+                    "endpoint": "10.0.1.100:8000",
+                    "predictedTtftMs": 400.0
+                }]
+            }))
+            .unwrap();
+            body_of(
+                policy_api::simulate(State(api_state(Some(store))), policy_api::ApiJson(req)).await,
+            )
+            .await
+        }
+    };
+
+    let (status, tagged) = run(serde_json::json!(["internal", "restricted"])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tagged["verdict"], "chosen", "{tagged}");
+
+    let (status, untagged) = run(serde_json::json!([])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(untagged["verdict"], "rejected_unmatched", "{untagged}");
+}
+
+/// `tags` is bounded like `model`.
+#[tokio::test]
+async fn simulate_rejects_too_many_tags() {
+    let store = kinference_policy::store::PolicyStore::new();
+    store.publish(index_with_policy("policy-5", policy_5()));
+    let tags: Vec<String> = (0..65).map(|i| format!("t{i}")).collect();
+    let req = serde_json::from_value(serde_json::json!({
+        "policy": "default/policy-5", "tags": tags, "candidates": []
+    }))
+    .unwrap();
+    let (status, body) = body_of(
+        policy_api::simulate(State(api_state(Some(store))), policy_api::ApiJson(req)).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["field"], "tags", "{body}");
+}
+
 /// A candidate with no prediction is ranked at 0.0 ms, so `predictionSource`
 /// must say so.
 #[tokio::test]

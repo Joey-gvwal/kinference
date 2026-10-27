@@ -300,7 +300,7 @@ impl CompiledPolicy {
 }
 
 /// The request fields a `matches` entry or `if:` accepts, for hints.
-const REQUEST_FIELDS: &str = "model, inputTokens, maxTokens, tenant, qos";
+const REQUEST_FIELDS: &str = "model, inputTokens, maxTokens, tenant, qos, tag";
 /// The candidate fields a `drop:` accepts, for hints.
 const DROP_FIELDS: &str = "contextWindow, predictedTTFT, prefixCacheHitRatio, queuedPrompts, \
                            kvCacheUsage, model.name, backend.type, backend.name, \
@@ -383,6 +383,7 @@ fn is_blank(p: &RequestPredicate) -> bool {
         && p.max_tokens.is_none()
         && p.tenant.is_none()
         && p.qos.is_none()
+        && p.tag.is_none()
 }
 
 /// The values a numeric attribute can take, for spotting comparisons that are

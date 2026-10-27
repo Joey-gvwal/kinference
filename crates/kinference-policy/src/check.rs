@@ -224,7 +224,7 @@ pub struct SkippedDocument {
 }
 
 /// The request fields a `matches` entry or an `if:` accepts.
-const REQUEST_KEYS: &[&str] = &["model", "inputTokens", "maxTokens", "tenant", "qos"];
+const REQUEST_KEYS: &[&str] = &["model", "inputTokens", "maxTokens", "tenant", "qos", "tag"];
 
 /// The keys the CRD schema declares at each OBJECT position of a policy spec,
 /// positions spelled as dotted paths with list indices removed.

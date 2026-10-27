@@ -541,6 +541,8 @@ impl KinferenceService {
             max_tokens: facts.max_tokens,
             qos: Some(req.qos.as_label().to_string()),
             tenant: req.identity.tenant.clone(),
+            // Nothing produces tags yet.
+            tag: Vec::new(),
         };
         // Re-bind to the winning group, whose pool's scores and prefix hashes
         // the critical section uses.

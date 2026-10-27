@@ -72,6 +72,19 @@ spec:
                             maxItems: 3
                             x-kubernetes-list-type: set
                             items: {type: string, enum: [interactive, batch, deferrable]}
+                          tag:
+                            description: |-
+                              A set of opaque string tags attached to the request.
+
+                              Set semantics. A scalar RHS means contains (`tag:
+                              gpu`); an array means intersects (`tag: [gpu,
+                              restricted]`); `{containsAll: [...]}` means all of
+                              them; `{not: gpu}` means the tag is absent.
+
+                              Nothing sets tags on requests yet: the router sends
+                              an empty set, so a scalar, array or `containsAll`
+                              never matches and `{not: ...}` always matches.
+                            x-kubernetes-preserve-unknown-fields: true
                     route:
                       type: object
                       required: [select]
@@ -162,6 +175,19 @@ spec:
                                     maxItems: 3
                                     x-kubernetes-list-type: set
                                     items: {type: string, enum: [interactive, batch, deferrable]}
+                                  tag:
+                                    description: |-
+                                      A set of opaque string tags attached to the request.
+
+                                      Set semantics. A scalar RHS means contains (`tag:
+                                      gpu`); an array means intersects (`tag: [gpu,
+                                      restricted]`); `{containsAll: [...]}` means all of
+                                      them; `{not: gpu}` means the tag is absent.
+
+                                      Nothing sets tags on requests yet: the router sends
+                                      an empty set, so a scalar, array or `containsAll`
+                                      never matches and `{not: ...}` always matches.
+                                    x-kubernetes-preserve-unknown-fields: true
                               drop:
                                 type: object
                                 properties:

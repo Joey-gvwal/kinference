@@ -71,6 +71,7 @@ fn attrs(model: &str, qos: &str) -> RequestAttrs {
         input_tokens: Some(1024),
         max_tokens: Some(256),
         tenant: String::new(),
+        tag: Vec::new(),
     }
 }
 
