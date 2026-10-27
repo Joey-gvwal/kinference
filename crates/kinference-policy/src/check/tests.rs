@@ -156,6 +156,9 @@ spec:
         drop:
           backend:       {type: Local}
           kvCacheUsage:  {greaterThan: 0.1}
+      - name: restricted-stays-local
+        if:   { tag: [restricted] }
+        drop: { backend: {type: Provider} }
       select:
       - {type: Local,    minimize: PredictedTTFT}
       - {type: Provider, order: [databricks]}

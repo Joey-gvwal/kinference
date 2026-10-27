@@ -374,6 +374,72 @@ async fn simulate_flips_verdict_when_a_candidate_override_is_edited() {
     );
 }
 
+/// Simulate routes on the `tags` it is given.
+#[tokio::test]
+async fn simulate_routes_on_the_given_tags() {
+    let store = kinference_policy::store::PolicyStore::new();
+    store.publish(index_with_policy(
+        "restricted-only",
+        serde_json::json!({
+            "unmatched": "Reject",
+            "rules": [{
+                "name": "restricted-stays-local",
+                "matches": [{ "tag": "restricted" }],
+                "route": { "select": [{ "type": "Local", "minimize": "PredictedTTFT" }] }
+            }]
+        }),
+    ));
+
+    let run = |tags: serde_json::Value| {
+        let store = store.clone();
+        async move {
+            let req = serde_json::from_value(serde_json::json!({
+                "policy": "default/restricted-only",
+                "model": ["qwen-2.5"],
+                "tags": tags,
+                "candidates": [{
+                    "backendName": "ws-qwen",
+                    "backendType": "Local",
+                    "canonicalModel": "qwen-2.5",
+                    "endpoint": "10.0.1.100:8000",
+                    "predictedTtftMs": 400.0
+                }]
+            }))
+            .unwrap();
+            body_of(
+                policy_api::simulate(State(api_state(Some(store))), policy_api::ApiJson(req)).await,
+            )
+            .await
+        }
+    };
+
+    let (status, tagged) = run(serde_json::json!(["internal", "restricted"])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tagged["verdict"], "chosen", "{tagged}");
+
+    let (status, untagged) = run(serde_json::json!([])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(untagged["verdict"], "rejected_unmatched", "{untagged}");
+}
+
+/// `tags` is bounded like `model`.
+#[tokio::test]
+async fn simulate_rejects_too_many_tags() {
+    let store = kinference_policy::store::PolicyStore::new();
+    store.publish(index_with_policy("policy-5", policy_5()));
+    let tags: Vec<String> = (0..65).map(|i| format!("t{i}")).collect();
+    let req = serde_json::from_value(serde_json::json!({
+        "policy": "default/policy-5", "tags": tags, "candidates": []
+    }))
+    .unwrap();
+    let (status, body) = body_of(
+        policy_api::simulate(State(api_state(Some(store))), policy_api::ApiJson(req)).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["field"], "tags", "{body}");
+}
+
 /// A candidate with no prediction is ranked at 0.0 ms, so `predictionSource`
 /// must say so.
 #[tokio::test]
@@ -639,8 +705,8 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
                 "requestedModel": requested,
                 "inputTokens": 1024,
                 // One candidate per name the endpoint is routable under.
-                // `consider` with no `models:` targets the resolved upstream,
-                // so only that row can be admitted, as in `policy_driver`.
+                // A `consider` with no `models:` targets the requested name, so
+                // the policy admits only that row.
                 "candidates": [
                     { "backendName": "qwen-2-5-32b", "backendType": "Local",
                       "canonicalModel": "Qwen/Qwen2.5-32B-Instruct-AWQ",
@@ -889,8 +955,9 @@ async fn kv_cache_usage_excludes_the_saturated_worker_the_queue_ranks_backwards(
 /// A backed-up local worker fails over to the provider.
 ///
 /// `policy-3` has no `consider`, exclusions that shed a queued local endpoint,
-/// and a second `select` tier of `type: Provider`. The provider serves its own
-/// build (`…-Turbo`) of the model, so it must be considered via the alias.
+/// and a second `select` tier of `type: Provider`. Each destination serves its
+/// own build of the model under the alias that the client asked for, so the
+/// policy considers the provider alongside the local set.
 #[tokio::test]
 async fn a_backed_up_local_worker_fails_over_to_the_provider() {
     let store = kinference_policy::store::PolicyStore::new();
@@ -920,13 +987,13 @@ async fn a_backed_up_local_worker_fails_over_to_the_provider() {
         async move {
             let req = serde_json::from_value(serde_json::json!({
                 "policy": "default/policy-3",
-                // The set a request for `qwen-2.5` carries: resolved upstream
-                // first, then the aliases both destinations declare.
-                "model": ["Qwen/Qwen2.5-32B-Instruct-AWQ", "qwen-2.5", "qwen-simple"],
+                // The client asks for the alias that both destinations declare.
+                "requestedModel": "qwen-2.5",
                 "inputTokens": 4096,
                 "candidates": [
                     { "backendName": "qwen-2-5-32b", "backendType": "Local",
-                      "canonicalModel": "Qwen/Qwen2.5-32B-Instruct-AWQ",
+                      "canonicalModel": "qwen-2.5",
+                      "upstreamModel": "Qwen/Qwen2.5-32B-Instruct-AWQ",
                       "endpoint": "10.0.1.55:8000", "queuedPrompts": queued,
                       "predictedTtftMs": 120.0 },
                     // The provider knows the model only by the ALIAS.

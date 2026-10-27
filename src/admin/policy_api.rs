@@ -49,6 +49,7 @@ use kinference_router::picker::{self, WorkerScore};
 pub(super) const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_CANDIDATES: usize = 256;
 const MAX_MODELS: usize = 32;
+const MAX_TAGS: usize = 64;
 const MAX_RUNS: u32 = 500;
 /// Bounds token counts so the block arithmetic in [`predict`] can't overflow.
 const MAX_TOKENS: i64 = 10_000_000;
@@ -626,11 +627,14 @@ pub(super) struct SimRequest {
     /// the engine would see. Preferred over `model`; set one or the other.
     #[serde(default)]
     requested_model: Option<String>,
-    /// The raw `model` attribute set, for asserting on an exact set.
+    /// The raw `model` attribute set, for asserting on an exact set. The
+    /// simulation takes its first entry as the name that the client asked for.
     #[serde(default)]
     model: Vec<String>,
     #[serde(default)]
     qos: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
     #[serde(default)]
     tenant: String,
     #[serde(default)]
@@ -671,6 +675,12 @@ impl SimRequest {
             return Err(ApiError::invalid(
                 "model",
                 format!("at most {MAX_MODELS} names"),
+            ));
+        }
+        if self.tags.len() > MAX_TAGS {
+            return Err(ApiError::invalid(
+                "tags",
+                format!("at most {MAX_TAGS} tags"),
             ));
         }
         if self.candidates.len() > MAX_CANDIDATES {
@@ -863,7 +873,7 @@ fn build_candidate(
             prefix_cache_hit_ratio: if is_local { hit_ratio } else { None },
             queued_prompts: if is_local { o.queued_prompts } else { None },
             kv_cache_usage: if is_local { o.kv_cache_usage } else { None },
-            model_name: Some(o.canonical_model.clone()),
+            model_names: vec![o.canonical_model.clone()],
             backend_name: Some(o.backend_name.clone()),
             backend_type: Some(if is_local { "Local" } else { "Provider" }.to_string()),
             backend_ready_endpoints: if is_local { ready_endpoints } else { None },
@@ -1165,10 +1175,16 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
             Some(m) => model_attr_set(st, pool, m),
             None => req.model.clone(),
         },
+        requested_model: req
+            .requested_model
+            .clone()
+            .or_else(|| req.model.first().cloned())
+            .unwrap_or_default(),
         input_tokens: req.input_tokens,
         max_tokens: req.max_tokens,
         tenant: req.tenant.clone(),
         qos: req.qos.clone(),
+        tag: req.tags.clone(),
     };
 
     // `evaluate` never dereferences the pool id. A fixed placeholder, since

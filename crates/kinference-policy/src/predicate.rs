@@ -6,7 +6,7 @@
 //!
 //! | RHS shape | Meaning                                        | Example                        |
 //! |-----------|------------------------------------------------|--------------------------------|
-//! | scalar    | exact match; CONTAINS for a set-valued attr    | `model: foo`                   |
+//! | scalar    | exact match; CONTAINS for a set-valued attr    | `tag: gpu`, `model: foo`       |
 //! | array     | membership; INTERSECTION for set-valued attrs  | `qos: [batch, deferrable]`     |
 //! | hash      | explicit operator                              | `queuedPrompts: {greaterThan: 8}` |
 //!
@@ -22,8 +22,8 @@
 //! mismatches like `model: {greaterThan: 5}` are caught at compile time.
 //!
 //! A predicate over an attribute that is absent does not match, in both
-//! scopes, except `{exists: false}`. `model` and `tenant` are always present
-//! (see [`RequestAttrs::get`]).
+//! scopes, except `{exists: false}`. `model`, `tenant` and `tag` are always
+//! present (see [`RequestAttrs::get`]).
 
 use std::time::Duration;
 
@@ -80,14 +80,16 @@ pub enum RequestAttr {
     MaxTokens,
     Tenant,
     Qos,
+    /// An unordered set of opaque tags attached to the request.
+    Tag,
 }
 
 impl RequestAttr {
     pub fn kind(&self) -> AttrKind {
         match self {
             RequestAttr::InputTokens | RequestAttr::MaxTokens => AttrKind::Int,
-            // A set; see [`RequestAttrs::model`].
-            RequestAttr::Model => AttrKind::StrList,
+            // Both are sets; see [`RequestAttrs::model`].
+            RequestAttr::Tag | RequestAttr::Model => AttrKind::StrList,
             _ => AttrKind::Str,
         }
     }
@@ -100,6 +102,7 @@ impl RequestAttr {
             RequestAttr::MaxTokens => "maxTokens".into(),
             RequestAttr::Tenant => "tenant".into(),
             RequestAttr::Qos => "qos".into(),
+            RequestAttr::Tag => "tag".into(),
         }
     }
 }
@@ -142,9 +145,9 @@ impl CandidateAttr {
             }
             CandidateAttr::PrefixCacheHitRatio | CandidateAttr::KvCacheUsage => AttrKind::Float,
             CandidateAttr::BackendBudgetExhausted => AttrKind::Bool,
-            CandidateAttr::ModelName | CandidateAttr::BackendName | CandidateAttr::BackendType => {
-                AttrKind::Str
-            }
+            // A list, like `model` on the request: every name that leads to the candidate.
+            CandidateAttr::ModelName => AttrKind::StrList,
+            CandidateAttr::BackendName | CandidateAttr::BackendType => AttrKind::Str,
         }
     }
 
@@ -606,6 +609,7 @@ impl CompiledRequestPredicate {
         push(RequestAttr::InputTokens, &raw.input_tokens);
         push(RequestAttr::MaxTokens, &raw.max_tokens);
         push(RequestAttr::Tenant, &raw.tenant);
+        push(RequestAttr::Tag, &raw.tag);
         // `qos` after the closure's last use, so it can borrow `terms`.
         if let Some(v) = &raw.qos {
             match compile_qos(v) {
@@ -707,24 +711,34 @@ pub struct RequestAttrs {
     /// before predicates run; this way `model:` matches aliases just as
     /// `consider[].models.names[]` does. Upstream first, then aliases sorted.
     pub model: Vec<String>,
+    /// The one name that the client asked for, after `auto` resolves. Not a
+    /// predicate signal. When a route takes its models from the request, the
+    /// router generates candidates for this name, so only destinations that
+    /// declare it are eligible.
+    pub requested_model: String,
     pub input_tokens: Option<i64>,
     pub max_tokens: Option<i64>,
     /// Always present. `""` is "undetermined" and matches only a rule naming
     /// the empty string.
     pub tenant: String,
     pub qos: Option<String>,
+    /// Empty until something sets tags on requests.
+    pub tag: Vec<String>,
 }
 
 impl RequestAttrs {
     pub fn get(&self, attr: &RequestAttr) -> Option<AttrValue> {
         match attr {
-            // Always `Some`.
+            // Always `Some`, like `tag`.
             RequestAttr::Model => Some(AttrValue::List(self.model.clone())),
             RequestAttr::InputTokens => self.input_tokens.map(AttrValue::Int),
             RequestAttr::MaxTokens => self.max_tokens.map(AttrValue::Int),
             // Always `Some`: an empty tenant is the value "", not an absence.
             RequestAttr::Tenant => Some(AttrValue::Str(self.tenant.clone())),
             RequestAttr::Qos => self.qos.clone().map(AttrValue::Str),
+            // Always `Some`, even when empty, so `{not: t}` matches a request
+            // with no tags.
+            RequestAttr::Tag => Some(AttrValue::List(self.tag.clone())),
         }
     }
 }
@@ -740,7 +754,10 @@ pub struct CandidateAttrs {
     pub queued_prompts: Option<f64>,
     /// Mean KV-cache utilization over the same window, 0.0..1.0.
     pub kv_cache_usage: Option<f64>,
-    pub model_name: Option<String>,
+    /// Every client-facing name that the candidate's destination declares for
+    /// its model. A predicate on any of these names matches, as with `model` on
+    /// the request.
+    pub model_names: Vec<String>,
     pub backend_name: Option<String>,
     pub backend_type: Option<String>,
     pub backend_ready_endpoints: Option<i64>,
@@ -756,7 +773,7 @@ impl CandidateAttrs {
             CandidateAttr::PrefixCacheHitRatio => self.prefix_cache_hit_ratio.map(AttrValue::Float),
             CandidateAttr::QueuedPrompts => self.queued_prompts.map(AttrValue::Float),
             CandidateAttr::KvCacheUsage => self.kv_cache_usage.map(AttrValue::Float),
-            CandidateAttr::ModelName => self.model_name.clone().map(AttrValue::Str),
+            CandidateAttr::ModelName => Some(AttrValue::List(self.model_names.clone())),
             CandidateAttr::BackendName => self.backend_name.clone().map(AttrValue::Str),
             CandidateAttr::BackendType => self.backend_type.clone().map(AttrValue::Str),
             CandidateAttr::BackendReadyEndpoints => {

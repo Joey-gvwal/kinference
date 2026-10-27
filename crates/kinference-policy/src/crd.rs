@@ -644,6 +644,12 @@ pub struct RequestPredicate {
     /// rather than failing deserialization of the whole policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<RawPredicateValue>,
+    /// A set of opaque tags attached to the request. A scalar means contains,
+    /// an array means intersects, `{containsAll: [...]}` means all of them,
+    /// and `{not: t}` means `t` is absent. The router sends an empty set for
+    /// now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<RawPredicateValue>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
