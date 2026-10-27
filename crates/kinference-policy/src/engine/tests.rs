@@ -21,7 +21,7 @@ fn cand(ws: &str, model: &str, ttft: f32) -> Candidate {
             predicted_ttft_ms: ttft,
         },
         attrs: CandidateAttrs {
-            model_name: Some(model.to_string()),
+            model_names: vec![model.to_string()],
             backend_name: Some(ws.to_string()),
             backend_type: Some("Local".to_string()),
             predicted_ttft_ms: Some(ttft as f64),
@@ -45,7 +45,7 @@ fn prov(name: &str, model: &str, observed: Option<f32>) -> Candidate {
             observed_ttft_ms: observed,
         },
         attrs: CandidateAttrs {
-            model_name: Some(model.to_string()),
+            model_names: vec![model.to_string()],
             backend_name: Some(name.to_string()),
             backend_type: Some("Provider".to_string()),
             backend_observed_ttft_ms: observed.map(|ms| ms as f64),
@@ -98,7 +98,7 @@ fn default_consider_is_the_requested_model_everywhere() {
     let p = policy(json!({"rules": [
         {"name": "r", "route": {"select": [{"minimize": "PredictedTTFT"}]}}
     ]}));
-    let targets = models_to_score(route_of(&p), &["gemma".to_string()]);
+    let targets = models_to_score(route_of(&p), "gemma");
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].model, "gemma");
     assert!(
@@ -114,7 +114,7 @@ fn named_models_add_one_the_client_did_not_ask_for() {
     let p = policy(json!({"rules": [{"name": "r", "route": {
         "consider": [{"models": {"names": ["foo", "bar"]}}],
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
-    let targets = models_to_score(route_of(&p), &["gemma".to_string()]);
+    let targets = models_to_score(route_of(&p), "gemma");
     let models: Vec<&str> = targets.iter().map(|t| t.model.as_str()).collect();
     assert_eq!(
         models,
@@ -130,7 +130,7 @@ fn unweighted_groups_union() {
             {"models": {"names": ["foo"]}},
             {"models": {"names": ["bar"]}}],
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
-    assert_eq!(models_to_score(route_of(&p), &["x".to_string()]).len(), 2);
+    assert_eq!(models_to_score(route_of(&p), "x").len(), 2);
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn weighted_groups_sample_exactly_one() {
     let route = route_of(&p);
     assert!(route.weighted());
     for _ in 0..20 {
-        let t = models_to_score(route, &["bar".to_string()]);
+        let t = models_to_score(route, "bar");
         assert_eq!(t.len(), 1, "a partition picks one group, not the union");
     }
 }
@@ -158,7 +158,7 @@ fn weighted_sampling_hits_both_groups_over_many_draws() {
     let route = route_of(&p);
     let mut seen = std::collections::HashSet::new();
     for _ in 0..200 {
-        seen.insert(models_to_score(route, &["x".to_string()])[0].model.clone());
+        seen.insert(models_to_score(route, "x")[0].model.clone());
     }
     assert_eq!(seen.len(), 2, "50/50 must reach both groups: {seen:?}");
 }
@@ -171,7 +171,7 @@ fn duplicate_targets_are_deduped() {
             {"models": {"names": ["bar"]}}],
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
     assert_eq!(
-        models_to_score(route_of(&p), &["x".to_string()]).len(),
+        models_to_score(route_of(&p), "x").len(),
         1,
         "don't score twice"
     );
@@ -184,7 +184,7 @@ fn groups_differing_only_by_class_are_both_scored() {
     let p = policy(json!({"rules": [{"name": "r", "route": {
         "consider": [{"type": "Local"}, {"type": "Provider"}],
         "select": [{"minimize": "EstimatedTTFT"}]}}]}));
-    let classes: Vec<_> = models_to_score(route_of(&p), &["bar".to_string()])
+    let classes: Vec<_> = models_to_score(route_of(&p), "bar")
         .iter()
         .map(|t| t.backends.backend_type)
         .collect();
@@ -987,7 +987,7 @@ fn the_unmatched_route_rejects_a_provider_as_ineligible_not_unmeasurable() {
 #[test]
 fn unmatched_generation_does_not_target_providers() {
     let route = CompiledPolicy::default_route();
-    let targets = models_to_score(&route, &["m".to_string()]);
+    let targets = models_to_score(&route, "m");
     assert_eq!(targets.len(), 1);
     assert!(!targets[0].backends.matches(
         crate::crd::BackendType::Provider,
@@ -996,11 +996,10 @@ fn unmatched_generation_does_not_target_providers() {
     ));
 }
 
-/// A rule with no `consider` reaches a provider serving its own build of the
-/// requested model, since every name the request answers to is scored and
-/// each destination resolves it through its own alias table.
+/// A defaulted `consider` targets only the name that the client asked for;
+/// each destination then resolves that name through its own alias table.
 #[test]
-fn a_defaulted_consider_reaches_every_name_the_request_answers_to() {
+fn a_defaulted_consider_targets_the_name_the_client_asked_for() {
     let p = policy(serde_json::json!({
         "rules": [{
             "name": "local-first-with-provider-failover",
@@ -1013,26 +1012,9 @@ fn a_defaulted_consider_reaches_every_name_the_request_answers_to() {
             }
         }]
     }));
-    // What `RequestAttrs::model` carries for a request naming `qwen-2.5`:
-    // the resolved upstream first, then the declared aliases.
-    let requested = [
-        "Qwen/Qwen2.5-32B-Instruct-AWQ".to_string(),
-        "qwen-2.5".to_string(),
-        "qwen-simple".to_string(),
-    ];
-    let targets = models_to_score(route_of(&p), &requested);
+    let targets = models_to_score(route_of(&p), "qwen-2.5");
     let names: Vec<&str> = targets.iter().map(|t| t.model.as_str()).collect();
-    assert_eq!(
-        names, requested,
-        "every name must be scored, or a destination that only knows the alias is unreachable"
-    );
-
-    // Without `qwen-2.5` among the targets, a provider declaring it as an
-    // alias of its own build would never be asked about.
-    assert!(
-        names.contains(&"qwen-2.5"),
-        "the alias the provider declares must be a target: {names:?}"
-    );
+    assert_eq!(names, ["qwen-2.5"]);
 }
 
 /// One name in, one target out.
@@ -1041,7 +1023,7 @@ fn a_defaulted_consider_with_a_single_name_yields_a_single_target() {
     let p = policy(serde_json::json!({
         "rules": [{"name": "r", "route": {"select": [{"minimize": "PredictedTTFT"}]}}]
     }));
-    let targets = models_to_score(route_of(&p), &["only-one".to_string()]);
+    let targets = models_to_score(route_of(&p), "only-one");
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].model, "only-one");
 }

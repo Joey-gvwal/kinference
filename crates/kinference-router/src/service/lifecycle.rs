@@ -73,6 +73,8 @@ impl WireBody {
 /// will see it, and what scoring consumes.
 struct Resolved {
     model: String,
+    /// The name that the client asked for, before the router resolved any alias.
+    requested_model: String,
     /// Empty when only a provider in the named pool serves the model.
     serving: Vec<Arc<Pool>>,
     body: WireBody,
@@ -83,6 +85,7 @@ struct Resolved {
 /// Step 3. The groups to choose among.
 struct Scored {
     model: String,
+    requested_model: String,
     body: WireBody,
     facts: BodyFacts,
     groups: Vec<ScoredGroup>,
@@ -245,17 +248,20 @@ impl KinferenceService {
             }
         }
 
+        // Save the name that the client sent, since the code below may rewrite
+        // `model` to an upstream. The policy driver generates candidates for
+        // the saved name.
+        let requested_model = model.clone();
+
         // Several pools may serve the model; they are scored and ranked against
         // each other.
         let mut serving = self.scoring.resolve_pools(&model);
 
         // Alias fallback. The model index only holds names engines report, so
         // translate a declared alias via the named pool's worker sets (requires
-        // policy and a named pool).
-        //
-        // Limitation: takes the first served upstream, so interchangeable
-        // upstream models always route to the same one rather than being
-        // ranked by the policy.
+        // policy and a named pool). The first served upstream only decides
+        // which group the router scores first: under a policy, every
+        // destination that declares the name stays a candidate.
         if serving.is_empty()
             && let Some(upstream) = self.resolve_alias(req.pool_ref, &model)
         {
@@ -330,6 +336,7 @@ impl KinferenceService {
         };
         Ok(Resolved {
             model,
+            requested_model,
             serving,
             body,
             facts,
@@ -343,6 +350,7 @@ impl KinferenceService {
     async fn score_groups(&self, req: &PickRequest<'_>, resolved: Resolved) -> Scored {
         let Resolved {
             model,
+            requested_model,
             serving,
             body,
             facts,
@@ -449,6 +457,7 @@ impl KinferenceService {
         }
         Scored {
             model,
+            requested_model,
             body,
             facts,
             groups,
@@ -468,6 +477,7 @@ impl KinferenceService {
     ) -> Result<Selected, PickAndRecordOutcome> {
         let Scored {
             model,
+            requested_model,
             mut body,
             facts,
             groups,
@@ -519,6 +529,7 @@ impl KinferenceService {
                 names.extend(self.declared_aliases(req.pool_ref, &model));
                 names
             },
+            requested_model,
             // Block-granular, from scoring. `None` when nothing local was
             // scored, so `inputTokens` predicates and context-window fitting
             // don't apply.

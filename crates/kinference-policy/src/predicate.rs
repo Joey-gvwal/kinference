@@ -142,9 +142,9 @@ impl CandidateAttr {
             }
             CandidateAttr::PrefixCacheHitRatio | CandidateAttr::KvCacheUsage => AttrKind::Float,
             CandidateAttr::BackendBudgetExhausted => AttrKind::Bool,
-            CandidateAttr::ModelName | CandidateAttr::BackendName | CandidateAttr::BackendType => {
-                AttrKind::Str
-            }
+            // A list, like `model` on the request: every name that leads to the candidate.
+            CandidateAttr::ModelName => AttrKind::StrList,
+            CandidateAttr::BackendName | CandidateAttr::BackendType => AttrKind::Str,
         }
     }
 
@@ -707,6 +707,11 @@ pub struct RequestAttrs {
     /// before predicates run; this way `model:` matches aliases just as
     /// `consider[].models.names[]` does. Upstream first, then aliases sorted.
     pub model: Vec<String>,
+    /// The one name that the client asked for, after `auto` resolves. Not a
+    /// predicate signal. When a route takes its models from the request, the
+    /// router generates candidates for this name, so only destinations that
+    /// declare it are eligible.
+    pub requested_model: String,
     pub input_tokens: Option<i64>,
     pub max_tokens: Option<i64>,
     /// Always present. `""` is "undetermined" and matches only a rule naming
@@ -740,7 +745,10 @@ pub struct CandidateAttrs {
     pub queued_prompts: Option<f64>,
     /// Mean KV-cache utilization over the same window, 0.0..1.0.
     pub kv_cache_usage: Option<f64>,
-    pub model_name: Option<String>,
+    /// Every client-facing name that the candidate's destination declares for
+    /// its model. A predicate on any of these names matches, as with `model` on
+    /// the request.
+    pub model_names: Vec<String>,
     pub backend_name: Option<String>,
     pub backend_type: Option<String>,
     pub backend_ready_endpoints: Option<i64>,
@@ -756,7 +764,7 @@ impl CandidateAttrs {
             CandidateAttr::PrefixCacheHitRatio => self.prefix_cache_hit_ratio.map(AttrValue::Float),
             CandidateAttr::QueuedPrompts => self.queued_prompts.map(AttrValue::Float),
             CandidateAttr::KvCacheUsage => self.kv_cache_usage.map(AttrValue::Float),
-            CandidateAttr::ModelName => self.model_name.clone().map(AttrValue::Str),
+            CandidateAttr::ModelName => Some(AttrValue::List(self.model_names.clone())),
             CandidateAttr::BackendName => self.backend_name.clone().map(AttrValue::Str),
             CandidateAttr::BackendType => self.backend_type.clone().map(AttrValue::Str),
             CandidateAttr::BackendReadyEndpoints => {

@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! for rule in matching_rules(policy, attrs):
-//!     models = models_to_score(rule.route, requested_model)   // may sample by weight
+//!     models = models_to_score(rule.route, attrs.requested_model)   // may sample by weight
 //!     candidates = <async scoring>
 //!     match evaluate(rule.route, attrs, candidates):
 //!         Chosen  -> done
@@ -34,7 +34,8 @@ use super::predicate::{CandidateAttrs, RequestAttrs};
 /// decision covers both which model serves the request and where it runs.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    /// Client-facing name, as the request asked for it.
+    /// Client-facing name: the first name that led to this candidate.
+    /// `attrs.model_names` holds every name that led to it.
     pub canonical_model: String,
     /// What the engine actually wants in the body. Differs from
     /// `canonical_model` when an alias resolved, and usually differs for a
@@ -248,22 +249,20 @@ pub fn matching_rules<'a>(
 /// chosen group. Unweighted groups union, which is how `consider` adds a model
 /// the client didn't ask for.
 ///
-/// Takes the request's whole model set (upstream plus every declared alias, as
-/// in `RequestAttrs::model`), so each destination can resolve it through its
-/// own alias table. Otherwise a provider spelling the model differently would
-/// never become a candidate. As a result, a local endpoint routable under three
-/// names yields three candidates that score identically.
-pub fn models_to_score(route: &CompiledRoute, requested_models: &[String]) -> Vec<ScoreTarget> {
+/// When a group takes its models from the request, the target is the one name
+/// that the client asked for (`RequestAttrs::requested_model`). The caller
+/// resolves that name through each destination's own alias table, so only
+/// destinations that declare the name become eligible. The resolved upstream
+/// would miss a provider that spells the model differently, and every alias of
+/// that upstream would let one worker set serve a name that only another set
+/// declares.
+pub fn models_to_score(route: &CompiledRoute, requested_model: &str) -> Vec<ScoreTarget> {
     let groups: Vec<&super::compile::CompiledConsiderGroup> = if route.consider.is_empty() {
-        // Default: every name the request answers to, on every destination the
-        // pool allows.
-        return requested_models
-            .iter()
-            .map(|m| ScoreTarget {
-                model: m.clone(),
-                backends: BackendMatch::default(),
-            })
-            .collect();
+        // Default: the requested name, on every destination that the pool allows.
+        return vec![ScoreTarget {
+            model: requested_model.to_string(),
+            backends: BackendMatch::default(),
+        }];
     } else if route.weighted() {
         match sample_weighted(&route.consider) {
             Some(i) => vec![&route.consider[i]],
@@ -276,7 +275,7 @@ pub fn models_to_score(route: &CompiledRoute, requested_models: &[String]) -> Ve
     let mut out: Vec<ScoreTarget> = Vec::new();
     for g in groups {
         let models: Vec<String> = match &g.models {
-            ModelChoice::FromRequest => requested_models.to_vec(),
+            ModelChoice::FromRequest => vec![requested_model.to_string()],
             ModelChoice::Names(n) => n.clone(),
         };
         for m in models {
