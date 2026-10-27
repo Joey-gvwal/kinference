@@ -23,9 +23,7 @@ import msgspec
 import zmq
 
 
-# msgspec structs mirror vLLM's EventBatch / BlockStored / BlockRemoved /
-# AllBlocksCleared. Encoded as tagged arrays (array_like=True), which the
-# dynamo `zmq_wire` decoder supports.
+# Mirror vLLM's event types, encoded as tagged arrays.
 
 class BlockStored(msgspec.Struct, array_like=True, tag=True, omit_defaults=True):
     block_hashes: list[int]
@@ -72,9 +70,8 @@ def main() -> int:
     encoder = msgspec.msgpack.Encoder()
     seq = 0
 
-    # Single Stored event with N blocks. token_ids contains N*block_size distinct
-    # u32s so each block produces a distinct tokens_hash (the LocalBlockHash that
-    # find_matches actually keys on).
+    # Distinct tokens give each block a distinct tokens_hash, which
+    # find_matches keys on.
     block_size = args.block_size
     num_blocks = len(args.hashes)
     token_ids = list(range(1, num_blocks * block_size + 1))
@@ -101,7 +98,6 @@ def main() -> int:
         print(f"seq={seq} sent BlockRemoved hashes={args.remove}", flush=True)
         seq += 1
 
-    # Linger so messages flush.
     time.sleep(0.5)
     sock.close(0)
     ctx.term()

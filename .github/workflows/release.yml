@@ -5,11 +5,8 @@ on:
     inputs:
       version:
         description: >-
-          Release version, e.g. 0.1.0 (no v prefix). Required for publishing:
-          once everything else is published the workflow creates the
-          v<version> GitHub release in the public releases repo and the
-          v<version> tag here, and fails upfront if that version was already
-          released (its tag exists in either repo).
+          Release version, e.g. 0.1.0 (no v prefix). Required for publishing;
+          must not already be tagged here or in the public releases repo.
         type: string
         required: false
       publish:
@@ -18,8 +15,7 @@ on:
         required: false
         default: false
 
-# Release runs must never be cancelled mid-flight; dispatches queue up
-# behind one another.
+# Never cancel a release mid-flight; dispatches queue instead.
 concurrency:
   group: ${{ github.workflow }}
 
@@ -28,11 +24,9 @@ permissions:
 
 env:
   DOCKER_REGISTRY: ghcr.io/kinference-ai
-  # This repo is private, so a GitHub release here can't be downloaded with
-  # plain curl. Releases (the kinfctl binaries + artifact-only notes) go to
-  # this public, source-less repo instead; the image and charts are public
-  # on GHCR already. Written with the KINFERENCE_RELEASES_TOKEN secret: a
-  # fine-grained PAT scoped to that one repo, Contents read/write.
+  # Public, source-less repo for the kinfctl binaries and release notes,
+  # since this one is private. Written with KINFERENCE_RELEASES_TOKEN, a
+  # fine-grained PAT with Contents read/write on that repo only.
   RELEASES_REPO: Kinference-AI/kinference-releases
 
 jobs:
@@ -71,13 +65,9 @@ jobs:
       is_release: ${{ steps.release.outputs.is_release }}
       version: ${{ steps.version.outputs.version }}
 
-  # The publish gate: build the release-named image, install the charts from
-  # source pointing at it, and run the smoke test. Nothing is pushed unless
-  # this job is green. The tested image bytes are handed to the publish job
-  # as an artifact, so what is pushed is exactly what was tested.
-  #
-  # No rust toolchain / cache here (unlike gateway's release): the build
-  # happens inside docker via `just image`, not on the host.
+  # The publish gate: smoke-test the release-named image. The tested image
+  # is handed to `publish` as an artifact, so what is pushed is what was
+  # tested. No toolchain needed; the build runs inside docker.
   test:
     needs: meta
     runs-on: ubuntu-24.04
@@ -121,8 +111,7 @@ jobs:
           path: /tmp/kinference-image.tar
           retention-days: 1
 
-  # The CLI, one native build per target. Cross-compiling to darwin from
-  # linux would need the Apple SDK.
+  # One native build per target; cross-compiling to darwin needs the Apple SDK.
   cli:
     needs: meta
     strategy:
@@ -145,11 +134,8 @@ jobs:
         run: |
           just KINFERENCE_VERSION='${{ needs.meta.outputs.version }}' \
                cli-bin '${{ matrix.target }}'
-      # The binary must identify as the release it ships in (linkerd asserts
-      # the same of `linkerd version`), its checksum must verify, and it must
-      # actually run a `check` (exit 0 clean / 1 findings; 2 is unusable
-      # input, a crash is anything else). The linker listing is diagnostic:
-      # it should show system libraries only.
+      # `check` exits 0 (clean) or 1 (findings); anything else is a failure.
+      # The linker listing is diagnostic and should show system libraries only.
       - name: Verify the binary
         run: |
           version='${{ needs.meta.outputs.version }}'
@@ -183,8 +169,7 @@ jobs:
 
   publish:
     if: ${{ needs.meta.outputs.is_release == 'true' }}
-    # `cli` gates the push too: a release is all-or-nothing, so a broken
-    # CLI build must not leave an image and charts out without a release.
+    # A release is all-or-nothing, so a broken CLI build blocks the push too.
     needs: [meta, test, cli]
     runs-on: ubuntu-24.04
     permissions:
@@ -206,8 +191,7 @@ jobs:
           docker load -i /tmp/kinference-image.tar
           docker push "$DOCKER_REGISTRY/kinference:${{ needs.meta.outputs.version }}"
       - name: Publish charts
-        # Both charts are versioned in lockstep: one release tag stamps
-        # kinference-crds and kinference alike.
+        # Both charts share the release version.
         run: |
           version='${{ needs.meta.outputs.version }}'
           for chart in kinference-crds kinference; do
@@ -218,16 +202,10 @@ jobs:
           done
 
   release:
-    # Publishes the user-facing release to the public releases repo (the
-    # kinfctl binaries, their checksums, and notes that list the artifacts
-    # and install steps only: no commit history), then tags v<version> here.
-    #
-    # Order matters: the local tag is the "this version is done" marker
-    # that `meta` refuses to recreate. If the public release succeeds and
-    # the tag step fails, the retry stops loudly at `meta`'s public-tag
-    # check instead of silently re-publishing; delete the public release
-    # and its tag, then re-dispatch. A failure before the public release
-    # leaves nothing behind and the version can simply be retried.
+    # Creates the public release, then tags v<version> here. If tagging
+    # fails after the public release exists, a retry stops at `meta`'s
+    # public-tag check: delete the public release and its tag, then
+    # re-dispatch.
     if: ${{ needs.meta.outputs.is_release == 'true' }}
     needs: [meta, publish]
     runs-on: ubuntu-24.04
@@ -274,8 +252,7 @@ jobs:
           EOF
           cat release-notes.md
       - name: Create the public release
-        # No --target: the tag lands on the releases repo's default branch,
-        # the only sensible target in a repo that holds no source.
+        # No --target: the tag lands on the releases repo's default branch.
         env:
           GH_TOKEN: ${{ secrets.KINFERENCE_RELEASES_TOKEN }}
         run: |

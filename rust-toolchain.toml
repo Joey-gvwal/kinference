@@ -1,19 +1,6 @@
-# Pins the toolchain so a build is reproducible across machines and CI.
-#
-# A specific version rather than "stable": kinference ships as a binary and a
-# container image, so "whatever rustc the machine happens to have" is the same
-# class of non-determinism that tracking Cargo.lock just removed from dependency
-# resolution. Bumping is a deliberate, reviewable commit.
-#
-# Keep in sync with:
-#   - Dockerfile's `FROM rust:<version>-slim-bookworm` (the image build would
-#     otherwise rustup-download this toolchain on every build)
-#   - Cargo.toml's `rust-version`, which is the MSRV FLOOR (currently 1.89,
-#     kube 4.2's requirement) rather than the version we build with. The floor
-#     documents what consumers need; this pins what we actually ship.
+# Keep in sync with the Dockerfile's `FROM rust:<version>`. Cargo.toml's
+# `rust-version` is the MSRV floor, not the version we build with.
 [toolchain]
 channel = "1.95.0"
-# clippy and rustfmt are in the verification loop, so a fresh checkout should
-# have them without a second install step.
 components = ["rustfmt", "clippy"]
 profile = "minimal"

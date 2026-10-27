@@ -7,8 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-# `PoolId::from_raw`, for tests in other crates that need a specific id.
-# Production ids come only from `PoolId::next`.
+# `PoolId::from_raw`, for tests in other crates.
 test-util = []
 
 [dependencies]
@@ -16,20 +15,14 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 getrandom.workspace = true
-# `derive` supplies `#[derive(CustomResource)]` for the CRD types in
-# `src/crd.rs` (see also `schemars`, which it requires). No client and no
-# runtime: nothing here talks to a cluster.
+# Only `derive`: nothing here talks to a cluster.
 kube = { workspace = true, features = ["derive"] }
 k8s-openapi.workspace = true
-# Required by `kube`'s `CustomResource` derive, which generates a `JsonSchema`
-# impl. We never emit a schema (the CRDs in `charts/kinference-crds/templates/`
-# are hand-written and are the source of truth) — this is purely to satisfy the
-# derive, so nothing downstream consumes its output.
+# Required by the `CustomResource` derive. The schema is never emitted; the
+# hand-written CRDs in charts/kinference-crds are the source of truth.
 schemars = "1"
-# YAML for `kinfctl check`. The same version kube-client compiles in for
-# kubeconfig parsing, so the router's build gains no crate from it.
+# Same version as kube-client's, so it adds no crate to the build.
 serde-saphyr = "0.0.29"
-# Locates a deserialization error inside a policy spec.
 serde_path_to_error = "0.1"
 
 [lints]

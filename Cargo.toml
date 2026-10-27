@@ -20,7 +20,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# Edition 2024 needs 1.85; kube 4.2 raises the real floor to 1.89.
+# kube 4.2's MSRV.
 rust-version = "1.89"
 license = "Apache-2.0"
 
@@ -51,12 +51,8 @@ axum = "0.7"
 tempfile = "3"
 
 [workspace.lints.clippy]
-# Service-facing functions return `tonic::Status` (and `(Status, RejectReason)`)
-# by contract, and `Status` is a large type. Boxing gRPC errors on a cold path
-# is unidiomatic churn at every call site, so the lint is off crate-wide rather
-# than allowed at each of the handful of signatures it flags.
+# Service functions return `tonic::Status`, which is large, by contract.
 result_large_err = "allow"
-# Name module files `foo.rs`, not `foo/mod.rs`.
 mod_module_files = "warn"
 
 [package]
@@ -82,8 +78,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 clap.workspace = true
 serde_json.workspace = true
-# The exposition side: the typed registry and counters behind our own
-# /metrics endpoint. The scrape side, `prometheus-parse`, is the fleet's.
 prometheus.workspace = true
 axum.workspace = true
 
@@ -91,15 +85,9 @@ axum.workspace = true
 workspace = true
 
 [dev-dependencies]
-# `PoolId::from_raw`, for tests that need a specific pool id.
 kinference-policy = { workspace = true, features = ["test-util"] }
-# `test_pool` and friends, for tests that need a pool or a scrape sample.
 kinference-fleet = { workspace = true, features = ["test-util"] }
-# `ObjectMeta`, for the policy objects the admin tests build. Already in the
-# tree through kinference-policy; this only names it.
 k8s-openapi.workspace = true
-# `ServiceExt::oneshot`, to drive the admin router in tests exactly as a
-# client would. Already in the tree through axum; this only names the feature.
+# `ServiceExt::oneshot`, to drive the admin router in tests.
 tower = { version = "0.5", features = ["util"] }
-# Scoped temp directories for the config tests.
 tempfile.workspace = true

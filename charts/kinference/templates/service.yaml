@@ -1,19 +1,5 @@
-# ClusterIP service. Two ports:
-#   - admin     — /readyz, /metrics and the JSON API under /api
-#   - grpc      — what consumers call for Pick()
-#
-# ClusterIP keeps all ports internal. To reach them from your laptop:
-#
-#   kubectl port-forward svc/<release> 50051:grpc 9001:admin
-#
-# If you'd rather expose externally, set service.type=LoadBalancer and
-# consider TLS — the gRPC server is plaintext.
-#
-# NOTE the caller-side constraint (see templates/deployment.yaml): every call
-# for one request must reach the SAME replica. A ClusterIP Service balances
-# connections rather than requests, so one long-lived gRPC connection per
-# caller gives this for free. Per-request L7 balancing in front of kinference is
-# NOT supported.
+# The gRPC server is plaintext. Every call for one request must reach the
+# same replica, so per-request L7 balancing in front of it is not supported.
 apiVersion: v1
 kind: Service
 metadata:

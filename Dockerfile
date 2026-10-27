@@ -1,26 +1,16 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage build for kinference. The image is mount-required: users
-# pass their own config via -v + --config, e.g.
+# The image ships no config; mount one and pass --config, e.g.
 #
 #   docker run --rm -p 50051:50051 \
 #       -v $(pwd)/config.json:/etc/kinference/config.json:ro \
 #       kinference --config /etc/kinference/config.json
-#
-# Build:
-#   DOCKER_BUILDKIT=1 docker build -t kinference .
 
-# ---------- builder ----------
-# Use a recent stable. The `dynamo-kv-router` git dep doesn't resolve under
-# cargo 1.83 (workspace-inside-monorepo lookup changed), so we need >= 1.86.
-# Keep this version in lockstep with rust-toolchain.toml. If they disagree,
-# rustup silently downloads the pinned toolchain inside the container on every
-# build — correct, but a slow surprise.
+# Match rust-toolchain.toml, or rustup downloads that toolchain on every build.
 FROM rust:1.95-slim-bookworm AS builder
 
-# `tonic-build` (build dep) needs protoc; the `zmq` crate links libzmq via
-# pkg-config; the `dynamo-kv-router` git dep is fetched by cargo so git is
-# required.
+# The `zmq` crate links libzmq via pkg-config; cargo needs git for the
+# `dynamo-kv-router` dep.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
@@ -35,21 +25,15 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY src ./src
-# The other workspace members: the policy, fleet, router and controller
-# crates the server depends on, and `kinfctl`.
 COPY crates ./crates
 
-# Build-time version override. Passed in via `docker build --build-arg
-# KINFERENCE_VERSION=<tag>`; consumed by `src/version.rs` and
-# `crates/kinfctl/src/version.rs` via `option_env!`.
-# Falls back to `CARGO_PKG_VERSION` when unset, so an unannotated build
-# still has a usable version.
+# Read by `option_env!` in both binaries; unset falls back to
+# `CARGO_PKG_VERSION`.
 ARG KINFERENCE_VERSION
 ENV KINFERENCE_VERSION=${KINFERENCE_VERSION}
 
-# BuildKit cache mounts keep cargo's registry + the target dir warm across
-# builds without bloating image layers. We copy the binaries out of the
-# (non-persisted) target dir into /out so the runtime stage can find them.
+# The target dir is a cache mount, so the binaries are copied out to /out
+# for the runtime stage.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --bins \
@@ -58,7 +42,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/kinfctl /out/ \
     && cp target/release/compute_hash /out/
 
-# ---------- runtime ----------
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -68,7 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin app
 
 COPY --from=builder /out/kinference         /usr/local/bin/kinference
-# The policy checker, so it runs with no Rust toolchain:
 #   docker run --rm -i --entrypoint kinfctl <image> check - < policy.yaml
 COPY --from=builder /out/kinfctl       /usr/local/bin/kinfctl
 COPY --from=builder /out/compute_hash  /usr/local/bin/compute_hash

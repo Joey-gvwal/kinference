@@ -1,15 +1,6 @@
 {{- if .Values.rbac.create }}
-# RBAC for kinference's KubeDiscovery.
-#
-# KubeDiscovery watches `EndpointSlice` resources for the named Service,
-# nothing else. No Pod permissions needed — all the per-pod data we use (UID,
-# IP, node, zone, target ref) is exposed directly on the EndpointSlice's
-# `endpoints[]`.
-#
-# This binding is cluster-wide so the monitor can watch EndpointSlices across
-# all namespaces (config knob `discovery.namespace` unset). To scope the
-# monitor to a single namespace, swap ClusterRole + ClusterRoleBinding for
-# Role + RoleBinding and set `discovery.namespace` in the config.
+# Cluster-wide so discovery can watch EndpointSlices in every namespace.
+# Everything per-pod that routing needs is on the EndpointSlice.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -20,26 +11,14 @@ rules:
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
-  # InferenceWorkerSets are DISCOVERY, not policy: with config.kubernetes.enabled
-  # they define which pools exist at all. They belong in the base role for that
-  # reason — gating them behind the policy role means a router with policy off
-  # gets a Forbidden retry loop and serves nothing, with no obvious cause.
-  # Writing their status stays policy-gated below.
+  # Worker sets drive discovery even with policy off; writing their status
+  # is policy-gated below.
   - apiGroups: ["kinference.buoyant.io"]
     resources: ["inferenceworkersets"]
     verbs: ["get", "list", "watch"]
-  # Leader election (`config.leader_election.enabled`), required before
-  # scaling past one replica so that exactly one pod writes CRD status.
-  #
-  # `update` (not `patch`) because the elector writes with `replace`, carrying
-  # the last-seen resourceVersion for optimistic concurrency — that is what
-  # stops two replicas both winning a claim.
-  #
-  # Election fails CLOSED: without these verbs every replica stays a follower
-  # and NO status is written, so `Accepted=True` never appears and a conforming
-  # gateway never programs a route. Routing itself keeps working. Watch for
-  # `kinference_leader` sitting at 0 on every pod with
-  # `kinference_leader_election_errors_total` climbing.
+  # Leader election. `update` because the elector replaces with the last-seen
+  # resourceVersion. Without these verbs no replica leads and no status is
+  # written, so gateways never program routes.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
@@ -60,22 +39,9 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- if include "kinference.policyEnabled" . }}
 ---
-# A SECOND ClusterRole rather than extra rules on the one above: that one is
-# named for what it does (`endpointslice-watcher`) and is already bound, so
-# widening it would leave the name lying. Rendered only when policy is on.
-#
-# kinference is the router-controller for these kinds, so it both reads them and
-# writes their status:
-#   - the three kinference.buoyant.io kinds: get/list/watch to resolve
-#     pool -> policy -> workerSets, and status update/patch to publish
-#     destinationCount, aggregated models, unresolvedDestinations, and the
-#     Accepted / ResolvedRefs conditions.
-#   - services: READ-ONLY, for the service-port number a BackendBinding must
-#     carry.
-#   - httproutes: READ-ONLY, and only because `Accepted` lives inside
-#     InferencePool `status.parents[]`, which is keyed by parent Gateway.
-#     kinference never writes HTTPRoute status — that belongs to the gateway
-#     controller.
+# Policy-only permissions. HTTPRoutes are read because InferencePool
+# `status.parents[]` is keyed by parent Gateway; Services for the port a
+# BackendBinding carries.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -83,7 +49,6 @@ metadata:
   labels:
     {{- include "kinference.labels" . | nindent 4 }}
 rules:
-  # `inferenceworkersets` read access lives in the BASE role — see above.
   - apiGroups: ["kinference.buoyant.io"]
     resources: ["inferencepools", "inferencepolicies", "inferenceproviders"]
     verbs: ["get", "list", "watch"]
@@ -97,45 +62,19 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes"]
     verbs: ["get", "list", "watch"]
-  # BackendBindings are the one place kinference writes an OBJECT rather than a
-  # status subresource (`config.policy.backend_bindings`, on by default).
+  # The only objects kinference writes (`config.policy.backend_bindings`).
   - apiGroups: ["gateway.linkerd.io"]
     resources: ["backendbindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # ReferenceGrant is how kinference decides whether one namespace may reference an
-  # object in another — a pool's `destinations[].namespace`, and an
-  # InferenceProvider's `backendRef.namespace`. The second is what stops one
-  # namespace spending another's vendor credential.
+  # Gates cross-namespace destinations and provider backendRefs.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["referencegrants"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
-  #
-  # WHAT IS DELIBERATELY ABSENT
-  #
-  # No `endpoints`, `pods` or `nodes`: everything per-pod that routing needs is
-  # on the EndpointSlice.
-  #
-  # No `secrets`, and nothing else in the core ("") apiGroup beyond read-only
-  # Services. This is load-bearing rather than incidental: an off-cluster
-  # destination's credentials live on a GatewayBackend, and kinference is designed
-  # never to hold one. It names the backend by reference in the Pick response
-  # and the CALLER resolves it, so a kinference compromise leaks no vendor
-  # credential — there is none in its address space to leak.
-  #
-  # No `gatewaybackends` (gateway.linkerd.io) either, for the same reason:
-  # kinference reads the InferenceProvider that points AT one, never the object
-  # itself.
-  #
-  # RBAC is allowlist-only with no deny rules, so these absences ARE the
-  # guarantee. Assert them rather than trusting them:
-  #
-  #   for r in secrets pods gatewaybackends.gateway.linkerd.io serviceaccounts/token; do
-  #     kubectl auth can-i get "$r" \
-  #       --as=system:serviceaccount:<ns>:<release>   # every line: no
-  #   done
+  # No `secrets` or `gatewaybackends`, on purpose: the caller resolves a
+  # provider's GatewayBackend, so kinference never holds a vendor credential.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
