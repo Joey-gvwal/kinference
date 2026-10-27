@@ -236,7 +236,7 @@ impl Checker<'_, '_> {
                     }
                 }
                 if let Some(raw) = ex.drop.model.as_ref().and_then(|m| m.name.as_ref()) {
-                    self.models(raw, AttrKind::Str, &format!("{ep}.drop.model.name"), r);
+                    self.models(raw, AttrKind::StrList, &format!("{ep}.drop.model.name"), r);
                 }
             }
             for (t, tier) in rule.route.select.iter().enumerate() {

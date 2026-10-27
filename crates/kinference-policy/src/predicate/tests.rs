@@ -445,12 +445,12 @@ fn candidate_nested_backend_and_model_paths_compile() {
     let c = CandidateAttrs {
         backend_name: Some("workers-a100".into()),
         backend_ready_endpoints: Some(1),
-        model_name: Some("foo".into()),
+        model_names: vec!["foo".into()],
         ..Default::default()
     };
     assert!(p.matches(&c));
     let c2 = CandidateAttrs {
-        model_name: Some("bar".into()),
+        model_names: vec!["bar".into()],
         ..c.clone()
     };
     assert!(!p.matches(&c2), "model.name == bar fails the `not`");
