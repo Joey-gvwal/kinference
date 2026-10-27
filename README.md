@@ -23,13 +23,15 @@ The schemas are in [charts/kinference-crds](charts/kinference-crds/templates).
 ## Quick start
 
 ```sh
-helm install kinference-crds oci://cr.kinference.ai/kinference-ai/charts/kinference-crds
-helm install kinference oci://cr.kinference.ai/kinference-ai/charts/kinference \
+helm install kinference-crds oci://cr.kinference.ai/kinference-ai/charts/kinference-crds --devel
+helm install kinference oci://cr.kinference.ai/kinference-ai/charts/kinference --devel \
   --set extension.enabled=true
 ```
 
-The second chart's `extension.enabled` creates the gateway `Extension` that
-puts kinference in the request path; it needs the gateway installed first.
+`--devel` because every published chart is still a pre-release, which Helm
+skips by default. The second chart's `extension.enabled` creates the
+gateway `Extension` that puts kinference in the request path; it needs the
+gateway installed first.
 Everything past the defaults is documented in
 [charts/kinference/values.yaml](charts/kinference/values.yaml).
 
