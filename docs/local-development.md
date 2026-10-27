@@ -150,8 +150,15 @@ The same command sets the chart's other knobs: `logLevel` sets `RUST_LOG`
 (`kinference=trace,dynamo_kv_router=trace` for KV-event debugging),
 `enableReplay` makes kinference fetch the event history on attach, and
 `observationsCsv` names the file that receives the rows of predicted
-versus observed latency. The rows live on an emptyDir that goes away with
-the pod, so copy them out before a restart:
+versus observed latency. The CSV is off by default; enable it with a path:
+
+```sh
+helm upgrade kinference charts/kinference --reuse-values \
+  --set observationsCsv=/var/log/kinference/latency.csv
+```
+
+The rows live on an emptyDir that goes away with the pod, so copy them out
+before a restart:
 
 ```sh
 kubectl cp "$(kubectl get pod -l app.kubernetes.io/name=kinference -o name | cut -d/ -f2):/var/log/kinference/latency.csv" latency.csv
