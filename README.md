@@ -57,12 +57,16 @@ Or from source: `just install-cli`.
 
 ## Scope
 
-Supported: vLLM and SGLang workers found through Kubernetes, KV-event ingest
-with optional replay, engine metrics scrape, in-process or `/render`
-tokenizing, latency-model picking, off-cluster providers, policy-driven
-routing, leader election for the control plane.
+Supported: vLLM workers, and SGLang workers started with `--enable-metrics`
+and `--kv-events-config` and tokenized in-process, found through Kubernetes;
+KV-event ingest with optional replay; engine metrics scrape; in-process or
+`/render` tokenizing, the latter vLLM only; latency-model picking;
+off-cluster providers; policy-driven routing; leader election for the
+control plane.
 
-Not yet: more than one replica sharing picker state.
+Not yet: more than one replica sharing picker state. SGLang with DP
+attention, since only rank 0's KV events are read. SGLang is not in the
+end-to-end test.
 
 ## License
 
