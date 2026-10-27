@@ -41,6 +41,8 @@ Read in this order if you are new to the code.
   each crate owns and the rules that hold across them.
 - [Request flow](docs/request-flow.md): boot, one pick end to end, and
   the loops that keep the fleet and the policy current.
+- [Local development](docs/local-development.md): the kind loop. Build,
+  install, a CPU worker, what to look at, how to iterate.
 - [Contributing](CONTRIBUTING.md): style, commits, running the tests.
 
 ## kinfctl
