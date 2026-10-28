@@ -412,7 +412,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                 let engine_str = detected_engine
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                tracing::info!(
+                tracing::debug!(
                     worker_id = cfg.worker_id_str,
                     model_count = names.len(),
                     engine = %engine_str,
@@ -444,12 +444,6 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         index.associate(pool_id, &pool_name, &names);
                     }
                     crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
-                        tracing::warn!(
-                            worker_id = cfg.worker_id_str,
-                            ?expected,
-                            ?observed,
-                            "warmup: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
-                        );
                         let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                             worker_id_num: cfg.worker_id_num,
                             reason: crate::eviction::EvictionReason::ModelMismatch {
@@ -468,7 +462,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                     .insert(cfg.worker_id_num, ModelsInfo { models });
             }
             Err(err) => {
-                tracing::warn!(
+                tracing::debug!(
                     worker_id = cfg.worker_id_str,
                     http_url,
                     error = &err as &dyn std::error::Error,
@@ -540,7 +534,7 @@ pub fn spawn_metrics_poller(
         let mut n: u64 = 0;
         let mut warned_about_models = false;
 
-        tracing::info!(
+        tracing::debug!(
             worker_id = cfg.worker_id_str,
             url = metrics_url,
             poll_ms,
@@ -591,12 +585,6 @@ pub fn spawn_metrics_poller(
                                 expected,
                                 observed,
                             } => {
-                                tracing::warn!(
-                                    worker_id = cfg.worker_id_str,
-                                    ?expected,
-                                    ?observed,
-                                    "poller: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
-                                );
                                 let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                                     worker_id_num: cfg.worker_id_num,
                                     reason: crate::eviction::EvictionReason::ModelMismatch {

@@ -90,7 +90,7 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
     // `spec.kvEvents`): these engines don't publish. Mark the worker ready and
     // route on load alone, without a prefix signal.
     if cfg.zmq_endpoint.as_deref().unwrap_or("").is_empty() {
-        tracing::info!(
+        tracing::debug!(
             worker_id = cfg.worker_id_str,
             "no KV-event socket declared for this worker; routing on load metrics \
              alone (no prefix-cache signal from it)"
@@ -250,11 +250,6 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
     // With replay off, live ingest still flows, but history is never fetched
     // and gaps aren't recovered.
     let mut replay = if !ingest.replay {
-        tracing::info!(
-            worker_id = worker_id_str,
-            "replay disabled by default; set KINFERENCE_ENABLE_REPLAY=1 to turn on. \
-             Live SUB ingest active; historical events and gap recovery are off."
-        );
         None
     } else {
         match replay_endpoint.as_deref() {
@@ -295,7 +290,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
     // requests get a sentinel). On an idle cluster the tree stays empty until
     // the first event, which is harmless.
     workers.set_initial_sync_complete(worker_id_num);
-    tracing::info!(
+    tracing::debug!(
         worker_id = worker_id_str,
         endpoint = live_endpoint,
         replay = replay_endpoint.as_deref().unwrap_or("-"),
@@ -306,13 +301,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
     loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => {
-                tracing::debug!(
-                    worker_id = worker_id_str,
-                    "listener exiting on cancel"
-                );
-                return Ok(());
-            }
+            _ = cancel.cancelled() => return Ok(()),
             // ZMQ `connect` succeeds with no peer, so report silence, which
             // can mean a wrong address as well as an engine publishing
             // nothing.
@@ -392,7 +381,7 @@ async fn handle_observation(
     match state.cursor.observe(seq) {
         CursorObservation::Initial { got } if got > 0 => {
             // First frame, at a non-zero seq: drain `[0, got)` first.
-            tracing::info!(
+            tracing::debug!(
                 worker_id = worker_id_str,
                 start_seq = 0,
                 end_seq = got,
@@ -576,7 +565,7 @@ async fn replay_gap(
             );
         }
         None => {
-            tracing::info!(
+            tracing::debug!(
                 worker_id = worker_id_str,
                 start_seq,
                 end_seq,
@@ -846,19 +835,6 @@ impl BlockSizeGuard {
                 false
             }
             BlockSizeVerdict::Evict => {
-                let threshold = BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD;
-                let configured = self.configured;
-                tracing::warn!(
-                    worker_id = worker_id_str,
-                    configured_block_size = configured,
-                    engine_block_size,
-                    threshold,
-                    "engine block_size={engine_block_size} differs from \
-                     configured kv_block_size={configured} on {threshold} \
-                     consecutive events; evicting worker. Either the engine \
-                     is mis-configured or the pool's `kv_block_size` needs \
-                     to be set to {engine_block_size}.",
-                );
                 let _ = eviction_tx.send(EvictionRequest {
                     worker_id_num,
                     reason: EvictionReason::BlockSizeMismatch {

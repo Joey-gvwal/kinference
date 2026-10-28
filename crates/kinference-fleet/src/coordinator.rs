@@ -132,12 +132,7 @@ impl Coordinator {
                 }
                 change = inbox.changes.recv() => {
                     let Some((pool, change)) = change else {
-                        // Unreachable while `self.coord_tx` is held.
-                        tracing::error!(
-                            "coordinator: discovery channel closed while a sender is held; \
-                             no further worker registration will happen"
-                        );
-                        break;
+                        unreachable!("the coordinator holds a discovery sender");
                     };
                     match change {
                         WorkerChange::Added(w) => self.add_worker(&pool, w),
@@ -351,7 +346,7 @@ impl Coordinator {
             self.metrics.forget(worker_id_num);
             self.worker_pool.remove(&worker_id_num);
         } else {
-            tracing::info!(
+            tracing::debug!(
                 pool = pool.name,
                 worker_id,
                 "worker now belongs to another worker set; leaving fleet-wide state alone"
@@ -421,7 +416,7 @@ impl PoolHooks for Coordinator {
         for num in workers {
             self.drop_worker_state(pool, num, None);
         }
-        tracing::info!(
+        tracing::debug!(
             workerset = %pool.key,
             workers = count,
             "released this worker set's workers"

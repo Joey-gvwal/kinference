@@ -469,7 +469,7 @@ impl PoolManager {
                 Some((pool, _)) if pool.block_size != spec.kv_block_size => {
                     // The indexer can't change block size, so this discards
                     // the set's prefix cache.
-                    tracing::warn!(
+                    tracing::info!(
                         workerset = %key,
                         from = pool.block_size,
                         to = spec.kv_block_size,
@@ -548,7 +548,7 @@ impl PoolManager {
             }
             // Cancelled here, not at retire; see the module docs.
             r.pool.cancel.cancel();
-            tracing::info!(workerset = %r.pool.key, age_secs = age.as_secs(), "worker set reaped");
+            tracing::debug!(workerset = %r.pool.key, age_secs = age.as_secs(), "worker set reaped");
             reaped += 1;
             false
         });
