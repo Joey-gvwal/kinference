@@ -22,8 +22,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      # The `zmq` crate links libzmq via pkg-config; protoc is vendored.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libzmq3-dev pkg-config g++
+      # The `zmq` crate compiles a bundled libzmq; protoc is vendored.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++
       # Installs what rust-toolchain.toml pins, components included.
       - run: rustup toolchain install
       - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
@@ -36,7 +36,13 @@ jobs:
   # discovery, KV ingest and CRD status. The image build is cold here (the
   # BuildKit cache mounts don't persist), hence the wide timeout.
   test-smoke:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -62,7 +68,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: kind-logs
+          name: kind-logs-${{ matrix.os }}
           path: /tmp/kind-logs
           retention-days: 3
 
@@ -71,7 +77,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libzmq3-dev pkg-config g++
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++
       - run: rustup toolchain install
       - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -82,11 +88,10 @@ jobs:
   ready-for-merge:
     name: Ready for merge
     needs:
-    - lint
-    - test-smoke
-    - test-unit
+      - lint
+      - test-smoke
+      - test-unit
     runs-on: ubuntu-24.04
     steps:
-    - name: Ready for merge
-      run: |
-        echo Ready for merge
+      - name: Ready for merge
+        run: echo Ready for merge
