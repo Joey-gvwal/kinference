@@ -68,16 +68,12 @@ impl ModelIndex {
             for m in models {
                 if map.entry(m.clone()).or_default().insert(pool_id) {
                     let serving = map[m].len();
-                    if serving > 1 {
-                        tracing::info!(
-                            model = %m,
-                            pool = %pool_name,
-                            pools_serving = serving,
-                            "model also served by this pool; both are pick candidates"
-                        );
-                    } else {
-                        tracing::info!(model = %m, pool = %pool_name, "model routed to pool");
-                    }
+                    tracing::info!(
+                        model = %m,
+                        workerset = %pool_name,
+                        workersets_serving = serving,
+                        "worker set serves the model"
+                    );
                     added.push(m.clone());
                 }
             }
@@ -102,7 +98,7 @@ impl ModelIndex {
                 tracing::info!(
                     model = %model,
                     workerset = %pool_name,
-                    "last worker set serving this model went away"
+                    "no worker set serves the model"
                 );
                 false
             } else {

@@ -78,9 +78,7 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
     if ingest.disabled {
         tracing::warn!(
             worker_id = cfg.worker_id_str,
-            "KINFERENCE_DISABLE_INGEST set — skipping ZMQ ingest. \
-             Marking worker ready immediately; radix tree will stay empty \
-             and cache-affinity routing will be no-op for this run."
+            "KV-event ingest disabled by KINFERENCE_DISABLE_INGEST"
         );
         ctx.registry.set_initial_sync_complete(cfg.worker_id_num);
         return;
@@ -92,8 +90,7 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
     if cfg.zmq_endpoint.as_deref().unwrap_or("").is_empty() {
         tracing::debug!(
             worker_id = cfg.worker_id_str,
-            "no KV-event socket declared for this worker; routing on load metrics \
-             alone (no prefix-cache signal from it)"
+            "no KV-event endpoint; routing on load alone"
         );
         ctx.registry.set_initial_sync_complete(cfg.worker_id_num);
         return;
@@ -118,7 +115,7 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
                         worker_id = ctx.cfg.worker_id_str,
                         endpoint = ?ctx.cfg.zmq_endpoint,
                         error = &err as &dyn std::error::Error,
-                        "Listener errored; reconnecting in 1s"
+                        "KV-event listener failed; reconnecting"
                     );
                 }
                 failing = true;
@@ -278,8 +275,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
             None => {
                 tracing::warn!(
                     worker_id = worker_id_str,
-                    "KINFERENCE_ENABLE_REPLAY set but no replay endpoint configured; \
-                     gap recovery still off"
+                    "KINFERENCE_ENABLE_REPLAY is set but the worker has no replay endpoint"
                 );
                 None
             }
@@ -316,8 +312,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
         worker_id = worker_id_str,
         endpoint = live_endpoint,
         replay = replay_endpoint.as_deref().unwrap_or("-"),
-        replay_wall_budget_ms = replay_wall_budget.as_millis() as u64,
-        "listener ready"
+        "KV-event listener ready"
     );
 
     loop {
@@ -336,7 +331,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
                     tracing::warn!(
                         worker_id = worker_id_str,
                         endpoint = live_endpoint,
-                        "KV-event SUB socket connected but no frames received"
+                        "no KV events received yet"
                     );
                 } else {
                     tracing::trace!(
@@ -360,7 +355,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
                             tracing::warn!(
                                 worker_id = worker_id_str,
                                 frames = msg.len(),
-                                "live SUB: unexpected frame shape; dropping"
+                                "dropping a KV-event frame with an unexpected shape"
                             );
                         }
                         continue;
@@ -409,7 +404,7 @@ async fn handle_observation(
                 worker_id = worker_id_str,
                 start_seq = 0,
                 end_seq = got,
-                "initial drain: catching up to live seq"
+                "replaying KV events up to the first live one"
             );
             if let Some(dealer) = replay {
                 replay_gap(ctx, state, dealer, 0, got, replay_wall_budget).await;
@@ -443,7 +438,7 @@ async fn handle_observation(
                 worker_id = worker_id_str,
                 got,
                 ?last_applied,
-                "stale frame, dropping"
+                "dropping a stale KV-event frame"
             );
             return false;
         }
@@ -490,7 +485,7 @@ async fn replay_gap(
                 start_seq,
                 end_seq,
                 error = &err as &dyn std::error::Error,
-                "replay request send failed; abandoning this gap"
+                "replay request failed"
             );
         }
         return;
@@ -520,7 +515,7 @@ async fn replay_gap(
                         end_seq,
                         replayed = progress.replayed,
                         error = &err as &dyn std::error::Error,
-                        "replay recv error; abandoning this gap"
+                        "replay receive failed"
                     );
                 }
                 break;
@@ -532,7 +527,7 @@ async fn replay_gap(
             tracing::trace!(
                 worker_id = worker_id_str,
                 frames = msg.len(),
-                "replay: unexpected frame shape"
+                "dropping a replay frame with an unexpected shape"
             );
             continue;
         }
@@ -545,7 +540,7 @@ async fn replay_gap(
             tracing::trace!(
                 worker_id = worker_id_str,
                 len = msg[1].len(),
-                "replay: malformed seq frame"
+                "dropping a replay frame with a malformed sequence number"
             );
             continue;
         };
@@ -649,9 +644,10 @@ async fn apply_frame(
         Err(err) => {
             if !std::mem::replace(&mut state.warned.decode, true) {
                 tracing::warn!(
+                    worker_id = worker_id_str,
                     seq,
-                    error = %err,
-                    "Failed to decode KvEventBatch"
+                    error = &err as &dyn std::error::Error,
+                    "failed to decode a KV-event batch"
                 );
             }
             return false;
@@ -842,24 +838,15 @@ impl BlockSizeGuard {
                         worker_id = worker_id_str,
                         engine_block_size,
                         configured,
-                        "KV-cache events report block_size={engine_block_size}, \
-                         but this worker is configured for kv_block_size={configured}. \
-                         Dropping ALL of this worker's KV events — prefix-cache-aware \
-                         routing is DISABLED for it (load-based routing still works). \
-                         Likely causes: (1) a KV-event SCHEMA mismatch between the \
-                         engine build and kinference's dynamo-kv-router pin — hybrid / \
-                         Mamba-SSM models are a known case; (2) a genuinely wrong \
-                         block size. Compare the engine's /metrics \
-                         `vllm:cache_config_info` block_size against this value. \
-                         Logged once per worker; further drops are at DEBUG."
+                        "dropping KV events with an implausible block size; check kvBlockSize \
+                         and the engine's KV-event schema"
                     );
                 } else {
                     tracing::debug!(
                         worker_id = worker_id_str,
                         engine_block_size,
                         configured,
-                        "implausible engine block_size on a BlockStored event; \
-                         dropping (already warned once for this worker)"
+                        "dropping KV events with an implausible block size"
                     );
                 }
                 false
@@ -871,8 +858,7 @@ impl BlockSizeGuard {
                     configured = self.configured,
                     consecutive,
                     threshold = BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD,
-                    "engine block_size mismatch observed; waiting for it to \
-                     persist before evicting (could be a transient bad frame)"
+                    "engine block size differs from kvBlockSize"
                 );
                 false
             }
@@ -1047,7 +1033,7 @@ impl ZmqSocket {
                 .readable_mut()
                 .await
                 .map_err(io("AsyncFd readable"))?;
-            tracing::trace!("zmq: fd readable");
+            tracing::trace!("ZMQ fd readable");
             // Not actually ready: clear the readiness and wait again.
             let events = guard
                 .get_inner_mut()
@@ -1055,17 +1041,17 @@ impl ZmqSocket {
                 .get_events()
                 .map_err(zmq("zmq get_events"))?;
             if !events.contains(zmq::POLLIN) {
-                tracing::trace!(events = events.bits(), "zmq: readable but no POLLIN");
+                tracing::trace!(events = events.bits(), "ZMQ fd readable without POLLIN");
                 guard.clear_ready();
                 continue;
             }
             match guard.get_inner_mut().socket.recv_multipart(zmq::DONTWAIT) {
                 Ok(msg) => {
-                    tracing::trace!(frames = msg.len(), "zmq: recv ok");
+                    tracing::trace!(frames = msg.len(), "ZMQ frame received");
                     return Ok(msg);
                 }
                 Err(zmq::Error::EAGAIN) => {
-                    tracing::trace!("zmq: POLLIN set but recv returned EAGAIN");
+                    tracing::trace!("ZMQ recv returned EAGAIN after POLLIN");
                     guard.clear_ready();
                     continue;
                 }
@@ -1145,7 +1131,12 @@ fn apply_socket_robustness(socket: &zmq::Socket, worker_id: &str, kind: &str) {
     let _ = socket.set_heartbeat_timeout(ZMQ_HEARTBEAT_TIMEOUT_MS);
     let _ = socket.set_reconnect_ivl(ZMQ_RECONNECT_IVL_MS);
     if let Err(err) = socket.set_reconnect_ivl_max(ZMQ_RECONNECT_IVL_MAX_MS) {
-        tracing::warn!(worker_id, socket = kind, error = %err, "set_reconnect_ivl_max failed");
+        tracing::warn!(
+            worker_id,
+            socket = kind,
+            error = &err as &dyn std::error::Error,
+            "failed to set the ZMQ reconnect interval"
+        );
     }
 }
 

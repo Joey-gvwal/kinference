@@ -87,8 +87,8 @@ ready
 worker sets: 1, with ready endpoints: 1
 ```
 
-The log shows discovery, the first scrape and, at `trace`, every KV
-event:
+The log shows discovery and each worker that kinference adds. At
+`debug` it also shows the first scrape, and at `trace` every KV event:
 
 ```sh
 kubectl logs deployment/kinference -f
