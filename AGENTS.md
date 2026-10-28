@@ -83,6 +83,50 @@ same change: renamed or removed items, moved logic, changed defaults. Never
 leave a doc comment attached to the wrong item, and re-read edited comments
 so they still parse as sentences.
 
+## Logging
+
+kinference logs through `tracing`. The chart runs at `info`, so the
+operator reads every INFO, WARN and ERROR line in production. Log volume
+should grow with events, not with traffic.
+
+### Levels
+
+- ERROR: something needs fixing, and kinference can't recover on its own.
+- WARN: kinference is degraded or misconfigured. Log a WARN line once per
+  cause, never once per request. Latch the line, or let a metric count the
+  repeats.
+- INFO: lifecycle and state changes. Examples are startup, readiness,
+  shutdown, a worker or worker set coming or going, and a leadership
+  change. Each event logs one INFO line. The request path never logs at
+  INFO.
+- DEBUG: per-request decisions.
+- TRACE: per-event and per-frame detail, such as each KV event.
+
+### Don't log
+
+- An event that a metric already counts, unless the line adds context that
+  the metric can't hold.
+- An event that another line already logs. Log the event once, where the
+  state changes.
+- A task exiting on cancel, or a config value that the operator can read
+  in the config file.
+- A path that can't happen. Use `debug_assert!` or `unreachable!` instead.
+
+### Messages and fields
+
+- A message is one short lowercase phrase that says what happened:
+  "worker added", "replay incomplete".
+- Don't start a message with a module prefix. The subscriber already
+  prints the target.
+- Put values in fields, not in the message text.
+- Don't explain the code in a message. When the operator has to change a
+  setting, name the setting.
+- No caps for emphasis and no em dashes.
+- Use the same field names in every crate: `workerset`, `worker_id`,
+  `req`, `model`, `error`.
+- Record an error as `error = &err as &dyn std::error::Error`. The
+  subscriber then prints the error's sources too.
+
 ## Commits and pull requests
 
 PRs are merged with a merge commit, not squashed, so each commit lands on

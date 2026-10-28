@@ -23,7 +23,7 @@ resources:
     memory: 2Gi
 
 # RUST_LOG; see templates/deployment.yaml for the radix_tree pin.
-logLevel: "kinference=debug,dynamo_kv_router::indexer::radix_tree=error,dynamo_kv_router=warn"
+logLevel: "kinference=info,dynamo_kv_router::indexer::radix_tree=error,dynamo_kv_router=warn"
 
 # Request missed KV-event history on attach (KINFERENCE_ENABLE_REPLAY).
 # Contends with tokenize HTTP and can adopt blocks the engine has evicted.
