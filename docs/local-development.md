@@ -9,7 +9,7 @@ same loop, through the recipes in the [justfile](../justfile).
 
 `docker`, `kind`, `kubectl`, `helm` and `just`. Docker builds the image,
 so you need the Rust toolchain only for `just lint` and `just test-unit`;
-on the host those two also need `libzmq3-dev`, `pkg-config` and `g++`.
+on the host those two also need `g++`.
 
 The first `just image` compiles the `dynamo-kv-router` git dependency and
 takes a while; BuildKit cache mounts keep later builds incremental. The
