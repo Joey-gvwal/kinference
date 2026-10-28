@@ -532,7 +532,10 @@ pub fn spawn_metrics_poller(
         // every N after.
         let refresh_every: u64 = ((models_refresh_secs * 1000) / poll_ms).max(1);
         let mut n: u64 = 0;
+        // Whether the current run of failures has been logged; reset on
+        // success, so a failure after a recovery warns again.
         let mut warned_about_models = false;
+        let mut warned_about_scrape = false;
 
         tracing::debug!(
             worker_id = cfg.worker_id_str,
@@ -608,6 +611,7 @@ pub fn spawn_metrics_poller(
                         samples
                             .models_by_worker
                             .insert(cfg.worker_id_num, ModelsInfo { models });
+                        warned_about_models = false;
                     }
                     Err(err) => {
                         if !warned_about_models {
@@ -665,13 +669,16 @@ pub fn spawn_metrics_poller(
                         }
                     }
                     samples.by_worker.insert(cfg.worker_id_num, sample);
+                    warned_about_scrape = false;
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        worker_id = cfg.worker_id_str,
-                        error = &err as &dyn std::error::Error,
-                        "metrics scrape failed; keeping previous sample"
-                    );
+                    if !std::mem::replace(&mut warned_about_scrape, true) {
+                        tracing::warn!(
+                            worker_id = cfg.worker_id_str,
+                            error = &err as &dyn std::error::Error,
+                            "metrics scrape failed; keeping previous sample"
+                        );
+                    }
                 }
             }
         }

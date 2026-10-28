@@ -100,17 +100,28 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
     }
 
     tokio::spawn(async move {
+        // Whether the previous attempt failed before it ran for
+        // `LISTENER_HEALTHY_AFTER`, so a listener that keeps failing warns
+        // once.
+        let mut failing = false;
         loop {
             if ctx.cancel.is_cancelled() {
                 return;
             }
+            let started = Instant::now();
             if let Err(err) = run_listener(&ctx, &ingest).await {
-                tracing::warn!(
-                    worker_id = ctx.cfg.worker_id_str,
-                    endpoint = ?ctx.cfg.zmq_endpoint,
-                    error = &err as &dyn std::error::Error,
-                    "Listener errored; reconnecting in 1s"
-                );
+                if started.elapsed() >= LISTENER_HEALTHY_AFTER {
+                    failing = false;
+                }
+                if !failing {
+                    tracing::warn!(
+                        worker_id = ctx.cfg.worker_id_str,
+                        endpoint = ?ctx.cfg.zmq_endpoint,
+                        error = &err as &dyn std::error::Error,
+                        "Listener errored; reconnecting in 1s"
+                    );
+                }
+                failing = true;
                 tokio::select! {
                     _ = ctx.cancel.cancelled() => return,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -128,6 +139,16 @@ struct ListenerState {
     /// Debounces block_size-mismatch eviction so a single corrupt frame
     /// can't take a healthy worker out of rotation. See [`BlockSizeGuard`].
     block_size_guard: BlockSizeGuard,
+    /// Which warnings this listener has logged, so each logs once.
+    warned: ListenerWarnings,
+}
+
+#[derive(Default)]
+struct ListenerWarnings {
+    frame_shape: bool,
+    decode: bool,
+    gap: bool,
+    replay: bool,
 }
 
 /// Why a `replay_gap` call ended without delivering everything
@@ -269,6 +290,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
         cursor: CursorState::Initial,
         normalizer: ZmqEventNormalizer::new(block_size),
         block_size_guard: BlockSizeGuard::new(block_size),
+        warned: ListenerWarnings::default(),
     };
     // Whether this listener has reported that events are flowing, so the
     // registry write happens once.
@@ -334,11 +356,13 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
                 let (seq, payload) = match parse_seq_payload(&msg) {
                     Some(p) => p,
                     None => {
-                        tracing::warn!(
-                            worker_id = worker_id_str,
-                            frames = msg.len(),
-                            "live SUB: unexpected frame shape; dropping"
-                        );
+                        if !std::mem::replace(&mut state.warned.frame_shape, true) {
+                            tracing::warn!(
+                                worker_id = worker_id_str,
+                                frames = msg.len(),
+                                "live SUB: unexpected frame shape; dropping"
+                            );
+                        }
                         continue;
                     }
                 };
@@ -392,13 +416,23 @@ async fn handle_observation(
             }
         }
         CursorObservation::Gap { expected, got } => {
-            tracing::warn!(
-                worker_id = worker_id_str,
-                expected,
-                got,
-                gap = got.saturating_sub(expected),
-                "gap in event stream; inline replay"
-            );
+            if !std::mem::replace(&mut state.warned.gap, true) {
+                tracing::warn!(
+                    worker_id = worker_id_str,
+                    expected,
+                    got,
+                    gap = got.saturating_sub(expected),
+                    "gap in event stream; inline replay"
+                );
+            } else {
+                tracing::debug!(
+                    worker_id = worker_id_str,
+                    expected,
+                    got,
+                    gap = got.saturating_sub(expected),
+                    "gap in event stream; inline replay"
+                );
+            }
             if let Some(dealer) = replay {
                 replay_gap(ctx, state, dealer, expected, got, replay_wall_budget).await;
             }
@@ -450,13 +484,15 @@ async fn replay_gap(
     // signals end-of-replay.
     let req = [vec![], start_seq.to_be_bytes().to_vec()];
     if let Err(err) = dealer.send_multipart(&req).await {
-        tracing::warn!(
-            worker_id = worker_id_str,
-            start_seq,
-            end_seq,
-            error = &err as &dyn std::error::Error,
-            "replay request send failed; abandoning this gap"
-        );
+        if !std::mem::replace(&mut state.warned.replay, true) {
+            tracing::warn!(
+                worker_id = worker_id_str,
+                start_seq,
+                end_seq,
+                error = &err as &dyn std::error::Error,
+                "replay request send failed; abandoning this gap"
+            );
+        }
         return;
     }
 
@@ -477,14 +513,16 @@ async fn replay_gap(
             Ok(Some(m)) => m,
             Ok(None) => continue, // recv timeout; keep waiting until wall budget
             Err(err) => {
-                tracing::warn!(
-                    worker_id = worker_id_str,
-                    start_seq,
-                    end_seq,
-                    replayed = progress.replayed,
-                    error = &err as &dyn std::error::Error,
-                    "replay recv error; abandoning this gap"
-                );
+                if !std::mem::replace(&mut state.warned.replay, true) {
+                    tracing::warn!(
+                        worker_id = worker_id_str,
+                        start_seq,
+                        end_seq,
+                        replayed = progress.replayed,
+                        error = &err as &dyn std::error::Error,
+                        "replay recv error; abandoning this gap"
+                    );
+                }
                 break;
             }
         };
@@ -551,18 +589,20 @@ async fn replay_gap(
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match progress.failure_reason(wall_budget_hit) {
         Some(reason) => {
-            tracing::warn!(
-                worker_id = worker_id_str,
-                start_seq,
-                end_seq,
-                first_replayed = ?progress.first_replayed,
-                last_replayed = ?progress.last_replayed,
-                replayed = progress.replayed,
-                reason = reason.as_str(),
-                sentinel_seen,
-                elapsed_ms,
-                "replay incomplete"
-            );
+            if !std::mem::replace(&mut state.warned.replay, true) {
+                tracing::warn!(
+                    worker_id = worker_id_str,
+                    start_seq,
+                    end_seq,
+                    first_replayed = ?progress.first_replayed,
+                    last_replayed = ?progress.last_replayed,
+                    replayed = progress.replayed,
+                    reason = reason.as_str(),
+                    sentinel_seen,
+                    elapsed_ms,
+                    "replay incomplete"
+                );
+            }
         }
         None => {
             tracing::debug!(
@@ -607,11 +647,13 @@ async fn apply_frame(
     let batch = match decode_event_batch(payload) {
         Ok(b) => b,
         Err(err) => {
-            tracing::warn!(
-                seq,
-                error = %err,
-                "Failed to decode KvEventBatch"
-            );
+            if !std::mem::replace(&mut state.warned.decode, true) {
+                tracing::warn!(
+                    seq,
+                    error = %err,
+                    "Failed to decode KvEventBatch"
+                );
+            }
             return false;
         }
     };
@@ -905,6 +947,9 @@ const SUB_HEARTBEAT_IVL: Duration = Duration::from_secs(60);
 /// KV events fire only on newly stored blocks, so a healthy fleet can be
 /// silent, but so is a wrong endpoint.
 const SUB_IDLE_WARN_AFTER: Duration = Duration::from_secs(300);
+/// A listener that ran this long before failing counts as having recovered,
+/// so its next failure warns again.
+const LISTENER_HEALTHY_AFTER: Duration = Duration::from_secs(60);
 const ZMQ_SUB_RCVTIMEO_MS: i32 = 100;
 const ZMQ_RECONNECT_IVL_MS: i32 = 100;
 const ZMQ_RECONNECT_IVL_MAX_MS: i32 = 5_000;
