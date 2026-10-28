@@ -12,7 +12,7 @@ use serde::Deserialize;
 pub struct ProfileConfig {
     /// Referenced by a workerset's `profile`. Must be unique.
     pub name: String,
-    /// Refit with `analysis/analyze-latency.py`.
+    /// Refit from the observations CSV (`KINFERENCE_OBSERVATIONS_CSV`).
     #[serde(default)]
     pub predictor: PredictorConfig,
     #[serde(default)]
@@ -30,9 +30,8 @@ pub struct ProfileTokenizeConfig {
 
 /// Latency-model coefficients consumed by
 /// `router::picker::predicted_wait_ms` / `compute_queue_cost`. Refit these
-/// from `latency.csv` via `analysis/analyze-latency.py`. Same values
-/// drive every routing decision regardless of which front-end (gRPC
-/// `Pick()`) accepted the request.
+/// from the observations CSV. Same values drive every routing decision
+/// regardless of which front-end (gRPC `Pick()`) accepted the request.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PredictorConfig {
     /// Fixed per-request overhead added to every prediction, in
@@ -148,9 +147,8 @@ pub struct PredictorConfig {
     /// layer. Plausible active-fleet values: 0.7–0.9.
     ///
     /// A predictor coefficient like the rest: it sets the uncached-block count,
-    /// which is the dominant term in the prefill estimate, and
-    /// `analysis/analyze-latency.py` already refits it in the same sweep as the
-    /// attention coefficients.
+    /// which is the dominant term in the prefill estimate, so refit it together
+    /// with the attention coefficients.
     ///
     /// Physically it is an eviction rate (KV capacity ÷ working set), so it
     /// tracks GPU SKU and TP degree, which is why it belongs to a profile
