@@ -88,11 +88,10 @@ jobs:
   ready-for-merge:
     name: Ready for merge
     needs:
-    - lint
-    - test-smoke
-    - test-unit
+      - lint
+      - test-smoke
+      - test-unit
     runs-on: ubuntu-24.04
     steps:
-    - name: Ready for merge
-      run: |
-        echo Ready for merge
+      - name: Ready for merge
+        run: echo Ready for merge
