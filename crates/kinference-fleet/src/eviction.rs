@@ -50,11 +50,11 @@ impl std::fmt::Display for EvictionReason {
         match self {
             EvictionReason::BlockSizeMismatch { expected, observed } => write!(
                 f,
-                "engine block_size={observed} differs from fleet-wide configured kv_block_size={expected}"
+                "engine block size {observed} differs from kvBlockSize {expected}"
             ),
             EvictionReason::ModelMismatch { expected, observed } => write!(
                 f,
-                "served models {observed:?} differ from canonical fleet models {expected:?}"
+                "served models {observed:?} differ from the worker set's {expected:?}"
             ),
         }
     }

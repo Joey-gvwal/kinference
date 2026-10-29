@@ -400,8 +400,8 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
             Err(err) => {
                 tracing::warn!(
                     worker_id = cfg.worker_id_str,
-                    error = %err,
-                    "warmup: failed to build HTTP client; skipping (recurring poller will catch up)"
+                    error = &err as &dyn std::error::Error,
+                    "failed to build the warmup HTTP client"
                 );
                 return;
             }
@@ -412,11 +412,11 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                 let engine_str = detected_engine
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                tracing::info!(
+                tracing::debug!(
                     worker_id = cfg.worker_id_str,
                     model_count = names.len(),
                     engine = %engine_str,
-                    "warmup: /v1/models scrape succeeded"
+                    "fetched /v1/models"
                 );
                 match workers.set_served_models(cfg.worker_id_num, &names) {
                     // Widened/Narrowed are routable, e.g. a LoRA adapter
@@ -425,8 +425,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
                             ?added,
-                            "warmup: worker serves models not previously seen in this set; \
-                             widening the set's model list"
+                            "worker serves models new to its worker set"
                         );
                         index.associate(pool_id, &pool_name, &names);
                     }
@@ -434,8 +433,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         tracing::info!(
                             worker_id = cfg.worker_id_str,
                             ?missing,
-                            "warmup: worker is missing models others in this set serve; \
-                             routing to it only for what it has"
+                            "worker lacks models that its worker set serves"
                         );
                         index.associate(pool_id, &pool_name, &names);
                     }
@@ -444,12 +442,6 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         index.associate(pool_id, &pool_name, &names);
                     }
                     crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
-                        tracing::warn!(
-                            worker_id = cfg.worker_id_str,
-                            ?expected,
-                            ?observed,
-                            "warmup: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
-                        );
                         let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                             worker_id_num: cfg.worker_id_num,
                             reason: crate::eviction::EvictionReason::ModelMismatch {
@@ -468,11 +460,11 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                     .insert(cfg.worker_id_num, ModelsInfo { models });
             }
             Err(err) => {
-                tracing::warn!(
+                tracing::debug!(
                     worker_id = cfg.worker_id_str,
                     http_url,
                     error = &err as &dyn std::error::Error,
-                    "warmup: /v1/models scrape failed; recurring poller will retry"
+                    "/v1/models fetch failed"
                 );
             }
         }
@@ -500,7 +492,7 @@ pub fn spawn_metrics_poller(
     let Some(metrics_url) = cfg.metrics_url.clone() else {
         tracing::info!(
             worker_id = cfg.worker_id_str,
-            "No metrics_url configured; metrics fields will stay at 0"
+            "no metrics URL; load signals stay at zero"
         );
         return;
     };
@@ -514,8 +506,8 @@ pub fn spawn_metrics_poller(
             Err(err) => {
                 tracing::error!(
                     worker_id = cfg.worker_id_str,
-                    error = %err,
-                    "Failed to build HTTP client for metrics; poller exiting"
+                    error = &err as &dyn std::error::Error,
+                    "failed to build the metrics HTTP client"
                 );
                 return;
             }
@@ -538,14 +530,17 @@ pub fn spawn_metrics_poller(
         // every N after.
         let refresh_every: u64 = ((models_refresh_secs * 1000) / poll_ms).max(1);
         let mut n: u64 = 0;
+        // Whether the current run of failures has been logged; reset on
+        // success, so a failure after a recovery warns again.
         let mut warned_about_models = false;
+        let mut warned_about_scrape = false;
 
-        tracing::info!(
+        tracing::debug!(
             worker_id = cfg.worker_id_str,
             url = metrics_url,
             poll_ms,
             models_refresh_secs,
-            "Metrics poller started"
+            "metrics poller started"
         );
 
         loop {
@@ -569,8 +564,7 @@ pub fn spawn_metrics_poller(
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
                                     ?added,
-                                    "poller: worker serves models not previously seen \
-                                         in this set; widening the set's model list"
+                                    "worker serves models new to its worker set"
                                 );
                                 index.associate(pool_id, &pool_name, &names);
                             }
@@ -578,8 +572,7 @@ pub fn spawn_metrics_poller(
                                 tracing::info!(
                                     worker_id = cfg.worker_id_str,
                                     ?missing,
-                                    "poller: worker is missing models others in this \
-                                         set serve; routing to it only for what it has"
+                                    "worker lacks models that its worker set serves"
                                 );
                                 index.associate(pool_id, &pool_name, &names);
                             }
@@ -591,12 +584,6 @@ pub fn spawn_metrics_poller(
                                 expected,
                                 observed,
                             } => {
-                                tracing::warn!(
-                                    worker_id = cfg.worker_id_str,
-                                    ?expected,
-                                    ?observed,
-                                    "poller: /v1/models reports a set that disagrees with the pool's canonical models; evicting worker"
-                                );
                                 let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                                     worker_id_num: cfg.worker_id_num,
                                     reason: crate::eviction::EvictionReason::ModelMismatch {
@@ -620,6 +607,7 @@ pub fn spawn_metrics_poller(
                         samples
                             .models_by_worker
                             .insert(cfg.worker_id_num, ModelsInfo { models });
+                        warned_about_models = false;
                     }
                     Err(err) => {
                         if !warned_about_models {
@@ -627,7 +615,7 @@ pub fn spawn_metrics_poller(
                                 worker_id = cfg.worker_id_str,
                                 http_url,
                                 error = &err as &dyn std::error::Error,
-                                "/v1/models fetch failed; max_model_len + model_ids will stay at last good values (or empty)"
+                                "/v1/models fetch failed"
                             );
                             warned_about_models = true;
                         }
@@ -677,13 +665,16 @@ pub fn spawn_metrics_poller(
                         }
                     }
                     samples.by_worker.insert(cfg.worker_id_num, sample);
+                    warned_about_scrape = false;
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        worker_id = cfg.worker_id_str,
-                        error = &err as &dyn std::error::Error,
-                        "metrics scrape failed; keeping previous sample"
-                    );
+                    if !std::mem::replace(&mut warned_about_scrape, true) {
+                        tracing::warn!(
+                            worker_id = cfg.worker_id_str,
+                            error = &err as &dyn std::error::Error,
+                            "metrics scrape failed"
+                        );
+                    }
                 }
             }
         }
@@ -734,12 +725,12 @@ async fn scrape_once(
             worker_id = worker_id_str,
             metric_count = names.len(),
             ?label_keys,
-            "First metrics scrape parsed"
+            "first metrics scrape parsed"
         );
         tracing::trace!(
             worker_id = worker_id_str,
-            "Available metrics on first scrape: {}",
-            names.join(", ")
+            metrics = %names.join(", "),
+            "metrics on the first scrape"
         );
     }
 
@@ -831,9 +822,7 @@ async fn scrape_once(
         tracing::warn!(
             worker_id = worker_id_str,
             model_name,
-            "no metrics matched the model_name label; the value we're filtering on \
-             (from config or /v1/models) does not match the label value the engine \
-             emits in /metrics"
+            "no metrics match the model_name label"
         );
         *warned_about_label = true;
     }

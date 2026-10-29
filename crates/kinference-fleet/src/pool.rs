@@ -469,12 +469,11 @@ impl PoolManager {
                 Some((pool, _)) if pool.block_size != spec.kv_block_size => {
                     // The indexer can't change block size, so this discards
                     // the set's prefix cache.
-                    tracing::warn!(
+                    tracing::info!(
                         workerset = %key,
                         from = pool.block_size,
                         to = spec.kv_block_size,
-                        "kv_block_size changed; replacing the worker set and discarding \
-                         its prefix cache (the KvIndexer is built around block size)"
+                        "kvBlockSize changed; replacing the worker set and its prefix cache"
                     );
                     self.retire(&key);
                     match self.create(spec) {
@@ -498,7 +497,7 @@ impl PoolManager {
                             workerset = %key,
                             workers = touched,
                             models = ?spec.static_models,
-                            "declared model list changed; re-seeded this set's workers"
+                            "declared models changed"
                         );
                     }
                     // Copy-on-write: new values, same id, same warm cache.
@@ -506,7 +505,7 @@ impl PoolManager {
                     tracing::info!(
                         workerset = %key,
                         profile = %spec.profile,
-                        "worker set retuned in place; prefix cache retained"
+                        "worker set updated"
                     );
                     self.live.insert(key.clone(), (next, spec));
                     self.publish();
@@ -542,13 +541,12 @@ impl PoolManager {
                     workerset = %r.pool.key,
                     strong_count = Arc::strong_count(&r.pool),
                     age_secs = age.as_secs(),
-                    "reaping a retired worker set past the backstop while handles are \
-                     still outstanding; something leaked an Arc<Pool>"
+                    "reaping a retired worker set that still has handles"
                 );
             }
             // Cancelled here, not at retire; see the module docs.
             r.pool.cancel.cancel();
-            tracing::info!(workerset = %r.pool.key, age_secs = age.as_secs(), "worker set reaped");
+            tracing::debug!(workerset = %r.pool.key, age_secs = age.as_secs(), "worker set reaped");
             reaped += 1;
             false
         });
@@ -585,7 +583,7 @@ impl PoolManager {
             tracing::error!(
                 workerset = %spec.key,
                 error = &err as &dyn std::error::Error,
-                "failed to start this worker set's discovery; not publishing it"
+                "failed to start the worker set's discovery"
             );
             if resurrected {
                 // Put it back so it still gets reaped.
@@ -639,7 +637,7 @@ impl PoolManager {
         tracing::info!(
             workerset = %key,
             strong_count = Arc::strong_count(&pool),
-            "worker set retired; awaiting reap"
+            "worker set retired"
         );
         self.retired.push(Retired {
             pool,

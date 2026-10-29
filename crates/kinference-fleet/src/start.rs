@@ -49,15 +49,6 @@ impl Fleet {
         registry: &Registry,
         cancel: CancellationToken,
     ) -> Self {
-        for spec in &cfg.specs {
-            tracing::info!(
-                workerset = spec.name,
-                profile = spec.profile,
-                block_size = spec.kv_block_size,
-                service = ?spec.discovery.service_name,
-                "Worker set configured"
-            );
-        }
         let handles = FleetHandles {
             pools: PoolRegistry::new(),
             models: Arc::new(ModelIndex::new()),

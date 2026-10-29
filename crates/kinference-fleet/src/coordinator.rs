@@ -132,12 +132,7 @@ impl Coordinator {
                 }
                 change = inbox.changes.recv() => {
                     let Some((pool, change)) = change else {
-                        // Unreachable while `self.coord_tx` is held.
-                        tracing::error!(
-                            "coordinator: discovery channel closed while a sender is held; \
-                             no further worker registration will happen"
-                        );
-                        break;
+                        unreachable!("the coordinator holds a discovery sender");
                     };
                     match change {
                         WorkerChange::Added(w) => self.add_worker(&pool, w),
@@ -156,12 +151,12 @@ impl Coordinator {
         let block_size = pool.block_size;
         let registry = &pool.registry;
         tracing::info!(
-            pool = pool.name,
+            workerset = pool.name,
             worker_id = w.worker_id_str,
             block_size,
             zmq_endpoint = w.zmq_endpoint.as_deref().unwrap_or("-"),
             http_url = w.http_url.as_deref().unwrap_or("-"),
-            "Added worker"
+            "worker added"
         );
 
         // Two worker sets selecting one pod. Must bail: `worker_id_num` keys
@@ -171,10 +166,10 @@ impl Coordinator {
             && owner.value().id != pool.id
         {
             tracing::warn!(
-                pool = pool.name,
+                workerset = pool.name,
                 worker_id = w.worker_id_str,
                 owner = owner.value().name,
-                "worker already belongs to another worker set; skipping this Add"
+                "worker already belongs to another worker set; skipping"
             );
             return;
         }
@@ -195,8 +190,9 @@ impl Coordinator {
         let endpoint_key = entry.score_addr.clone();
         if !registry.register(w.worker_id_num, entry) {
             tracing::warn!(
+                workerset = pool.name,
                 worker_id = w.worker_id_str,
-                "worker id collides with one already in the registry; skipping this Add"
+                "worker id already registered; skipping"
             );
             self.worker_pool.remove(&w.worker_id_num);
             return;
@@ -213,8 +209,7 @@ impl Coordinator {
                 tracing::warn!(
                     workerset = pool.name,
                     worker_id = w.worker_id_str,
-                    "modelDiscovery.mode is Static but spec.models is empty; this worker \
-                     serves nothing and no scrape will discover otherwise"
+                    "modelDiscovery.mode is Static but spec.models is empty"
                 );
             } else {
                 // `set_served_models` refuses on a mismatch, so only claim
@@ -227,8 +222,7 @@ impl Coordinator {
                         tracing::warn!(
                             workerset = pool.name,
                             worker_id = w.worker_id_str,
-                            "declared model list differs from this set's pinned models; \
-                             routing anyway on the declared list"
+                            "declared models differ from the worker set's; routing on the declared models"
                         );
                         self.models.associate(pool.id, &pool.name, declared);
                     }
@@ -243,8 +237,7 @@ impl Coordinator {
                             worker_id = w.worker_id_str,
                             ?expected,
                             ?observed,
-                            "declared model list disagrees with this set's pinned models; \
-                             not routing to this worker"
+                            "declared models conflict with the worker set's; not routing to the worker"
                         );
                     }
                 }
@@ -324,9 +317,9 @@ impl Coordinator {
             .unwrap_or_else(|| format!("<unregistered:{worker_id_num}>"));
         match reason {
             Some(r) => {
-                tracing::warn!(pool = pool.name, worker_id, reason = %r, "Evicting worker")
+                tracing::warn!(workerset = pool.name, worker_id, reason = %r, "Evicting worker")
             }
-            None => tracing::info!(pool = pool.name, worker_id, "Removed worker"),
+            None => tracing::info!(workerset = pool.name, worker_id, "Removed worker"),
         }
 
         // Stop the per-worker tasks, for this pool only.
@@ -351,8 +344,8 @@ impl Coordinator {
             self.metrics.forget(worker_id_num);
             self.worker_pool.remove(&worker_id_num);
         } else {
-            tracing::info!(
-                pool = pool.name,
+            tracing::debug!(
+                workerset = pool.name,
                 worker_id,
                 "worker now belongs to another worker set; leaving fleet-wide state alone"
             );
@@ -421,7 +414,7 @@ impl PoolHooks for Coordinator {
         for num in workers {
             self.drop_worker_state(pool, num, None);
         }
-        tracing::info!(
+        tracing::debug!(
             workerset = %pool.key,
             workers = count,
             "released this worker set's workers"
