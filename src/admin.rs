@@ -138,7 +138,6 @@ pub fn spawn(addr: SocketAddr, handles: AdminHandles, cancel: CancellationToken)
             tracing::error!(error = %err, "admin server exited with error");
         }
     });
-    tracing::info!(listen = %addr, "Admin listener enabled");
 }
 
 pub async fn serve(
