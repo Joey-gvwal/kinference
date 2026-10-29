@@ -111,7 +111,7 @@ impl<A: ApiServer> KubeDiscovery<A> {
         // Only the named Service's EndpointSlices.
         let wcfg = watcher::Config::default().labels(&format!("{SVC_NAME_LABEL}={service_name}"));
 
-        tracing::info!(
+        tracing::debug!(
             namespace = ?self.cfg.namespace,
             service_name = %service_name,
             "starting EndpointSlice watcher"
@@ -147,10 +147,7 @@ impl<A: ApiServer> KubeDiscovery<A> {
 
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => {
-                        tracing::debug!("cancellation received, exiting");
-                        return;
-                    }
+                    _ = cancel.cancelled() => return,
                     next = stream.try_next() => {
                         match next {
                             Ok(Some(watcher::Event::InitDone)) => {
@@ -240,7 +237,7 @@ async fn reconcile(
             let Some(pod_uid) = ep.target_ref.as_ref().and_then(|t| t.uid.clone()) else {
                 continue;
             };
-            match synthesize_worker_from_endpoint(ep, &ports, slice_name, defaults) {
+            match synthesize_worker_from_endpoint(ep, &ports, defaults) {
                 Some(cfg) => {
                     current.insert(pod_uid, cfg);
                 }
@@ -267,7 +264,7 @@ async fn reconcile(
             continue;
         }
         let worker_id_num = cfg.worker_id_num;
-        tracing::info!(
+        tracing::debug!(
             workerset = ws,
             worker_id = cfg.worker_id_str,
             zmq_endpoint = ?cfg.zmq_endpoint,
@@ -287,7 +284,7 @@ async fn reconcile(
         .collect();
     for pod_uid in vanished {
         if let Some((num, worker_id)) = announced.remove(&pod_uid) {
-            tracing::info!(
+            tracing::debug!(
                 workerset = ws,
                 worker_id,
                 "endpoint no longer Ready in any slice; emitting Removed"
@@ -422,7 +419,6 @@ fn extract_named_ports(
 fn synthesize_worker_from_endpoint(
     ep: &Endpoint,
     ports: &ResolvedPorts,
-    slice_name: &str,
     _defaults: &DiscoveryDefaults,
 ) -> Option<WorkerConfig> {
     let target = ep.target_ref.as_ref()?;
@@ -445,16 +441,6 @@ fn synthesize_worker_from_endpoint(
 
     let node_name = ep.node_name.clone();
     let availability_zone = ep.zone.clone();
-
-    tracing::debug!(
-        slice = slice_name,
-        worker_id = worker_id_str,
-        http_port = ports.http,
-        metrics_port = ports.metrics,
-        zmq_port = ports.zmq,
-        replay_port = ?ports.replay,
-        "synthesized WorkerConfig from endpoint"
-    );
 
     Some(WorkerConfig {
         worker_id_str,

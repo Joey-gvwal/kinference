@@ -910,10 +910,7 @@ impl<A: ApiServer> StatusWriter<A> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("policy status writer: cancelled");
-                    return;
-                }
+                _ = cancel.cancelled() => return,
                 // Awaited rather than polled, so the cache is reset on every
                 // promotion.
                 r = self.leader.changed() => {
@@ -961,7 +958,7 @@ impl<A: ApiServer> StatusWriter<A> {
             last.clear();
             n
         };
-        tracing::info!(
+        tracing::debug!(
             dropped_cache_entries = dropped,
             "policy status writer: promoted to leader; re-asserting all status"
         );
@@ -974,7 +971,7 @@ impl<A: ApiServer> StatusWriter<A> {
     /// counts.
     fn on_demotion(&self) {
         self.prom.set_policy_warnings(&[]);
-        tracing::info!("policy status writer: demoted; stopping writes");
+        tracing::debug!("policy status writer: demoted; stopping writes");
     }
 
     async fn reconcile_once(&self) {

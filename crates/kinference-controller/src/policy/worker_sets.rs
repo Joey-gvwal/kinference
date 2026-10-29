@@ -300,7 +300,6 @@ impl WorkerSetWatcher {
             if cancel.is_cancelled() {
                 return;
             }
-            tracing::warn!("worker sets: rebuilding the InferenceWorkerSet watch");
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(REBUILD_DELAY) => {}
@@ -397,7 +396,7 @@ impl WorkerSetWatcher {
 
         let report = self.manager.reconcile(desired.into_values().collect());
         if !report.is_noop() {
-            tracing::info!(
+            tracing::debug!(
                 created = ?report.created,
                 resurrected = ?report.resurrected,
                 updated = ?report.updated,

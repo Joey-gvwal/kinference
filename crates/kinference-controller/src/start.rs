@@ -163,7 +163,7 @@ pub async fn start(
             .unwrap_or_else(|| "default".to_string());
         let identity = cfg.leader_election.identity.clone();
         let params = leader::LeaseParams::from(&cfg.leader_election);
-        tracing::info!(
+        tracing::debug!(
             lease = %params.name,
             namespace = %ns,
             identity = %identity,

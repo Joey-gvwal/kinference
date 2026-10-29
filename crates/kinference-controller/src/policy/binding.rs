@@ -275,20 +275,17 @@ impl<A: ApiServer> BindingWriter<A> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("backend binding writer: cancelled");
-                    return;
-                }
+                _ = cancel.cancelled() => return,
                 r = self.leader.changed() => {
                     match r {
                         Ok(()) => {
                             if *self.leader.borrow_and_update() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "backend binding writer: promoted to leader; \
                                      publishing bindings from the next tick"
                                 );
                             } else {
-                                tracing::info!(
+                                tracing::debug!(
                                     "backend binding writer: demoted; stopping writes"
                                 );
                             }

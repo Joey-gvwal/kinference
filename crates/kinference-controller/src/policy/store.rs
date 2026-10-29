@@ -84,7 +84,6 @@ impl<A: ApiServer> PolicyWatcher<A> {
             if cancel.is_cancelled() {
                 return;
             }
-            tracing::warn!("policy: rebuilding the CRD watcher set");
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(REBUILD_DELAY) => {}
@@ -145,10 +144,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
         let mut pools_changed = self.pools.subscribe();
         loop {
             let (idx, name, kind) = tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("policy: cancellation received, exiting");
-                    return;
-                }
+                _ = cancel.cancelled() => return,
                 _ = pools_changed.changed() => (0, "", Step::Changed),
                 r = pools.try_next() => (0, "InferencePool", step(r, "InferencePool")),
                 r = policies.try_next() => (1, "InferencePolicy", step(r, "InferencePolicy")),
