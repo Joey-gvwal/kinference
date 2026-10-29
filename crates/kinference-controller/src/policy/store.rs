@@ -84,7 +84,6 @@ impl<A: ApiServer> PolicyWatcher<A> {
             if cancel.is_cancelled() {
                 return;
             }
-            tracing::warn!("policy: rebuilding the CRD watcher set");
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(REBUILD_DELAY) => {}
@@ -124,7 +123,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
         tracing::info!(
             namespace = ?self.namespace,
             pools = self.pools.snapshot().len(),
-            "policy: watching kinference.buoyant.io CRDs + HTTPRoutes + ReferenceGrants + Services"
+            "watching policy resources"
         );
 
         // One flag per kind, set when that kind finishes its initial list.
@@ -138,6 +137,8 @@ impl<A: ApiServer> PolicyWatcher<A> {
         // `Step::Ignore` forever) disable policy routing entirely. Their
         // listed state rides on the snapshot instead (`ServiceIndex::listed`).
         let mut listed = [false; SVC + 1];
+        // Per kind, whether the current run of watcher errors has been logged.
+        let mut failing = [false; SVC + 1];
         // Resolution also depends on the pool set, which changes independently
         // of the CRDs: a worker set becomes a pool some time after its CRD
         // event. Re-resolve then, or that pool's destination stays reported
@@ -145,18 +146,15 @@ impl<A: ApiServer> PolicyWatcher<A> {
         let mut pools_changed = self.pools.subscribe();
         loop {
             let (idx, name, kind) = tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("policy: cancellation received, exiting");
-                    return;
-                }
+                _ = cancel.cancelled() => return,
                 _ = pools_changed.changed() => (0, "", Step::Changed),
-                r = pools.try_next() => (0, "InferencePool", step(r, "InferencePool")),
-                r = policies.try_next() => (1, "InferencePolicy", step(r, "InferencePolicy")),
-                r = sets.try_next() => (2, "InferenceWorkerSet", step(r, "InferenceWorkerSet")),
-                r = provs.try_next() => (3, "InferenceProvider", step(r, "InferenceProvider")),
-                r = routes.try_next() => (4, "HTTPRoute", step(r, "HTTPRoute")),
-                r = grants.try_next() => (5, "ReferenceGrant", step(r, "ReferenceGrant")),
-                r = services.try_next() => (SVC, "Service", step(r, "Service")),
+                r = pools.try_next() => (0, "InferencePool", step(r, "InferencePool", &mut failing[0])),
+                r = policies.try_next() => (1, "InferencePolicy", step(r, "InferencePolicy", &mut failing[1])),
+                r = sets.try_next() => (2, "InferenceWorkerSet", step(r, "InferenceWorkerSet", &mut failing[2])),
+                r = provs.try_next() => (3, "InferenceProvider", step(r, "InferenceProvider", &mut failing[3])),
+                r = routes.try_next() => (4, "HTTPRoute", step(r, "HTTPRoute", &mut failing[4])),
+                r = grants.try_next() => (5, "ReferenceGrant", step(r, "ReferenceGrant", &mut failing[5])),
+                r = services.try_next() => (SVC, "Service", step(r, "Service", &mut failing[SVC])),
             };
             match kind {
                 Step::Listed => listed[idx] = true,
@@ -167,13 +165,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
                 // reference is permitted.
                 Step::Absent => {
                     if !listed[idx] {
-                        tracing::warn!(
-                            kind = name,
-                            "policy: this CRD is not installed on the cluster; treating it as \
-                             having no objects. Cross-namespace references need \
-                             ReferenceGrant, and pool status `parents[]` needs HTTPRoute — \
-                             install the Gateway API CRDs if you want either"
-                        );
+                        tracing::warn!(kind = name, "CRD not installed; treating it as empty");
                     }
                     listed[idx] = true;
                 }
@@ -213,7 +205,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
                 unresolved_destinations = unresolved,
                 services = index.services().len(),
                 services_listed = index.services().listed(),
-                "policy: snapshot rebuilt"
+                "policy snapshot rebuilt"
             );
             self.store.publish(Arc::new(index));
         }
@@ -235,19 +227,34 @@ enum Step {
     Ended,
 }
 
-fn step<T>(r: Result<Option<watcher::Event<T>>, watcher::Error>, kind: &str) -> Step {
+/// `failing` is whether this kind's current run of watcher errors has been
+/// logged; an event resets it.
+fn step<T>(
+    r: Result<Option<watcher::Event<T>>, watcher::Error>,
+    kind: &str,
+    failing: &mut bool,
+) -> Step {
+    if matches!(r, Ok(Some(_))) {
+        *failing = false;
+    }
     match r {
         // The `Writer` buffers `InitApply` objects and swaps them in at
         // `InitDone`, so this is the first moment `store.state()` is complete.
         Ok(Some(watcher::Event::InitDone)) => Step::Listed,
         Ok(Some(_)) => Step::Changed,
         Ok(None) => {
-            tracing::warn!(kind, "policy: watcher stream ended; will rebuild");
+            tracing::warn!(kind, "watch ended; rebuilding");
             Step::Ended
         }
         Err(err) if crd_not_installed(&err) => Step::Absent,
         Err(err) => {
-            tracing::warn!(kind, error = %err, "policy: watcher error; continuing");
+            if !std::mem::replace(failing, true) {
+                tracing::warn!(
+                    kind,
+                    error = &err as &dyn std::error::Error,
+                    "watch failed; retrying"
+                );
+            }
             Step::Ignore
         }
     }

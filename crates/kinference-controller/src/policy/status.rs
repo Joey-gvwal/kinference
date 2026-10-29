@@ -877,6 +877,9 @@ pub struct StatusWriter<A: ApiServer> {
     /// Policy warnings already logged, as `ns/name: warning`, so each is logged
     /// once when it first appears.
     warned: Mutex<HashSet<String>>,
+    /// Objects whose last status patch failed, so a failing patch logs once
+    /// until it succeeds.
+    failing: Mutex<HashSet<CacheKey>>,
 }
 
 impl<A: ApiServer> StatusWriter<A> {
@@ -903,6 +906,7 @@ impl<A: ApiServer> StatusWriter<A> {
             prom,
             last: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashSet::new()),
+            failing: Mutex::new(HashSet::new()),
         }
     }
 
@@ -910,10 +914,7 @@ impl<A: ApiServer> StatusWriter<A> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("policy status writer: cancelled");
-                    return;
-                }
+                _ = cancel.cancelled() => return,
                 // Awaited rather than polled, so the cache is reset on every
                 // promotion.
                 r = self.leader.changed() => {
@@ -931,8 +932,7 @@ impl<A: ApiServer> StatusWriter<A> {
                         // create a second writer, and demoting could leave none.
                         Err(_) => {
                             tracing::error!(
-                                "policy status writer: leader channel closed; \
-                                 holding the last known leadership state"
+                                "leader channel closed; keeping the last leadership state"
                             );
                             self.prom.record_leader_election_error();
                         }
@@ -961,9 +961,9 @@ impl<A: ApiServer> StatusWriter<A> {
             last.clear();
             n
         };
-        tracing::info!(
+        tracing::debug!(
             dropped_cache_entries = dropped,
-            "policy status writer: promoted to leader; re-asserting all status"
+            "promoted to leader; rewriting all status"
         );
     }
 
@@ -974,7 +974,7 @@ impl<A: ApiServer> StatusWriter<A> {
     /// counts.
     fn on_demotion(&self) {
         self.prom.set_policy_warnings(&[]);
-        tracing::info!("policy status writer: demoted; stopping writes");
+        tracing::debug!("demoted from leader; stopping writes");
     }
 
     async fn reconcile_once(&self) {
@@ -1145,7 +1145,7 @@ impl<A: ApiServer> StatusWriter<A> {
         let mut warned = sync::lock(&self.warned);
         for line in &current {
             if !warned.contains(line) {
-                tracing::warn!("policy warning: {line}");
+                tracing::warn!(warning = %line, "policy warning");
             }
         }
         *warned = current;
@@ -1185,12 +1185,21 @@ impl<A: ApiServer> StatusWriter<A> {
         }
         match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
-                tracing::debug!(kind, ns, name, "policy status: patched");
+                tracing::debug!(kind, ns, name, "status patched");
+                sync::lock(&self.failing).remove(&key);
                 sync::lock(&self.last).insert(key, value);
             }
             Err(e) => {
                 // Don't cache on failure, so the next tick retries.
-                tracing::warn!(kind, ns, name, error = %e, "policy status: patch failed");
+                if sync::lock(&self.failing).insert(key) {
+                    tracing::warn!(
+                        kind,
+                        ns,
+                        name,
+                        error = &e as &dyn std::error::Error,
+                        "status patch failed"
+                    );
+                }
             }
         }
     }

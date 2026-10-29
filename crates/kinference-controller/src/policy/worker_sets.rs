@@ -195,8 +195,7 @@ fn refresh_secs(interval: &str, key: &PoolKey) -> Option<u64> {
                 workerset = %key,
                 interval,
                 ms,
-                "spec.modelDiscovery.interval is not a positive duration; \
-                 using the fleet-wide models_refresh_secs"
+                "spec.modelDiscovery.interval is not positive; using models_refresh_secs"
             );
             None
         }
@@ -205,8 +204,7 @@ fn refresh_secs(interval: &str, key: &PoolKey) -> Option<u64> {
                 workerset = %key,
                 interval,
                 error = %err,
-                "spec.modelDiscovery.interval did not parse; \
-                 using the fleet-wide models_refresh_secs"
+                "spec.modelDiscovery.interval did not parse; using models_refresh_secs"
             );
             None
         }
@@ -300,7 +298,6 @@ impl WorkerSetWatcher {
             if cancel.is_cancelled() {
                 return;
             }
-            tracing::warn!("worker sets: rebuilding the InferenceWorkerSet watch");
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(REBUILD_DELAY) => {}
@@ -328,7 +325,7 @@ impl WorkerSetWatcher {
             namespace = ?self.namespace,
             selector = ?self.selector,
             profiles = self.profiles.len(),
-            "worker sets: watching InferenceWorkerSets"
+            "watching InferenceWorkerSets"
         );
 
         let mut sweep = tokio::time::interval(Duration::from_secs(10));
@@ -337,20 +334,27 @@ impl WorkerSetWatcher {
         // `desired_pools` is total, reconciling would retire every pool and
         // discard its prefix cache. Only reconciling is gated; reaping is safe.
         let mut listed = false;
+        // Whether the current run of watch errors has been logged.
+        let mut failing = false;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = sweep.tick() => { self.manager.sweep(); }
                 ev = sets.try_next() => {
                     match ev {
-                        Ok(Some(watcher::Event::InitDone)) => listed = true,
-                        Ok(Some(_)) => {}
+                        Ok(Some(watcher::Event::InitDone)) => {
+                            failing = false;
+                            listed = true;
+                        }
+                        Ok(Some(_)) => failing = false,
                         Ok(None) => {
-                            tracing::warn!("worker sets: watch stream ended; will rebuild");
+                            tracing::warn!("InferenceWorkerSet watch ended; rebuilding");
                             return;
                         }
                         Err(err) => {
-                            tracing::warn!(error = %err, "worker sets: watch error; continuing");
+                            if !std::mem::replace(&mut failing, true) {
+                                tracing::warn!(error = &err as &dyn std::error::Error, "InferenceWorkerSet watch failed; retrying");
+                            }
                             continue;
                         }
                     }
@@ -385,8 +389,8 @@ impl WorkerSetWatcher {
                 tracing::warn!(
                     workerset = %r.key,
                     reason = r.reason.as_condition_reason(),
-                    "worker set not materialized: {}",
-                    r.reason
+                    detail = %r.reason,
+                    "worker set not materialized"
                 );
                 self.prom
                     .record_workerset_rejected(r.reason.as_condition_reason());
@@ -397,7 +401,7 @@ impl WorkerSetWatcher {
 
         let report = self.manager.reconcile(desired.into_values().collect());
         if !report.is_noop() {
-            tracing::info!(
+            tracing::debug!(
                 created = ?report.created,
                 resurrected = ?report.resurrected,
                 updated = ?report.updated,

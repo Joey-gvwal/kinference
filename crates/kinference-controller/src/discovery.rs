@@ -21,7 +21,7 @@
 //! endpoints is re-derived from the store and diffed against `announced` (what
 //! has been emitted as `Added`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use std::sync::Arc;
 
@@ -68,10 +68,8 @@ pub fn factory(enabled: bool, required: bool) -> Result<Option<DiscoveryFactory>
             Ok(api) => Some(api),
             Err(err) => {
                 tracing::error!(
-                    error = %err.chain(),
-                    "kubernetes.enabled is set but in-cluster credentials are \
-                     unavailable; InferenceWorkerSets will resolve but their pools \
-                     cannot start discovery"
+                    error = &err as &dyn std::error::Error,
+                    "in-cluster credentials unavailable; worker sets cannot start discovery"
                 );
                 None
             }
@@ -111,7 +109,7 @@ impl<A: ApiServer> KubeDiscovery<A> {
         // Only the named Service's EndpointSlices.
         let wcfg = watcher::Config::default().labels(&format!("{SVC_NAME_LABEL}={service_name}"));
 
-        tracing::info!(
+        tracing::debug!(
             namespace = ?self.cfg.namespace,
             service_name = %service_name,
             "starting EndpointSlice watcher"
@@ -121,6 +119,8 @@ impl<A: ApiServer> KubeDiscovery<A> {
         // survives a rebuild; otherwise every worker would be re-`Added`, which
         // `handle_added` treats as a duplicate and rolls back.
         let mut announced: HashMap<String, (u64, String)> = HashMap::new();
+        // Standing endpoint warnings, so each logs once; see `reconcile`.
+        let mut warned: HashSet<String> = HashSet::new();
 
         // Rebuild the watcher when its stream ends, or the pool would stop
         // tracking membership.
@@ -144,16 +144,16 @@ impl<A: ApiServer> KubeDiscovery<A> {
             // `InitDone` would retract the whole pool and re-add it moments
             // later.
             let mut listed = false;
+            // Whether the current run of watcher errors has been logged.
+            let mut failing = false;
 
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => {
-                        tracing::debug!("cancellation received, exiting");
-                        return;
-                    }
+                    _ = cancel.cancelled() => return,
                     next = stream.try_next() => {
                         match next {
                             Ok(Some(watcher::Event::InitDone)) => {
+                                failing = false;
                                 listed = true;
                                 reconcile(
                                     &store,
@@ -162,10 +162,12 @@ impl<A: ApiServer> KubeDiscovery<A> {
                                     &tx,
                                     self.cfg.workerset.as_deref(),
                                     &mut announced,
+                                    &mut warned,
                                 )
                                 .await;
                             }
                             Ok(Some(_)) if listed => {
+                                failing = false;
                                 reconcile(
                                     &store,
                                     &self.cfg.defaults,
@@ -173,21 +175,21 @@ impl<A: ApiServer> KubeDiscovery<A> {
                                     &tx,
                                     self.cfg.workerset.as_deref(),
                                     &mut announced,
+                                    &mut warned,
                                 )
                                 .await;
                             }
                             // Still listing: the store is partial, so there is
                             // nothing safe to diff against yet.
-                            Ok(Some(_)) => {}
+                            Ok(Some(_)) => failing = false,
                             Ok(None) => {
-                                tracing::warn!(
-                                    "watcher stream ended; rebuilding in {:?}",
-                                    REBUILD_DELAY
-                                );
+                                tracing::warn!("EndpointSlice watch ended; rebuilding");
                                 break;
                             }
                             Err(err) => {
-                                tracing::warn!(error = %err, "watcher error; continuing");
+                                if !std::mem::replace(&mut failing, true) {
+                                    tracing::warn!(error = &err as &dyn std::error::Error, "EndpointSlice watch failed; retrying");
+                                }
                             }
                         }
                     }
@@ -218,6 +220,9 @@ async fn reconcile(
     // pod_uid -> (worker id num, worker id string). Stored because a removed
     // endpoint is no longer in the store.
     announced: &mut HashMap<String, (u64, String)>,
+    // Port roles and pods already warned about. Every event re-resolves
+    // every slice, so without this a standing problem warns on each one.
+    warned: &mut HashSet<String>,
 ) {
     let ws = workerset.unwrap_or("-");
     // pod_uid -> WorkerConfig for every Ready endpoint. A pod Ready in
@@ -230,7 +235,7 @@ async fn reconcile(
         if !slice.endpoints.iter().flatten().any(is_endpoint_ready) {
             continue;
         }
-        let ports = extract_named_ports(&slice, defaults, ports);
+        let ports = extract_named_ports(&slice, defaults, ports, warned);
         let slice_name = slice.metadata.name.as_deref().unwrap_or("");
         // `endpoints` is optional; absent means empty.
         for ep in slice.endpoints.iter().flatten() {
@@ -240,21 +245,24 @@ async fn reconcile(
             let Some(pod_uid) = ep.target_ref.as_ref().and_then(|t| t.uid.clone()) else {
                 continue;
             };
-            match synthesize_worker_from_endpoint(ep, &ports, slice_name, defaults) {
+            match synthesize_worker_from_endpoint(ep, &ports, defaults) {
                 Some(cfg) => {
                     current.insert(pod_uid, cfg);
                 }
                 None => {
+                    let pod = ep
+                        .target_ref
+                        .as_ref()
+                        .and_then(|t| t.name.as_deref())
+                        .unwrap_or("-");
+                    if !warned.insert(format!("pod {pod}")) {
+                        continue;
+                    }
                     tracing::warn!(
                         workerset = ws,
-                        pod = ep
-                            .target_ref
-                            .as_ref()
-                            .and_then(|t| t.name.as_deref())
-                            .unwrap_or("-"),
+                        pod,
                         slice = slice_name,
-                        "endpoint Ready but missing required fields \
-                         (address or targetRef); skipping. Will retry on next update."
+                        "ready endpoint has no address or targetRef; skipping"
                     );
                 }
             }
@@ -267,12 +275,12 @@ async fn reconcile(
             continue;
         }
         let worker_id_num = cfg.worker_id_num;
-        tracing::info!(
+        tracing::debug!(
             workerset = ws,
             worker_id = cfg.worker_id_str,
             zmq_endpoint = ?cfg.zmq_endpoint,
             http_url = ?cfg.http_url,
-            "endpoint became Ready; emitting Added"
+            "endpoint ready"
         );
         announced.insert(pod_uid.clone(), (worker_id_num, cfg.worker_id_str.clone()));
         let _ = tx.send(WorkerChange::Added(cfg.clone())).await;
@@ -287,11 +295,7 @@ async fn reconcile(
         .collect();
     for pod_uid in vanished {
         if let Some((num, worker_id)) = announced.remove(&pod_uid) {
-            tracing::info!(
-                workerset = ws,
-                worker_id,
-                "endpoint no longer Ready in any slice; emitting Removed"
-            );
+            tracing::debug!(workerset = ws, worker_id, "endpoint no longer ready");
             let _ = tx.send(WorkerChange::Removed(num)).await;
         }
     }
@@ -326,7 +330,12 @@ struct ResolvedPorts {
 ///
 /// A number is a Service port while the slice carries target ports; they
 /// usually coincide. With no match it is used verbatim, with a warning.
-fn resolve_port_ref(slice: &EndpointSlice, role: &str, want: &PortRef) -> Option<u16> {
+fn resolve_port_ref(
+    slice: &EndpointSlice,
+    role: &str,
+    want: &PortRef,
+    warned: &mut HashSet<String>,
+) -> Option<u16> {
     let ports = slice.ports.as_deref().unwrap_or(&[]);
     match want {
         PortRef::Name(name) => {
@@ -335,13 +344,14 @@ fn resolve_port_ref(slice: &EndpointSlice, role: &str, want: &PortRef) -> Option
                     .then(|| p.port.and_then(|v| u16::try_from(v).ok()))
                     .flatten()
             });
-            if hit.is_none() {
+            if hit.is_some() {
+                warned.remove(role);
+            } else if warned.insert(role.to_string()) {
                 tracing::warn!(
                     role,
                     port_name = %name,
                     slice = slice.metadata.name.as_deref().unwrap_or("-"),
-                    "declared port name is not on this EndpointSlice; \
-                     falling back to the conventional name"
+                    "declared port name not on the EndpointSlice; using the conventional name"
                 );
             }
             hit
@@ -350,14 +360,14 @@ fn resolve_port_ref(slice: &EndpointSlice, role: &str, want: &PortRef) -> Option
             let matched = ports
                 .iter()
                 .any(|p| p.port.and_then(|v| u16::try_from(v).ok()) == Some(*n));
-            if !matched {
+            if matched {
+                warned.remove(role);
+            } else if warned.insert(role.to_string()) {
                 tracing::warn!(
                     role,
                     port = n,
                     slice = slice.metadata.name.as_deref().unwrap_or("-"),
-                    "declared numeric port matches no EndpointSlice port; dialing it \
-                     verbatim. A number in a CR is a SERVICE port and endpoints carry \
-                     TARGET ports — prefer a port NAME, which is always unambiguous"
+                    "declared port number matches no EndpointSlice port; declare a port name"
                 );
             }
             Some(*n)
@@ -369,6 +379,7 @@ fn extract_named_ports(
     slice: &EndpointSlice,
     defaults: &DiscoveryDefaults,
     refs: &PortRefs,
+    warned: &mut HashSet<String>,
 ) -> ResolvedPorts {
     let find = |name: &str| -> Option<u16> {
         slice.ports.as_ref()?.iter().find_map(|p| {
@@ -379,8 +390,9 @@ fn extract_named_ports(
             }
         })
     };
-    let declared = |role: &str, want: &Option<PortRef>| -> Option<u16> {
-        want.as_ref().and_then(|w| resolve_port_ref(slice, role, w))
+    let mut declared = |role: &str, want: &Option<PortRef>| -> Option<u16> {
+        want.as_ref()
+            .and_then(|w| resolve_port_ref(slice, role, w, warned))
     };
     let http = declared("http", &refs.http)
         .or_else(|| find("http"))
@@ -422,7 +434,6 @@ fn extract_named_ports(
 fn synthesize_worker_from_endpoint(
     ep: &Endpoint,
     ports: &ResolvedPorts,
-    slice_name: &str,
     _defaults: &DiscoveryDefaults,
 ) -> Option<WorkerConfig> {
     let target = ep.target_ref.as_ref()?;
@@ -445,16 +456,6 @@ fn synthesize_worker_from_endpoint(
 
     let node_name = ep.node_name.clone();
     let availability_zone = ep.zone.clone();
-
-    tracing::debug!(
-        slice = slice_name,
-        worker_id = worker_id_str,
-        http_port = ports.http,
-        metrics_port = ports.metrics,
-        zmq_port = ports.zmq,
-        replay_port = ?ports.replay,
-        "synthesized WorkerConfig from endpoint"
-    );
 
     Some(WorkerConfig {
         worker_id_str,

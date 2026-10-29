@@ -98,7 +98,12 @@ fn no_kv_events_declaration_resolves_neither_socket() {
         kv_events_declared_absent: true,
         ..PortRefs::default()
     };
-    let got = extract_named_ports(&sl, &DiscoveryDefaults::default(), &refs);
+    let got = extract_named_ports(
+        &sl,
+        &DiscoveryDefaults::default(),
+        &refs,
+        &mut HashSet::new(),
+    );
     assert_eq!(got.zmq, None, "declared absent, so no publish socket");
     assert_eq!(
         got.replay, None,
@@ -122,7 +127,12 @@ fn a_kv_events_declaration_resolves_both_sockets_by_convention() {
             port("kv-replay", 5558),
         ],
     );
-    let got = extract_named_ports(&sl, &DiscoveryDefaults::default(), &PortRefs::default());
+    let got = extract_named_ports(
+        &sl,
+        &DiscoveryDefaults::default(),
+        &PortRefs::default(),
+        &mut HashSet::new(),
+    );
     assert_eq!(got.zmq, Some(5557));
     assert_eq!(got.replay, Some(5558));
 }
@@ -209,6 +219,7 @@ async fn an_endpoint_less_slice_warns_about_nothing() {
             &tx,
             Some("default/test-set"),
             &mut announced,
+            &mut HashSet::new(),
         )
         .await;
         buf.contents()
@@ -254,17 +265,57 @@ async fn a_declared_port_missing_from_a_live_slice_still_warns() {
             &tx,
             Some("default/test-set"),
             &mut announced,
+            &mut HashSet::new(),
         )
         .await;
         buf.contents()
     };
 
     assert!(
-        logs.contains("declared port name is not on this EndpointSlice"),
+        logs.contains("declared port name not on the EndpointSlice"),
         "a genuinely absent port name must still warn; got: {logs}"
     );
     // Still routable: the fallback found the conventional `http` name.
     assert_eq!(drain(&mut rx).len(), 1, "the worker is still announced");
+}
+
+/// A standing port miss warns on the first reconcile only.
+#[tokio::test]
+async fn a_standing_port_miss_warns_once() {
+    let (store, mut writer) = reflector::store::<EndpointSlice>();
+    let (tx, _rx) = mpsc::channel(16);
+    let mut announced: HashMap<String, (u64, String)> = HashMap::new();
+    let mut warned: HashSet<String> = HashSet::new();
+    let defaults = default_defaults();
+    let refs = refs_declaring_http("openai");
+
+    writer.apply_watcher_event(&watcher::Event::Apply(slice_with_ports(
+        "slice-live",
+        "svc-abc",
+        vec![ready_endpoint("pod-1", "pod-1", "10.0.0.1")],
+        vec![EndpointPort {
+            name: Some("http".to_string()),
+            port: Some(8000),
+            ..Default::default()
+        }],
+    )));
+
+    let (buf, _guard) = capture_warnings();
+    for _ in 0..2 {
+        reconcile(
+            &store,
+            &defaults,
+            &refs,
+            &tx,
+            Some("default/test-set"),
+            &mut announced,
+            &mut warned,
+        )
+        .await;
+    }
+    let logs = buf.contents();
+
+    assert_eq!(logs.lines().count(), 1, "got: {logs}");
 }
 
 #[tokio::test]
@@ -287,6 +338,7 @@ async fn ready_endpoint_yields_added() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);
@@ -324,6 +376,7 @@ async fn endpoint_going_not_ready_yields_removed() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     drain(&mut rx);
@@ -343,6 +396,7 @@ async fn endpoint_going_not_ready_yields_removed() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);
@@ -372,6 +426,7 @@ async fn deleted_slice_yields_removed() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     drain(&mut rx);
@@ -385,6 +440,7 @@ async fn deleted_slice_yields_removed() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);
@@ -419,6 +475,7 @@ async fn reconciling_against_an_unlisted_store_would_retract_the_pool() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     assert_eq!(drain(&mut rx).len(), 2, "both workers announced");
@@ -433,6 +490,7 @@ async fn reconciling_against_an_unlisted_store_would_retract_the_pool() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);
@@ -461,6 +519,7 @@ async fn steady_state_is_no_op() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     drain(&mut rx);
@@ -473,6 +532,7 @@ async fn steady_state_is_no_op() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);
@@ -503,6 +563,7 @@ async fn endpoint_moving_between_slices_is_steady_state() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     drain(&mut rx);
@@ -529,6 +590,7 @@ async fn endpoint_moving_between_slices_is_steady_state() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);
@@ -563,6 +625,7 @@ async fn two_ready_endpoints_yield_two_added() {
         &tx,
         Some("default/test-set"),
         &mut announced,
+        &mut HashSet::new(),
     )
     .await;
     let events = drain(&mut rx);

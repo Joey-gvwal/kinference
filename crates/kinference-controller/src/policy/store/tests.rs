@@ -84,7 +84,7 @@ fn seeding_a_reflector_store_feeds_resolve() {
 fn only_init_done_reports_listed() {
     let ev = |e: watcher::Event<InferencePool>| {
         matches!(
-            step::<InferencePool>(Ok(Some(e)), "InferencePool"),
+            step::<InferencePool>(Ok(Some(e)), "InferencePool", &mut false),
             Step::Listed
         )
     };
@@ -94,7 +94,7 @@ fn only_init_done_reports_listed() {
 
     // An ended stream must be rebuildable, never terminal.
     assert!(matches!(
-        step::<InferencePool>(Ok(None), "InferencePool"),
+        step::<InferencePool>(Ok(None), "InferencePool", &mut false),
         Step::Ended
     ));
 }

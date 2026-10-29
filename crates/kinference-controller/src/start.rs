@@ -58,10 +58,13 @@ impl Controller {
         };
         match tokio::time::timeout(VACATE_BUDGET, task).await {
             Ok(Ok(())) => tracing::debug!("leader elector stopped; lease released if held"),
-            Ok(Err(e)) => tracing::warn!(error = %e, "leader elector task failed"),
+            Ok(Err(e)) => tracing::warn!(
+                error = &e as &dyn std::error::Error,
+                "leader elector task failed"
+            ),
             Err(_) => tracing::warn!(
-                "leader elector did not finish within {VACATE_BUDGET:?}; a peer will \
-                 take over after the lease expires instead of immediately"
+                budget = ?VACATE_BUDGET,
+                "leader elector did not stop in time; a peer takes over when the lease expires"
             ),
         }
     }
@@ -132,10 +135,7 @@ pub async fn start(
     };
     if !cfg.kubernetes.enabled {
         tracing::warn!(
-            "policy.enabled is set but kubernetes.enabled is not, so no pool has a \
-             namespaced identity for an InferenceWorkerSet to resolve to — every \
-             destination will report NoMatchingPool. Policy routes between worker \
-             sets that the CRs themselves define; set kubernetes.enabled = true."
+            "policy.enabled needs kubernetes.enabled; every destination reports NoMatchingPool"
         );
     }
     let watcher = PolicyWatcher::new(
@@ -163,12 +163,12 @@ pub async fn start(
             .unwrap_or_else(|| "default".to_string());
         let identity = cfg.leader_election.identity.clone();
         let params = leader::LeaseParams::from(&cfg.leader_election);
-        tracing::info!(
+        tracing::debug!(
             lease = %params.name,
             namespace = %ns,
             identity = %identity,
             lease_duration_secs = params.lease_duration.as_secs(),
-            "leader election enabled; only the holder writes CRD status"
+            "leader election enabled"
         );
         let shutdown = {
             let cancel = cancel.clone();
