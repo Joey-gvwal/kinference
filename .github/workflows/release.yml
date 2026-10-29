@@ -1,6 +1,8 @@
 name: release
 
 on:
+  # A pull request runs a dry run: inputs are empty, so publish is false.
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -15,9 +17,11 @@ on:
         required: false
         default: false
 
-# Never cancel a release mid-flight; dispatches queue instead.
+# Never cancel a release mid-flight; dispatches queue instead. A new push
+# to a pull request cancels that pull request's previous dry run.
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'dispatch' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -41,11 +45,11 @@ jobs:
             echo "::error::version '$version' is not semver (expected e.g. 0.1.0, without the v prefix)"
             exit 1
           fi
-          if [[ ${{ inputs.publish }} == true && -z $version ]]; then
+          if [[ '${{ inputs.publish }}' == true && -z $version ]]; then
             echo "::error::publish requires the version input"
             exit 1
           fi
-          if [[ ${{ inputs.publish }} == true && '${{ github.ref }}' != refs/heads/main ]]; then
+          if [[ '${{ inputs.publish }}' == true && '${{ github.ref }}' != refs/heads/main ]]; then
             echo "::error::publish is only allowed from the main branch (got '${{ github.ref_name }}')"
             exit 1
           fi
@@ -58,7 +62,7 @@ jobs:
             exit 1
           fi
       - id: release
-        run: echo "is_release=${{ inputs.publish == true }}" >> "$GITHUB_OUTPUT"
+        run: echo "is_release=${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}" >> "$GITHUB_OUTPUT"
       - id: version
         run: echo "version=${{ inputs.version || '0.0.0-undefined' }}" >> "$GITHUB_OUTPUT"
     outputs:
