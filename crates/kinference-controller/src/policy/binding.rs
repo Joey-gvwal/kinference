@@ -273,6 +273,8 @@ impl<A: ApiServer> BindingWriter<A> {
 
     pub async fn run(mut self, cancel: CancellationToken) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        // Whether the current run of failed reconciles has been logged.
+        let mut failing = false;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -301,9 +303,14 @@ impl<A: ApiServer> BindingWriter<A> {
                     if !*self.leader.borrow() {
                         continue;
                     }
-                    if let Err(e) = self.reconcile_once().await {
+                    match self.reconcile_once().await {
+                        Ok(()) => failing = false,
                         // Never fatal; already-programmed routes keep working.
-                        tracing::warn!(error = %e.chain(), "backend binding writer: reconcile failed");
+                        Err(e) => {
+                            if !std::mem::replace(&mut failing, true) {
+                                tracing::warn!(error = %e.chain(), "backend binding writer: reconcile failed");
+                            }
+                        }
                     }
                 }
             }
@@ -417,15 +424,13 @@ impl<A: ApiServer> BindingWriter<A> {
                     applied += 1;
                     tracing::debug!(namespace = %key.0, name = %key.1, "backend binding: applied");
                 }
+                // A standing warning rather than an error, so one namespace's
+                // failure doesn't block the rest and logs once.
                 Err(e) => {
-                    // Logged, not returned, so one namespace's failure doesn't
-                    // block the rest.
-                    tracing::warn!(
-                        namespace = %key.0,
-                        name = %key.1,
-                        error = %e,
-                        "backend binding: apply failed"
-                    );
+                    warnings.insert(format!(
+                        "backend bindings: failed to apply {}/{}: {e}",
+                        key.0, key.1
+                    ));
                 }
             }
         }
@@ -449,10 +454,11 @@ impl<A: ApiServer> BindingWriter<A> {
                     name = %name,
                     "backend binding: deleted; its InferencePool is gone"
                 ),
-                Err(e) => tracing::warn!(
-                    namespace = %ns, name = %name, error = %e,
-                    "backend binding: delete failed"
-                ),
+                Err(e) => {
+                    warnings.insert(format!(
+                        "backend bindings: failed to delete {ns}/{name}: {e}"
+                    ));
+                }
             }
         }
 

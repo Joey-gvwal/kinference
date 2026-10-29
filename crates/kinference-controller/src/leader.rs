@@ -139,10 +139,24 @@ pub async fn run<A: ApiServer>(
 ) {
     let mut shutdown = std::pin::pin!(shutdown);
     let mut known: Option<Lease> = None;
+    // Whether the current run of lease API failures has been logged; reset on
+    // success, so a failure after a recovery warns again.
+    let mut failing = false;
 
     loop {
         if known.is_none() {
-            known = fetch_or_create(&api, namespace, &params.name).await;
+            known = match fetch_or_create(&api, namespace, &params.name).await {
+                Ok(lease) => {
+                    failing = false;
+                    Some(lease)
+                }
+                Err(e) => {
+                    if !std::mem::replace(&mut failing, true) {
+                        tracing::warn!(error = %e, "failed to read or create the lease; retrying");
+                    }
+                    None
+                }
+            };
         }
 
         let now = Timestamp::now();
@@ -152,13 +166,14 @@ pub async fn run<A: ApiServer>(
                 None => params.retry,
                 Some(prev) => match claim(&api, namespace, &identity, prev, now, &params).await {
                     Ok(lease) => {
+                        failing = false;
                         known = Some(lease);
                         // Successful claims re-decide immediately and
                         // land in WaitUntil; rejections re-read first.
                         Duration::ZERO
                     }
                     Err(e) => {
-                        if !is_conflict(&e) {
+                        if !is_conflict(&e) && !std::mem::replace(&mut failing, true) {
                             tracing::warn!(error = %e, "lease claim failed; retrying");
                         }
                         params.retry
@@ -199,15 +214,18 @@ pub async fn run<A: ApiServer>(
     let _ = tx.send(false);
 }
 
-/// Get the lease, creating it empty on first contact. `None` only on
-/// apiserver errors (the caller retries).
+/// Get the lease, creating it empty on first contact. The caller retries an
+/// error.
 ///
 /// Matches on `Status::code` rather than kube's `is_not_found()` /
 /// `is_conflict()`, which compare the `reason` string and so miss a bare
 /// 404/409 with no reason.
-async fn fetch_or_create<A: ApiServer>(api: &A, namespace: &str, name: &str) -> Option<Lease> {
+async fn fetch_or_create<A: ApiServer>(
+    api: &A,
+    namespace: &str,
+    name: &str,
+) -> Result<Lease, kube::Error> {
     match api.get::<Lease>(namespace, name).await {
-        Ok(lease) => Some(lease),
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
             let lease = Lease {
                 metadata: ObjectMeta {
@@ -218,21 +236,14 @@ async fn fetch_or_create<A: ApiServer>(api: &A, namespace: &str, name: &str) -> 
                 spec: None,
             };
             match api.create(namespace, &lease).await {
-                Ok(lease) => Some(lease),
                 // Lost the create race to the peer: read theirs.
                 Err(kube::Error::Api(ae)) if ae.code == 409 => {
-                    api.get::<Lease>(namespace, name).await.ok()
+                    api.get::<Lease>(namespace, name).await
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to create lease; retrying");
-                    None
-                }
+                created => created,
             }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read lease; retrying");
-            None
-        }
+        got => got,
     }
 }
 

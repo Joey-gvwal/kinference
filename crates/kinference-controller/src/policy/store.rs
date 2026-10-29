@@ -137,6 +137,8 @@ impl<A: ApiServer> PolicyWatcher<A> {
         // `Step::Ignore` forever) disable policy routing entirely. Their
         // listed state rides on the snapshot instead (`ServiceIndex::listed`).
         let mut listed = [false; SVC + 1];
+        // Per kind, whether the current run of watcher errors has been logged.
+        let mut failing = [false; SVC + 1];
         // Resolution also depends on the pool set, which changes independently
         // of the CRDs: a worker set becomes a pool some time after its CRD
         // event. Re-resolve then, or that pool's destination stays reported
@@ -146,13 +148,13 @@ impl<A: ApiServer> PolicyWatcher<A> {
             let (idx, name, kind) = tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = pools_changed.changed() => (0, "", Step::Changed),
-                r = pools.try_next() => (0, "InferencePool", step(r, "InferencePool")),
-                r = policies.try_next() => (1, "InferencePolicy", step(r, "InferencePolicy")),
-                r = sets.try_next() => (2, "InferenceWorkerSet", step(r, "InferenceWorkerSet")),
-                r = provs.try_next() => (3, "InferenceProvider", step(r, "InferenceProvider")),
-                r = routes.try_next() => (4, "HTTPRoute", step(r, "HTTPRoute")),
-                r = grants.try_next() => (5, "ReferenceGrant", step(r, "ReferenceGrant")),
-                r = services.try_next() => (SVC, "Service", step(r, "Service")),
+                r = pools.try_next() => (0, "InferencePool", step(r, "InferencePool", &mut failing[0])),
+                r = policies.try_next() => (1, "InferencePolicy", step(r, "InferencePolicy", &mut failing[1])),
+                r = sets.try_next() => (2, "InferenceWorkerSet", step(r, "InferenceWorkerSet", &mut failing[2])),
+                r = provs.try_next() => (3, "InferenceProvider", step(r, "InferenceProvider", &mut failing[3])),
+                r = routes.try_next() => (4, "HTTPRoute", step(r, "HTTPRoute", &mut failing[4])),
+                r = grants.try_next() => (5, "ReferenceGrant", step(r, "ReferenceGrant", &mut failing[5])),
+                r = services.try_next() => (SVC, "Service", step(r, "Service", &mut failing[SVC])),
             };
             match kind {
                 Step::Listed => listed[idx] = true,
@@ -231,7 +233,16 @@ enum Step {
     Ended,
 }
 
-fn step<T>(r: Result<Option<watcher::Event<T>>, watcher::Error>, kind: &str) -> Step {
+/// `failing` is whether this kind's current run of watcher errors has been
+/// logged; an event resets it.
+fn step<T>(
+    r: Result<Option<watcher::Event<T>>, watcher::Error>,
+    kind: &str,
+    failing: &mut bool,
+) -> Step {
+    if matches!(r, Ok(Some(_))) {
+        *failing = false;
+    }
     match r {
         // The `Writer` buffers `InitApply` objects and swaps them in at
         // `InitDone`, so this is the first moment `store.state()` is complete.
@@ -243,7 +254,9 @@ fn step<T>(r: Result<Option<watcher::Event<T>>, watcher::Error>, kind: &str) -> 
         }
         Err(err) if crd_not_installed(&err) => Step::Absent,
         Err(err) => {
-            tracing::warn!(kind, error = %err, "policy: watcher error; continuing");
+            if !std::mem::replace(failing, true) {
+                tracing::warn!(kind, error = %err, "policy: watcher error; continuing");
+            }
             Step::Ignore
         }
     }

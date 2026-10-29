@@ -336,20 +336,27 @@ impl WorkerSetWatcher {
         // `desired_pools` is total, reconciling would retire every pool and
         // discard its prefix cache. Only reconciling is gated; reaping is safe.
         let mut listed = false;
+        // Whether the current run of watch errors has been logged.
+        let mut failing = false;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = sweep.tick() => { self.manager.sweep(); }
                 ev = sets.try_next() => {
                     match ev {
-                        Ok(Some(watcher::Event::InitDone)) => listed = true,
-                        Ok(Some(_)) => {}
+                        Ok(Some(watcher::Event::InitDone)) => {
+                            failing = false;
+                            listed = true;
+                        }
+                        Ok(Some(_)) => failing = false,
                         Ok(None) => {
                             tracing::warn!("worker sets: watch stream ended; will rebuild");
                             return;
                         }
                         Err(err) => {
-                            tracing::warn!(error = %err, "worker sets: watch error; continuing");
+                            if !std::mem::replace(&mut failing, true) {
+                                tracing::warn!(error = %err, "worker sets: watch error; continuing");
+                            }
                             continue;
                         }
                     }

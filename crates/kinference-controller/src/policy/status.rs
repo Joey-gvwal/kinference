@@ -877,6 +877,9 @@ pub struct StatusWriter<A: ApiServer> {
     /// Policy warnings already logged, as `ns/name: warning`, so each is logged
     /// once when it first appears.
     warned: Mutex<HashSet<String>>,
+    /// Objects whose last status patch failed, so a failing patch logs once
+    /// until it succeeds.
+    failing: Mutex<HashSet<CacheKey>>,
 }
 
 impl<A: ApiServer> StatusWriter<A> {
@@ -903,6 +906,7 @@ impl<A: ApiServer> StatusWriter<A> {
             prom,
             last: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashSet::new()),
+            failing: Mutex::new(HashSet::new()),
         }
     }
 
@@ -1183,11 +1187,14 @@ impl<A: ApiServer> StatusWriter<A> {
         match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
                 tracing::debug!(kind, ns, name, "policy status: patched");
+                sync::lock(&self.failing).remove(&key);
                 sync::lock(&self.last).insert(key, value);
             }
             Err(e) => {
                 // Don't cache on failure, so the next tick retries.
-                tracing::warn!(kind, ns, name, error = %e, "policy status: patch failed");
+                if sync::lock(&self.failing).insert(key) {
+                    tracing::warn!(kind, ns, name, error = %e, "policy status: patch failed");
+                }
             }
         }
     }
