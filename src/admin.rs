@@ -135,7 +135,10 @@ pub struct AdminHandles {
 pub fn spawn(addr: SocketAddr, handles: AdminHandles, cancel: CancellationToken) {
     tokio::spawn(async move {
         if let Err(err) = serve(addr, handles, cancel).await {
-            tracing::error!(error = %err, "admin server exited with error");
+            tracing::error!(
+                error = &err as &dyn std::error::Error,
+                "admin listener failed"
+            );
         }
     });
 }
@@ -161,7 +164,7 @@ pub async fn serve(
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "Admin listener ready");
+    tracing::info!(listen = %addr, "admin listener ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;

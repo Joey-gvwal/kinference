@@ -43,11 +43,11 @@ pub async fn run() -> Result<()> {
         listen = %listen_addr,
         worker_sets = cfg.worker_sets.len(),
         profiles = cfg.profiles.len(),
-        "Starting kinference"
+        "starting kinference"
     );
 
     let cancel = CancellationToken::new();
-    // Pre-bind so READY is logged only once the socket is listening.
+    // Pre-bind so "ready" is logged only once the socket is listening.
     // `TcpIncoming::new` binds synchronously and fails with an io::Error.
     let incoming = tonic::transport::server::TcpIncoming::new(listen_addr, true, None)
         .map_err(|e| anyhow::anyhow!("failed to bind gRPC listener on {listen_addr}: {e}"))?;
@@ -115,7 +115,7 @@ pub async fn run() -> Result<()> {
     tracing::info!(
         listen = %listen_addr,
         worker_sets = handles.pools.snapshot().len(),
-        "READY: gRPC accepting connections"
+        "ready"
     );
     let served = Server::builder()
         .add_service(grpc::server(service))
@@ -125,7 +125,7 @@ pub async fn run() -> Result<()> {
     cancel.cancel();
     controller.shutdown().await;
     served?;
-    tracing::info!("Shut down complete");
+    tracing::info!("shutdown complete");
     Ok(())
 }
 
@@ -156,7 +156,10 @@ async fn wait_for_shutdown_signal() {
             Ok(s) => s,
             Err(e) => {
                 // Degrade to SIGINT-only rather than refusing to start.
-                tracing::warn!(error = %e, "failed to install SIGTERM handler; SIGINT only");
+                tracing::warn!(
+                    error = &e as &dyn std::error::Error,
+                    "failed to install the SIGTERM handler; only SIGINT shuts down"
+                );
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!(signal = "SIGINT", "shutting down");
                 return;
