@@ -123,7 +123,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
         tracing::info!(
             namespace = ?self.namespace,
             pools = self.pools.snapshot().len(),
-            "policy: watching kinference.buoyant.io CRDs + HTTPRoutes + ReferenceGrants + Services"
+            "watching policy resources"
         );
 
         // One flag per kind, set when that kind finishes its initial list.
@@ -165,13 +165,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
                 // reference is permitted.
                 Step::Absent => {
                     if !listed[idx] {
-                        tracing::warn!(
-                            kind = name,
-                            "policy: this CRD is not installed on the cluster; treating it as \
-                             having no objects. Cross-namespace references need \
-                             ReferenceGrant, and pool status `parents[]` needs HTTPRoute — \
-                             install the Gateway API CRDs if you want either"
-                        );
+                        tracing::warn!(kind = name, "CRD not installed; treating it as empty");
                     }
                     listed[idx] = true;
                 }
@@ -211,7 +205,7 @@ impl<A: ApiServer> PolicyWatcher<A> {
                 unresolved_destinations = unresolved,
                 services = index.services().len(),
                 services_listed = index.services().listed(),
-                "policy: snapshot rebuilt"
+                "policy snapshot rebuilt"
             );
             self.store.publish(Arc::new(index));
         }
@@ -249,13 +243,17 @@ fn step<T>(
         Ok(Some(watcher::Event::InitDone)) => Step::Listed,
         Ok(Some(_)) => Step::Changed,
         Ok(None) => {
-            tracing::warn!(kind, "policy: watcher stream ended; will rebuild");
+            tracing::warn!(kind, "watch ended; rebuilding");
             Step::Ended
         }
         Err(err) if crd_not_installed(&err) => Step::Absent,
         Err(err) => {
             if !std::mem::replace(failing, true) {
-                tracing::warn!(kind, error = %err, "policy: watcher error; continuing");
+                tracing::warn!(
+                    kind,
+                    error = &err as &dyn std::error::Error,
+                    "watch failed; retrying"
+                );
             }
             Step::Ignore
         }

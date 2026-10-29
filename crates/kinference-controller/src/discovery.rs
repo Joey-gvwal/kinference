@@ -68,10 +68,8 @@ pub fn factory(enabled: bool, required: bool) -> Result<Option<DiscoveryFactory>
             Ok(api) => Some(api),
             Err(err) => {
                 tracing::error!(
-                    error = %err.chain(),
-                    "kubernetes.enabled is set but in-cluster credentials are \
-                     unavailable; InferenceWorkerSets will resolve but their pools \
-                     cannot start discovery"
+                    error = &err as &dyn std::error::Error,
+                    "in-cluster credentials unavailable; worker sets cannot start discovery"
                 );
                 None
             }
@@ -185,15 +183,12 @@ impl<A: ApiServer> KubeDiscovery<A> {
                             // nothing safe to diff against yet.
                             Ok(Some(_)) => failing = false,
                             Ok(None) => {
-                                tracing::warn!(
-                                    "watcher stream ended; rebuilding in {:?}",
-                                    REBUILD_DELAY
-                                );
+                                tracing::warn!("EndpointSlice watch ended; rebuilding");
                                 break;
                             }
                             Err(err) => {
                                 if !std::mem::replace(&mut failing, true) {
-                                    tracing::warn!(error = %err, "watcher error; continuing");
+                                    tracing::warn!(error = &err as &dyn std::error::Error, "EndpointSlice watch failed; retrying");
                                 }
                             }
                         }
@@ -267,8 +262,7 @@ async fn reconcile(
                         workerset = ws,
                         pod,
                         slice = slice_name,
-                        "endpoint Ready but missing required fields \
-                         (address or targetRef); skipping. Will retry on next update."
+                        "ready endpoint has no address or targetRef; skipping"
                     );
                 }
             }
@@ -286,7 +280,7 @@ async fn reconcile(
             worker_id = cfg.worker_id_str,
             zmq_endpoint = ?cfg.zmq_endpoint,
             http_url = ?cfg.http_url,
-            "endpoint became Ready; emitting Added"
+            "endpoint ready"
         );
         announced.insert(pod_uid.clone(), (worker_id_num, cfg.worker_id_str.clone()));
         let _ = tx.send(WorkerChange::Added(cfg.clone())).await;
@@ -301,11 +295,7 @@ async fn reconcile(
         .collect();
     for pod_uid in vanished {
         if let Some((num, worker_id)) = announced.remove(&pod_uid) {
-            tracing::debug!(
-                workerset = ws,
-                worker_id,
-                "endpoint no longer Ready in any slice; emitting Removed"
-            );
+            tracing::debug!(workerset = ws, worker_id, "endpoint no longer ready");
             let _ = tx.send(WorkerChange::Removed(num)).await;
         }
     }
@@ -361,8 +351,7 @@ fn resolve_port_ref(
                     role,
                     port_name = %name,
                     slice = slice.metadata.name.as_deref().unwrap_or("-"),
-                    "declared port name is not on this EndpointSlice; \
-                     falling back to the conventional name"
+                    "declared port name not on the EndpointSlice; using the conventional name"
                 );
             }
             hit
@@ -378,9 +367,7 @@ fn resolve_port_ref(
                     role,
                     port = n,
                     slice = slice.metadata.name.as_deref().unwrap_or("-"),
-                    "declared numeric port matches no EndpointSlice port; dialing it \
-                     verbatim. A number in a CR is a SERVICE port and endpoints carry \
-                     TARGET ports — prefer a port NAME, which is always unambiguous"
+                    "declared port number matches no EndpointSlice port; declare a port name"
                 );
             }
             Some(*n)

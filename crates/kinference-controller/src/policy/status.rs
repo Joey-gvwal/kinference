@@ -932,8 +932,7 @@ impl<A: ApiServer> StatusWriter<A> {
                         // create a second writer, and demoting could leave none.
                         Err(_) => {
                             tracing::error!(
-                                "policy status writer: leader channel closed; \
-                                 holding the last known leadership state"
+                                "leader channel closed; keeping the last leadership state"
                             );
                             self.prom.record_leader_election_error();
                         }
@@ -964,7 +963,7 @@ impl<A: ApiServer> StatusWriter<A> {
         };
         tracing::debug!(
             dropped_cache_entries = dropped,
-            "policy status writer: promoted to leader; re-asserting all status"
+            "promoted to leader; rewriting all status"
         );
     }
 
@@ -975,7 +974,7 @@ impl<A: ApiServer> StatusWriter<A> {
     /// counts.
     fn on_demotion(&self) {
         self.prom.set_policy_warnings(&[]);
-        tracing::debug!("policy status writer: demoted; stopping writes");
+        tracing::debug!("demoted from leader; stopping writes");
     }
 
     async fn reconcile_once(&self) {
@@ -1146,7 +1145,7 @@ impl<A: ApiServer> StatusWriter<A> {
         let mut warned = sync::lock(&self.warned);
         for line in &current {
             if !warned.contains(line) {
-                tracing::warn!("policy warning: {line}");
+                tracing::warn!(warning = %line, "policy warning");
             }
         }
         *warned = current;
@@ -1186,14 +1185,20 @@ impl<A: ApiServer> StatusWriter<A> {
         }
         match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
-                tracing::debug!(kind, ns, name, "policy status: patched");
+                tracing::debug!(kind, ns, name, "status patched");
                 sync::lock(&self.failing).remove(&key);
                 sync::lock(&self.last).insert(key, value);
             }
             Err(e) => {
                 // Don't cache on failure, so the next tick retries.
                 if sync::lock(&self.failing).insert(key) {
-                    tracing::warn!(kind, ns, name, error = %e, "policy status: patch failed");
+                    tracing::warn!(
+                        kind,
+                        ns,
+                        name,
+                        error = &e as &dyn std::error::Error,
+                        "status patch failed"
+                    );
                 }
             }
         }

@@ -152,7 +152,10 @@ pub async fn run<A: ApiServer>(
                 }
                 Err(e) => {
                     if !std::mem::replace(&mut failing, true) {
-                        tracing::warn!(error = %e, "failed to read or create the lease; retrying");
+                        tracing::warn!(
+                            error = &e as &dyn std::error::Error,
+                            "failed to read or create the lease; retrying"
+                        );
                     }
                     None
                 }
@@ -174,7 +177,10 @@ pub async fn run<A: ApiServer>(
                     }
                     Err(e) => {
                         if !is_conflict(&e) && !std::mem::replace(&mut failing, true) {
-                            tracing::warn!(error = %e, "lease claim failed; retrying");
+                            tracing::warn!(
+                                error = &e as &dyn std::error::Error,
+                                "lease claim failed; retrying"
+                            );
                         }
                         params.retry
                     }
@@ -209,7 +215,10 @@ pub async fn run<A: ApiServer>(
         && let Some(lease) = known
         && let Err(e) = vacate(&api, namespace, lease, &params.name).await
     {
-        tracing::warn!(error = %e, "failed to vacate lease on shutdown");
+        tracing::warn!(
+            error = &e as &dyn std::error::Error,
+            "failed to vacate lease on shutdown"
+        );
     }
     let _ = tx.send(false);
 }

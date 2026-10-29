@@ -283,19 +283,17 @@ impl<A: ApiServer> BindingWriter<A> {
                         Ok(()) => {
                             if *self.leader.borrow_and_update() {
                                 tracing::debug!(
-                                    "backend binding writer: promoted to leader; \
-                                     publishing bindings from the next tick"
+                                    "promoted to leader; writing bindings from the next tick"
                                 );
                             } else {
                                 tracing::debug!(
-                                    "backend binding writer: demoted; stopping writes"
+                                    "demoted from leader; stopping writes"
                                 );
                             }
                         }
                         // Elector gone; hold the last known state.
                         Err(_) => tracing::error!(
-                            "backend binding writer: leader channel closed; \
-                             holding the last known leadership state"
+                            "leader channel closed; keeping the last leadership state"
                         ),
                     }
                 }
@@ -308,7 +306,7 @@ impl<A: ApiServer> BindingWriter<A> {
                         // Never fatal; already-programmed routes keep working.
                         Err(e) => {
                             if !std::mem::replace(&mut failing, true) {
-                                tracing::warn!(error = %e.chain(), "backend binding writer: reconcile failed");
+                                tracing::warn!(error = &e as &dyn std::error::Error, "backend binding reconcile failed");
                             }
                         }
                     }
@@ -331,9 +329,8 @@ impl<A: ApiServer> BindingWriter<A> {
         // ends up here, hence the warning.
         if !snapshot.services().listed() {
             self.warn_new(HashSet::from([
-                "backend bindings: waiting for the Service watch to list before \
-                 publishing; a backendRef needs the Service's port (if this does \
-                 not clear, check kinference's `services` get/list/watch grant)"
+                "waiting for the Service watch to list; if this persists, check the \
+                 services get/list/watch grant"
                     .to_string(),
             ]));
             return Ok(());
@@ -347,8 +344,8 @@ impl<A: ApiServer> BindingWriter<A> {
                     desired_binding(pool, self.extension.as_ref(), snapshot.services());
                 for (dest, why) in omitted {
                     port_warnings.insert(format!(
-                        "backend bindings: {}/{}: destination {dest} is left out — \
-                         its Service port did not resolve ({}: {why})",
+                        "{}/{}: left out destination {dest}, whose Service port did not \
+                         resolve ({}: {why})",
                         pool.namespace,
                         pool.name,
                         why.as_str(),
@@ -368,10 +365,8 @@ impl<A: ApiServer> BindingWriter<A> {
                 // The CRD is not installed. Expected without this gateway, but
                 // worth a warning.
                 self.warn_new(HashSet::from([
-                    "backend bindings: the BackendBinding CRD is not installed; \
-                     not publishing any (install the gateway's \
-                     gateway.linkerd.io CRDs, or set \
-                     `policy.backend_bindings = false`)"
+                    "BackendBinding CRD not installed; install the gateway.linkerd.io \
+                     CRDs or set policy.backend_bindings = false"
                         .to_string(),
                 ]));
                 return Ok(());
@@ -399,16 +394,14 @@ impl<A: ApiServer> BindingWriter<A> {
                     // Someone else's object under the name we want; never
                     // adopt it.
                     warnings.insert(format!(
-                        "backend bindings: {}/{} exists and is not managed by kinference; \
-                         leaving it alone — the pool's routes will not resolve until it \
-                         is removed or renamed",
+                        "{}/{} exists and is not managed by kinference; leaving it alone",
                         key.0, key.1
                     ));
                     continue;
                 }
                 if let Some(reason) = rejected_reason(current) {
                     warnings.insert(format!(
-                        "backend bindings: the gateway rejected {}/{}: {reason}",
+                        "the gateway rejected {}/{}: {reason}",
                         key.0, key.1
                     ));
                 }
@@ -422,15 +415,12 @@ impl<A: ApiServer> BindingWriter<A> {
             match self.api.apply(&key.0, &key.1, FIELD_MANAGER, want).await {
                 Ok(_) => {
                     applied += 1;
-                    tracing::debug!(namespace = %key.0, name = %key.1, "backend binding: applied");
+                    tracing::debug!(namespace = %key.0, name = %key.1, "backend binding applied");
                 }
                 // A standing warning rather than an error, so one namespace's
                 // failure doesn't block the rest and logs once.
                 Err(e) => {
-                    warnings.insert(format!(
-                        "backend bindings: failed to apply {}/{}: {e}",
-                        key.0, key.1
-                    ));
+                    warnings.insert(format!("failed to apply {}/{}: {e}", key.0, key.1));
                 }
             }
         }
@@ -452,18 +442,16 @@ impl<A: ApiServer> BindingWriter<A> {
                 Ok(_) => tracing::info!(
                     namespace = %ns,
                     name = %name,
-                    "backend binding: deleted; its InferencePool is gone"
+                    "deleted the backend binding of a removed InferencePool"
                 ),
                 Err(e) => {
-                    warnings.insert(format!(
-                        "backend bindings: failed to delete {ns}/{name}: {e}"
-                    ));
+                    warnings.insert(format!("failed to delete {ns}/{name}: {e}"));
                 }
             }
         }
 
         if applied > 0 {
-            tracing::debug!(applied, "backend bindings: reconciled");
+            tracing::debug!(applied, "backend bindings reconciled");
         }
         self.warn_new(warnings);
         Ok(())
@@ -475,7 +463,7 @@ impl<A: ApiServer> BindingWriter<A> {
         let mut warned = sync::lock(&self.warned);
         for w in &warnings {
             if !warned.contains(w) {
-                tracing::warn!("{w}");
+                tracing::warn!(warning = %w, "backend binding warning");
             }
         }
         *warned = warnings;

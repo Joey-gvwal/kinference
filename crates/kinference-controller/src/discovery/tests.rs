@@ -272,7 +272,7 @@ async fn a_declared_port_missing_from_a_live_slice_still_warns() {
     };
 
     assert!(
-        logs.contains("declared port name is not on this EndpointSlice"),
+        logs.contains("declared port name not on the EndpointSlice"),
         "a genuinely absent port name must still warn; got: {logs}"
     );
     // Still routable: the fallback found the conventional `http` name.
