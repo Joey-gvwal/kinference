@@ -1434,3 +1434,24 @@ fn reference_warnings_alone_raise_has_warnings() {
     assert_eq!(s.warnings.len(), 1);
     assert!(s.warnings[0].starts_with("UnknownBackend: "));
 }
+
+/// A clean shutdown does not count as a leader election error.
+#[tokio::test]
+async fn shutdown_does_not_count_a_leader_election_error() {
+    // The race this guards against is random, so repeat it.
+    for _ in 0..32 {
+        let ((w, tx), registry) = writer_with_leader_and_registry(false);
+        let cancel = CancellationToken::new();
+        // The elector's order on shutdown: cancel fires, then a last send and drop.
+        cancel.cancel();
+        tx.send(false).expect("the writer holds the receiver");
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), w.run(cancel))
+            .await
+            .expect("the writer exits on cancel");
+        assert!(
+            render(&registry).contains("kinference_leader_election_errors_total 0"),
+            "shutdown must not bump the leader election error counter"
+        );
+    }
+}
