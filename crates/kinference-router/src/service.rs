@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::error::Error as StdError;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +18,7 @@ use kinference_policy::AUTO_MODEL;
 use crate::body_store::{self, Bodies, BodyLimits};
 use crate::error::Error;
 use crate::metrics::{MetricsConfig, RouterMetrics};
-use crate::observations::{ObservationSink, Observations, Qos, RequestMeta};
+use crate::observations::{Observations, Qos, RequestMeta};
 use crate::picker::WorkerScore;
 use crate::tokenizer::{self, TokenizeConfig, TokenizeInput};
 use crate::warn_once::WarnOnce;
@@ -319,8 +318,6 @@ pub struct RouterConfig {
     /// exceed the worst-case full response time, since a non-streaming
     /// caller only reports at completion.
     pub observation_ttl: Duration,
-    /// Where the predicted-vs-observed CSV appends; `None` disables it.
-    pub observations_csv: Option<PathBuf>,
 }
 
 /// How often the body and observation sweeps run.
@@ -373,12 +370,7 @@ impl KinferenceService {
             Scoring::new(fleet.pools, fleet.models, fleet.scrape),
             tokenizer,
             Bodies::new(store, limits.idle_timeout, prom.clone()),
-            Observations::new(
-                config.observation_ttl,
-                ObservationSink::open(config.observations_csv),
-                policy.provider_health,
-                prom.clone(),
-            ),
+            Observations::new(config.observation_ttl, policy.provider_health, prom.clone()),
             policy.store,
             prom,
         ));

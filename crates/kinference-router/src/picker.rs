@@ -265,7 +265,7 @@ fn q_running_penalty_ms(qr: u32, q_inflight: u32, predictor: &PredictorConfig) -
 }
 
 /// The intermediate values of the queue-cost calculation, for
-/// `predicted_wait_ms` and for logging and the observation CSV.
+/// `predicted_wait_ms` and for the observation event.
 #[derive(Debug, Clone)]
 pub struct QueueCostBreakdown {
     /// Per-entry queue rate after the cold-saturation check. Equals
@@ -274,15 +274,16 @@ pub struct QueueCostBreakdown {
     /// completion history AND looks cache-saturated AND has waiting
     /// queue depth.
     pub q_rate_ms_per_entry: f32,
-    /// `q_rate_ms_per_entry * w.queue_waiting`. Diagnostic only, kept in
-    /// the CSV.
+    /// `q_rate_ms_per_entry * w.queue_waiting`. Diagnostic only, logged on
+    /// the observation event.
     pub q_ms_constant: f32,
     /// Inflight position costs plus `unknown_q_count * q_rate`. Same as
-    /// `q_ms`; named to match the CSV column.
+    /// `q_ms`; named to match the observation event's field.
     pub q_ms_workload: f32,
     /// q_ms used by the predictor.
     pub q_ms: f32,
-    /// Total uncached blocks across our inflight dispatches, for the CSV.
+    /// Total uncached blocks across our inflight dispatches, for the
+    /// observation event.
     pub inflight_workload_blocks: u32,
 }
 
@@ -378,7 +379,7 @@ pub fn compute_queue_cost(
 
 /// Outcome of a successful pick. `replication_fired` is true when the
 /// cache-replication override replaced the normal pick (see
-/// [`cache_replication_override`]); recorded in the CSV.
+/// [`cache_replication_override`]); logged on the observation event.
 pub struct PickResult<'a> {
     /// The position of `worker` in the `scores` the pick ran over.
     pub index: usize,

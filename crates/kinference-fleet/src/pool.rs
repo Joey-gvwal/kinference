@@ -19,7 +19,7 @@
 //!   dispatched-but-unobserved work.
 //! - `pick_lock`: so picks in different pools run concurrently.
 //!
-//! The metrics registry, observation CSV sink, tokenization and response-id
+//! The metrics registry, observations, tokenization and response-id
 //! minting are shared, on `KinferenceService`.
 //!
 //! [`PoolManager`] owns the pool lifecycle: create, update, retire, reap.
@@ -170,8 +170,8 @@ pub struct Pool {
     /// Operator-facing name (from the `workerset` entry's `name`, or the
     /// `InferenceWorkerSet`'s). Unique across the fleet.
     pub name: String,
-    /// The profile this pool's tuning came from, carried into the
-    /// observation CSV.
+    /// The profile this pool's tuning came from, logged on each observation
+    /// event.
     pub profile: String,
     /// KV-cache hash block size for every worker in this pool.
     pub block_size: u32,

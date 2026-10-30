@@ -228,7 +228,6 @@ impl ServiceBuilder {
             ),
             crate::observations::Observations::new(
                 ttl,
-                crate::observations::ObservationSink::open(None),
                 Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
                 prom.clone(),
             ),

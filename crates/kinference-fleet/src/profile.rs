@@ -12,7 +12,7 @@ use serde::Deserialize;
 pub struct ProfileConfig {
     /// Referenced by a workerset's `profile`. Must be unique.
     pub name: String,
-    /// Refit from the observations CSV (`KINFERENCE_OBSERVATIONS_CSV`).
+    /// Refit from the `kinference::observation` log events.
     #[serde(default)]
     pub predictor: PredictorConfig,
     #[serde(default)]
@@ -30,7 +30,7 @@ pub struct ProfileTokenizeConfig {
 
 /// Latency-model coefficients consumed by
 /// `router::picker::predicted_wait_ms` / `compute_queue_cost`. Refit these
-/// from the observations CSV. Same values drive every routing decision
+/// from the `kinference::observation` log events. Same values drive every routing decision
 /// regardless of which front-end (gRPC `Pick()`) accepted the request.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PredictorConfig {

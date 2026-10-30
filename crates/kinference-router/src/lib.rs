@@ -11,7 +11,7 @@
 //! - [`grpc`][]: the `Picker` handlers; maps proto types to service calls.
 //! - [`metrics`][]: `RouterMetrics` and the tenant label policy.
 //! - [`observations`][]: per-pick state kept until the caller reports, and the
-//!   CSV sink.
+//!   predicted-versus-observed event.
 //! - [`pick_body`][]: rewrites of the request body that `PullBody` serves.
 //! - [`picker`][]: the wait-time predictor and the top-K picker.
 //! - [`proto`][]: the generated tonic types for `kinference.v1`.

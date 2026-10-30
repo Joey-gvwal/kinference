@@ -32,11 +32,6 @@ logFormat: text
 # Contends with tokenize HTTP and can adopt blocks the engine has evicted.
 enableReplay: false
 
-# Predicted-vs-observed CSV (KINFERENCE_OBSERVATIONS_CSV). Off by default;
-# set a path such as /var/log/kinference/latency.csv to record rows. The
-# file lives on an emptyDir that is lost with the pod.
-observationsCsv: ""
-
 # Secret with a HUGGING_FACE_HUB_TOKEN key, for gated models.
 hfTokenSecret: ""
 
@@ -107,7 +102,12 @@ config:
   # Named bundles of routing tuning that worker sets reference by name.
   profiles:
     default:
-      # Starting points; refit from this profile's latency.csv rows.
+      # Starting points; refit from this profile's observation events. The
+      # router logs one event per streaming request at debug level, under the
+      # kinference::observation target. To log the events, set logFormat to
+      # json and add kinference::observation=debug to logLevel. Each event
+      # names its profile. docs/local-development.md shows how to extract
+      # the events.
       predictor:
         base_ms: 400.0
         queue_ms_per_entry: 0.2

@@ -294,8 +294,8 @@ impl Picker for KinferenceService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    /// First-token report for an earlier `Pick()`. Records the TTFT and CSV row
-    /// (streaming only) and releases the inflight state.
+    /// First-token report for an earlier `Pick()`. Records the TTFT, logs the
+    /// observation event (streaming only) and releases the inflight state.
     ///
     /// `upstream_status == 0` means no response at all, handled like
     /// `Abort(NOT_DISPATCHED)`.

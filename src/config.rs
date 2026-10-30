@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -108,11 +108,6 @@ pub struct Config {
     /// `replay_timeout_ms`. Filled by [`Self::read_env`]; not a file key.
     #[serde(skip)]
     pub ingest: IngestConfig,
-    /// `KINFERENCE_OBSERVATIONS_CSV`: where the predicted-vs-observed CSV sink
-    /// appends; unset disables it. Filled by [`Self::read_env`]; not a file
-    /// key.
-    #[serde(skip)]
-    pub observations_csv: Option<PathBuf>,
 }
 
 /// A `workerset` entry: one config-declared worker set. The Kubernetes equivalent is an
@@ -165,7 +160,6 @@ impl Config {
         self.tokenize.local.hub_token = std::env::var("HUGGING_FACE_HUB_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
-        self.observations_csv = std::env::var_os("KINFERENCE_OBSERVATIONS_CSV").map(PathBuf::from);
         self.leader_election.identity = leader::identity(std::env::var("POD_NAME").ok());
     }
 
@@ -271,7 +265,6 @@ impl Config {
                 idle_timeout: Duration::from_secs(self.body_idle_timeout_secs.unwrap_or(30)),
             },
             observation_ttl: self.observation_ttl(),
-            observations_csv: self.observations_csv.clone(),
         }
     }
 

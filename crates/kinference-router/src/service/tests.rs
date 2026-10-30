@@ -1256,7 +1256,6 @@ async fn start_builds_from_empty_handles() {
             idle_timeout: Duration::from_secs(1),
         },
         observation_ttl: Duration::from_secs(1),
-        observations_csv: None,
     };
     let fleet = FleetHandles {
         pools: PoolRegistry::new(),
