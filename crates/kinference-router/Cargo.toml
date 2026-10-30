@@ -41,6 +41,8 @@ kinference-fleet = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["net"] }
 axum.workspace = true
 tempfile.workspace = true
+# `json`, so the observation test parses the event as a log pipeline would.
+tracing-subscriber = { version = "0.3", features = ["json"] }
 
 [build-dependencies]
 tonic-build = "0.12"

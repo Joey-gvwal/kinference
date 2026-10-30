@@ -852,16 +852,7 @@ impl Observations {
 
         let predicted_ms = record.prediction.total_ms();
         let residual_ms = observed_ttft_ms as f32 - predicted_ms;
-        tracing::debug!(
-            req = record.external_request_id.as_deref().unwrap_or("-"),
-            response_id = record.request_id,
-            endpoint = %record.chosen_worker.endpoint,
-            predicted_ms,
-            observed_ms = observed_ttft_ms,
-            residual_ms,
-            status = upstream_status,
-            "first token observed"
-        );
+        log_observation(&record, observed_ttft_ms, residual_ms, upstream_status);
 
         self.sink.append_line(&format_csv_row(
             &record,
@@ -909,6 +900,98 @@ pub(crate) struct FinalTokenReport {
     pub cached_tokens: Option<u32>,
     pub itl_bucket_layout: u32,
     pub itl_bucket_counts: Vec<u32>,
+}
+
+/// The tracing target of the predicted-versus-observed event, one per
+/// streaming observation. Enable it with `kinference::observation=debug`.
+const OBSERVATION_TARGET: &str = "kinference::observation";
+
+/// Emit the predicted-versus-observed event for `record`, the input for
+/// refitting the predictor. The event includes the profile's coefficients, so
+/// each event is self-contained.
+fn log_observation(
+    record: &PendingObservation,
+    observed_ms: u32,
+    residual_ms: f32,
+    upstream_status: i32,
+) {
+    let w = &record.chosen_worker;
+    let p = &record.prediction;
+    let pred = &record.predictor_cfg;
+    let pkr = &record.picker_cfg;
+    tracing::debug!(
+        target: OBSERVATION_TARGET,
+        response_id = record.request_id,
+        req = record.external_request_id.as_deref(),
+        model = record.model.as_str(),
+        workerset = record.workerset.as_str(),
+        profile = record.profile.as_str(),
+        worker = w.name.as_str(),
+        endpoint = w.endpoint.as_str(),
+        upstream_status,
+        predicted_ms = p.total_ms(),
+        observed_ms,
+        residual_ms,
+        base_ms = p.base_ms,
+        q_ms = p.q_ms,
+        q_rate_ms_per_entry = p.q_rate_ms_per_entry,
+        prefill_ms = p.prefill_ms,
+        cache_ms = p.cache_ms,
+        q_running_ms = p.q_running_ms,
+        decode_contention_ms = p.decode_contention_ms,
+        overlap_blocks = w.matched_blocks,
+        total_blocks = w.total_blocks,
+        kv_blocks = record.kv_blocks,
+        q_waiting = w.queue_waiting,
+        q_inflight = record.q_inflight,
+        q_running = w.queue_running,
+        q_swapped = w.queue_swapped,
+        kv_cache_usage = w.kv_cache_usage,
+        compl_per_s = w.completion_rate_per_sec,
+        q_workload = record.inflight_workload_blocks,
+        q_ms_constant = record.q_ms_constant,
+        q_ms_workload = record.q_ms_workload,
+        inflight_dispatches = record.inflight_overlap_blocks.len(),
+        inflight_overlap_blocks = %JsonList(&record.inflight_overlap_blocks),
+        expected_overlap_alpha = record.expected_overlap_alpha,
+        replication_fired = record.replication_fired,
+        queue_ms_per_entry = pred.queue_ms_per_entry,
+        cache_pressure_penalty_ms = pred.cache_pressure_penalty_ms,
+        saturated_cold_ms_per_entry = pred.saturated_cold_ms_per_entry,
+        cache_pressure_saturated_threshold = pred.cache_pressure_saturated_threshold,
+        attention_uncached_block_ms = pred.attention_uncached_block_ms,
+        attention_uncached_per_every_block_ms = pred.attention_uncached_per_every_block_ms,
+        q_running_penalty_peak_ms = pred.q_running_penalty_peak_ms,
+        q_running_penalty_peak_qr = pred.q_running_penalty_peak_qr,
+        q_running_penalty_falloff_qr = pred.q_running_penalty_falloff_qr,
+        inflight_concurrent_capacity = pred.inflight_concurrent_capacity,
+        forward_pass_ms = pred.forward_pass_ms,
+        top_k_min = pkr.top_k_min,
+        top_k_fraction = pkr.top_k_fraction,
+        inflight_tracking = pkr.inflight_tracking,
+        tie_tolerance_ms = pkr.tie_tolerance_ms,
+        replication_threshold_pct = pkr.replication_threshold_pct,
+        replication_warm_target = pkr.replication_warm_target,
+        replication_warm_threshold_fraction = pkr.replication_warm_threshold_fraction,
+        "first token observed"
+    );
+}
+
+/// Formats a list as a compact JSON array, such as `[5,3]`. A `tracing` field
+/// can't hold an array, so a JSON log line holds the array as a string.
+struct JsonList<'a>(&'a [u32]);
+
+impl std::fmt::Display for JsonList<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[")?;
+        for (i, n) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{n}")?;
+        }
+        f.write_str("]")
+    }
 }
 
 /// Release the inflight counter and inflight-prefix entry a pick reserved

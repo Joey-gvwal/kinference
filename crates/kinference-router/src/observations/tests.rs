@@ -1,6 +1,7 @@
 use super::*;
 use crate::picker::WorkerScore;
 use crate::picker::predicted_wait_ms;
+use std::sync::{Arc, Mutex};
 
 fn synthetic_record() -> PendingObservation {
     let worker = WorkerScore {
@@ -188,6 +189,105 @@ fn csv_row_emits_empty_inflight_overlap_list_when_no_dispatches() {
     let cols: Vec<&str> = line.split(',').collect();
     assert_eq!(cols.len(), 52);
     assert_eq!(cols[26], "");
+}
+
+/// Collects the JSON log lines that a subscriber writes.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Finalize `record` under a JSON subscriber that enables only the
+/// observation target, and return the parsed events.
+fn finalize_capturing(record: PendingObservation) -> Vec<serde_json::Value> {
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let (_registry, prom) = crate::tokenizer::test_support::router_metrics();
+    let obs = Observations::new(
+        Duration::from_secs(30),
+        ObservationSink::open(None),
+        Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
+        prom,
+    );
+    let id = record.request_id;
+    obs.pending.insert(record);
+    tracing::subscriber::with_default(subscriber, || {
+        assert!(obs.finalize(id, 523, 200));
+    });
+    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    out.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("one JSON object per line"))
+        .filter(|e| e["target"] == OBSERVATION_TARGET)
+        .collect()
+}
+
+#[test]
+fn finalize_emits_one_observation_event_with_named_fields() {
+    let events = finalize_capturing(synthetic_record());
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["level"], "DEBUG");
+    assert_eq!(e["response_id"], 42);
+    assert_eq!(e["req"], "trace-abc-123");
+    assert_eq!(e["workerset"], "set-a");
+    assert_eq!(e["profile"], "h100-tp2");
+    assert_eq!(e["endpoint"], "10.0.0.1:8000");
+    assert_eq!(e["upstream_status"], 200);
+    assert_eq!(e["observed_ms"], 523);
+    let predicted = e["predicted_ms"].as_f64().unwrap();
+    let residual = e["residual_ms"].as_f64().unwrap();
+    assert!((523.0 - predicted - residual).abs() < 1e-3, "{e}");
+    assert_eq!(e["q_inflight"], 3);
+    assert_eq!(e["q_ms_constant"], 1000.0);
+    assert_eq!(e["inflight_dispatches"], 2);
+    let overlap: Vec<u32> =
+        serde_json::from_str(e["inflight_overlap_blocks"].as_str().unwrap()).unwrap();
+    assert_eq!(overlap, [5, 3]);
+    assert_eq!(e["replication_fired"], false);
+    assert_eq!(
+        e["queue_ms_per_entry"].as_f64().unwrap() as f32,
+        PredictorConfig::default().queue_ms_per_entry
+    );
+    assert_eq!(e["top_k_min"], PickerConfig::default().top_k_min);
+}
+
+#[test]
+fn finalize_logs_an_empty_overlap_list_when_nothing_is_in_flight() {
+    let mut r = synthetic_record();
+    r.inflight_overlap_blocks = vec![];
+    let events = finalize_capturing(r);
+    assert_eq!(events[0]["inflight_dispatches"], 0);
+    assert_eq!(events[0]["inflight_overlap_blocks"], "[]");
+}
+
+#[test]
+fn finalize_omits_req_when_the_caller_sent_none() {
+    let mut r = synthetic_record();
+    r.external_request_id = None;
+    let events = finalize_capturing(r);
+    assert_eq!(events.len(), 1);
+    assert!(events[0].get("req").is_none(), "{}", events[0]);
+}
+
+#[test]
+fn finalize_emits_no_observation_event_for_a_non_streaming_request() {
+    let mut r = synthetic_record();
+    r.streaming = false;
+    assert!(finalize_capturing(r).is_empty());
 }
 
 #[test]
