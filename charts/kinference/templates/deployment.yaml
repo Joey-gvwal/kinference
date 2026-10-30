@@ -49,6 +49,8 @@ spec:
             # another module and stays visible: set kvBlockSize to the engine's.
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
+            - name: KINFERENCE_LOG_FORMAT
+              value: {{ .Values.logFormat | quote }}
             {{- if .Values.enableReplay }}
             # Checked for presence, not value, so it is omitted when disabled.
             - name: KINFERENCE_ENABLE_REPLAY

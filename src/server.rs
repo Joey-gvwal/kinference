@@ -35,7 +35,7 @@ struct Args {
 
 /// Parse the command line and run the server until it is told to stop.
 pub async fn run() -> Result<()> {
-    init_logging();
+    init_logging()?;
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
     let listen_addr = cfg.listen;
@@ -130,19 +130,35 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// The log subscriber, from `RUST_LOG` or `info`. ANSI colors only on a TTY,
-/// and not with NO_COLOR (https://no-color.org): read here, before the
-/// config file, because every other env var is read by `Config::load`.
-fn init_logging() {
-    let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && std::env::var_os("NO_COLOR").is_none();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_ansi(use_ansi)
-        .init();
+/// The log subscriber, from `RUST_LOG` or `info`. `KINFERENCE_LOG_FORMAT`
+/// selects `text`, the default, or `json`, one object per line with the
+/// fields at the top level. ANSI colors only on a TTY, and not with NO_COLOR
+/// (https://no-color.org). Both variables are read here, before the config
+/// file, because every other env var is read by `Config::load`.
+fn init_logging() -> Result<()> {
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
+    let format = std::env::var("KINFERENCE_LOG_FORMAT");
+    match format.as_deref() {
+        Ok("json") => tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_env_filter(filter())
+            .init(),
+        Ok("" | "text") | Err(std::env::VarError::NotPresent) => {
+            let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
+                && std::env::var_os("NO_COLOR").is_none();
+            tracing_subscriber::fmt()
+                .with_env_filter(filter())
+                .with_ansi(use_ansi)
+                .init()
+        }
+        Ok(other) => anyhow::bail!("KINFERENCE_LOG_FORMAT must be text or json, not {other:?}"),
+        Err(e) => return Err(e.clone()).context("reading KINFERENCE_LOG_FORMAT"),
+    }
+    Ok(())
 }
 
 /// Resolve on SIGINT or SIGTERM.
