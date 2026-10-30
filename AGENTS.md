@@ -152,4 +152,4 @@ readers, not just reviewers:
 - Title: a short summary of the whole change.
 - Body: the overall why and what, and anything that spans commits. Don't
   repeat each commit's message.
-- No checklists, review chatter or links that only make sense on GitHub.
+- No checklists nor review chatter
