@@ -1,24 +1,27 @@
-# kinference
+# Kinference
 
-kinference routes LLM inference requests. A gateway hands it each request
-over gRPC; it picks the model and the worker that will serve it fastest,
-from the workers' KV-cache events and engine metrics, and hands back the
-winner. Kubernetes custom resources layer routing policy on top. The KV-cache
-index and event decoding come from NVIDIA's
-[dynamo-kv-router](https://github.com/ai-dynamo/dynamo) crate; kinference
-wraps it with discovery, the latency model and the control plane.
+Kinference routes LLM inference requests. A gateway sends Kinference each
+request over gRPC. Kinference reads the workers' KV-cache events and engine
+metrics, picks the model and the worker that will serve the request
+fastest, and returns its choice to the gateway. Operators declare routing
+policy on top of that with Kubernetes custom resources. The KV-cache index
+and the event decoding come from NVIDIA's
+[dynamo-kv-router](https://github.com/ai-dynamo/dynamo) crate; Kinference
+adds discovery, the latency model and the control plane around it.
 
 ## How it fits
 
-- The gateway calls the `Picker` gRPC service. The contract, including the
-  per-request flow and error model, is in
-  [kinference.proto](crates/kinference-router/proto/kinference.proto).
-- Workers are vLLM or SGLang pods, declared with an `InferenceWorkerSet` and
-  grouped into an `InferencePool`.
-- Off-cluster providers are declared with an `InferenceProvider`.
+- The gateway calls the `Picker` gRPC service.
+  [kinference.proto](crates/kinference-router/proto/kinference.proto)
+  defines the contract, including the steps of each request and the error
+  model.
+- Workers are vLLM pods. An `InferenceWorkerSet` declares a set of
+  workers, and an `InferencePool` groups worker sets.
+- An `InferenceProvider` declares a provider outside the cluster.
 - An `InferencePolicy` says which pool, model and backend a request may use.
 
-The schemas are in [charts/kinference-crds](charts/kinference-crds/templates).
+The CRD schemas are in
+[charts/kinference-crds](charts/kinference-crds/templates).
 
 ## Quick start
 
@@ -28,49 +31,57 @@ helm install kinference oci://cr.kinference.ai/kinference-ai/charts/kinference -
   --set extension.enabled=true
 ```
 
-`--devel` because every published chart is still a pre-release, which Helm
-skips by default. The second chart's `extension.enabled` creates the
-gateway `Extension` that puts kinference in the request path; it needs the
-gateway installed first.
-Everything past the defaults is documented in
-[charts/kinference/values.yaml](charts/kinference/values.yaml).
+Both commands pass `--devel` because every published chart is still a
+pre-release, and Helm skips pre-releases by default. In the second chart,
+`extension.enabled` creates the gateway `Extension` that puts Kinference in
+the request path, so install the gateway first.
+[charts/kinference/values.yaml](charts/kinference/values.yaml) documents
+every setting beyond the defaults.
 
 ## Documentation
 
-Read in this order if you are new to the code.
+If you are new to the code, read these in order.
 
-- [Architecture](ARCHITECTURE.md): the map. Vocabulary, entry points, what
-  each crate owns and the rules that hold across them.
-- [Request flow](docs/request-flow.md): boot, one pick end to end, and
-  the loops that keep the fleet and the policy current.
-- [Local development](docs/local-development.md): the kind loop. Build,
-  install, a CPU worker, what to look at, how to iterate.
-- [Contributing](CONTRIBUTING.md): style, commits, running the tests.
+- [Architecture](ARCHITECTURE.md): the map of the code. The vocabulary,
+  the entry points, what each crate owns and the rules that hold across
+  crates.
+- [Request flow](docs/request-flow.md): how the server boots, one pick
+  from start to end, and the loops that keep the fleet and the policy
+  current.
+- [Local development](docs/local-development.md): the development loop on
+  kind. How to build, install and run a CPU worker, what to look at, and
+  how to iterate.
+- [Contributing](CONTRIBUTING.md): style, commits and how to run the
+  tests.
 
 ## kinfctl
 
 `kinfctl check` finds mistakes in `InferencePolicy` manifests before you
-apply them. Binaries are attached to each release at
-[Kinference-AI/kinference-releases](https://github.com/Kinference-AI/kinference-releases/releases):
+apply them. The release workflow attaches the `kinfctl` binaries to each
+release at
+[Kinference-AI/kinference-releases](https://github.com/Kinference-AI/kinference-releases/releases).
+To install the latest one:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Kinference-AI/kinference-releases/main/install.sh | sh
 ```
 
-Or from source: `just install-cli`.
+To build it from source, run `just install-cli`.
 
 ## Scope
 
-Supported: vLLM workers, and SGLang workers started with `--enable-metrics`
-and `--kv-events-config` and tokenized in-process, found through Kubernetes;
-KV-event ingest with optional replay; engine metrics scrape; in-process or
-`/render` tokenizing, the latter vLLM only; latency-model picking;
-off-cluster providers; policy-driven routing; leader election for the
-control plane.
+Kinference supports:
 
-Not yet: more than one replica sharing picker state. SGLang with DP
-attention, since only rank 0's KV events are read. SGLang is not in the
-end-to-end test.
+- vLLM workers, which Kinference finds through Kubernetes.
+- KV-event ingest, with optional replay.
+- Scraping of engine metrics.
+- Tokenizing in process, or through vLLM's `/render` endpoint.
+- Picking by the latency model.
+- Providers outside the cluster.
+- Routing by policy.
+- Leader election for the control plane.
+
+Kinference does not yet support several replicas that share picker state.
 
 ## License
 
