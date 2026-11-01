@@ -25,40 +25,35 @@ Kinference is designed to be paired with a proxy. For example, it pairs with the
 See [the Kinference getting started
 guide](https://kinference.ai/getting-started/).
 
+## Community
+
+Please use [GitHub
+discussions](https://github.com/Kinference-AI/kinference/discussions)!
+
 ## Documentation
 
-We ❤️ pull requests! See [CONTRIBUTING.md](CONTRIBUTING.md) for info on
-contributing changes.
-
-- [Architecture](ARCHITECTURE.md): the map of the code. The vocabulary,
-  the entry points, what each crate owns and the rules that hold across
-  crates.
-- [Request flow](docs/request-flow.md): how the server boots, one pick
-  from start to end, and the loops that keep the fleet and the policy
-  current.
-- [Local development](docs/local-development.md): the development loop on
-  kind. How to build, install and run a CPU worker, what to look at, and
-  how to iterate.
-- [Contributing](CONTRIBUTING.md): style, commits and how to run the
-  tests.
+- [Architecture](ARCHITECTURE.md): Overall project architecture.
+- [Request flow](docs/request-flow.md): How requests flow through the system as
+  a whole.
+- [Local development](docs/local-development.md): How to build, install, and run
+  locally.
+- [Contributing](CONTRIBUTING.md): How to contribute the project.
 
 ## CRDs
 
-The CRD schemas are in
-[charts/kinference-crds](charts/kinference-crds/templates).
-
-See [the Kinference CRD reference
-docs](https://kinference.ai/reference/crds/) for documentation.
+Kinference primarily uses Kubernetes Custom Resource Definitions (CRDs) for
+configuration. The CRD schemas are in
+[charts/kinference-crds](charts/kinference-crds/templates). See [the Kinference
+CRD reference docs](https://kinference.ai/reference/crds/) for documentation.
 
 ## kinfctl
 
 This repo includes a `kinfctl` CLI tool. This CLI is designed to make it easy
 for you (or your agents) to validate policies before sending them to the server.
-
 See [the Kinference kinfctl reference](https://kinference.ai/reference/kinfctl/)
 for more.
 
-To build it from source, run `just install-cli`.
+To build the CLI from source, run `just install-cli`.
 
 ## Known limitations
 
