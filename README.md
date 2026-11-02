@@ -1,77 +1,84 @@
-# kinference
+# Kinference
 
-kinference routes LLM inference requests. A gateway hands it each request
-over gRPC; it picks the model and the worker that will serve it fastest,
-from the workers' KV-cache events and engine metrics, and hands back the
-winner. Kubernetes custom resources layer routing policy on top. The KV-cache
-index and event decoding come from NVIDIA's
-[dynamo-kv-router](https://github.com/ai-dynamo/dynamo) crate; kinference
-wraps it with discovery, the latency model and the control plane.
+🎈 Welcome to Kinference! 👋
 
-## How it fits
+Kinference is an inference _control plane_ for Kubernetes and vLLM.
 
-- The gateway calls the `Picker` gRPC service. The contract, including the
-  per-request flow and error model, is in
-  [kinference.proto](crates/kinference-router/proto/kinference.proto).
-- Workers are vLLM or SGLang pods, declared with an `InferenceWorkerSet` and
-  grouped into an `InferencePool`.
-- Off-cluster providers are declared with an `InferenceProvider`.
-- An `InferencePolicy` says which pool, model and backend a request may use.
+At its core, Kinference selects among inference endpoints, applying policies,
+routing, and load balancing as appropriate. It exposes a gRPC interface that
+takes an inference request (e.g. in OpenAI chat-completions format) and returns
+the endpoint for that request, as well as the appropriate-mutated body.
 
-The schemas are in [charts/kinference-crds](charts/kinference-crds/templates).
+To do this, Kinference monitors vLLM KV-cache events and engine metrics.
+Kinference currently uses NVIDIA's
+[dynamo-kv-router](https://github.com/ai-dynamo/dynamo) crate to handle cache
+events.
+
+Kinference also monitors and sets the status on a set of Kubernetes CRDs that
+configure its behavior.
+
+Kinference is designed to be paired with a proxy. For example, it pairs with the
+[Buoyant Gateway](https://github.com/BuoyantIO/gateway/).
 
 ## Quick start
 
-```sh
-helm install kinference-crds oci://cr.kinference.ai/kinference-ai/charts/kinference-crds --devel
-helm install kinference oci://cr.kinference.ai/kinference-ai/charts/kinference --devel \
-  --set extension.enabled=true
-```
+See [the Kinference getting started
+guide](https://kinference.ai/getting-started/).
 
-`--devel` because every published chart is still a pre-release, which Helm
-skips by default. The second chart's `extension.enabled` creates the
-gateway `Extension` that puts kinference in the request path; it needs the
-gateway installed first.
-Everything past the defaults is documented in
-[charts/kinference/values.yaml](charts/kinference/values.yaml).
+## Community
+
+Please use [GitHub
+discussions](https://github.com/Kinference-AI/kinference/discussions)!
 
 ## Documentation
 
-Read in this order if you are new to the code.
+- [Architecture](ARCHITECTURE.md): Overall project architecture.
+- [Request flow](docs/request-flow.md): How requests flow through the system as
+  a whole.
+- [Local development](docs/local-development.md): How to build, install, and run
+  locally.
+- [Contributing](CONTRIBUTING.md): How to contribute the project.
 
-- [Architecture](ARCHITECTURE.md): the map. Vocabulary, entry points, what
-  each crate owns and the rules that hold across them.
-- [Request flow](docs/request-flow.md): boot, one pick end to end, and
-  the loops that keep the fleet and the policy current.
-- [Local development](docs/local-development.md): the kind loop. Build,
-  install, a CPU worker, what to look at, how to iterate.
-- [Contributing](CONTRIBUTING.md): style, commits, running the tests.
+## CRDs
+
+Kinference primarily uses Kubernetes Custom Resource Definitions (CRDs) for
+configuration. The CRD schemas are in
+[charts/kinference-crds](charts/kinference-crds/templates). See [the Kinference
+CRD reference docs](https://kinference.ai/reference/crds/) for documentation.
 
 ## kinfctl
 
-`kinfctl check` finds mistakes in `InferencePolicy` manifests before you
-apply them. Binaries are attached to each release at
-[Kinference-AI/kinference-releases](https://github.com/Kinference-AI/kinference-releases/releases):
+This repo includes a `kinfctl` CLI tool. This CLI is designed to make it easy
+for you (or your agents) to validate policies before sending them to the server.
+See [the Kinference kinfctl reference](https://kinference.ai/reference/kinfctl/)
+for more.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Kinference-AI/kinference-releases/main/install.sh | sh
-```
+To build the CLI from source, run `just install-cli`.
 
-Or from source: `just install-cli`.
+## Known limitations
 
-## Scope
+Kinference is alpha software. It has not seen sustained production exposure. Run
+at your own risk.
 
-Supported: vLLM workers, and SGLang workers started with `--enable-metrics`
-and `--kv-events-config` and tokenized in-process, found through Kubernetes;
-KV-event ingest with optional replay; engine metrics scrape; in-process or
-`/render` tokenizing, the latter vLLM only; latency-model picking;
-off-cluster providers; policy-driven routing; leader election for the
-control plane.
+The current Kinference implementation lacks several features that are in the
+full scope of the project, including:
 
-Not yet: more than one replica sharing picker state. SGLang with DP
-attention, since only rank 0's KV events are read. SGLang is not in the
-end-to-end test.
+* Support for /v1/messages (Anthropic-style calls)
+* Rate limiting
+* Semantic classifiers
+* Support for multiple replicas
 
-## License
+These will be addressed shortly.
 
-Apache 2.0. See [LICENSE](LICENSE).
+## Copyright and license
+
+Kinference is copyright 2026 Buoyant, Inc.
+
+Kinference is licensed under the Apache License, Version 2.0 (the "License");
+you may not use these files except in compliance with the License. You may
+obtain a copy of the License at https://www.apache.org/licenses/LICENSE-2.0 .
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.

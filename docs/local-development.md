@@ -1,7 +1,7 @@
 # Local development
 
-How to run kinference on a kind cluster on your own machine, point it at
-a real vLLM worker, and watch kinference discover the worker, ingest the
+How to run Kinference on a kind cluster on your own machine, point it at
+a real vLLM worker, and watch Kinference discover the worker, ingest the
 KV-cache events that the worker publishes, and write status. CI runs the
 same loop, through the recipes in the [justfile](../justfile).
 
@@ -29,7 +29,7 @@ The recipe builds `kinference:latest`, creates the kind cluster
 makes `kind-kinference-smoke` the current kubectl context.
 
 The recipe installs the chart with `extension.enabled` off, so you need
-no gateway. Without a gateway, nothing sends requests through kinference;
+no gateway. Without a gateway, nothing sends requests through Kinference;
 the section "See it work" lists what you can see anyway, and the section
 "A full request path" says how to put a gateway in front.
 
@@ -53,7 +53,7 @@ The recipe applies the manifests in
 - `pool.yaml`: the `smoke` InferencePool, with that worker set as its one
   destination.
 
-The script then waits for the worker, port-forwards kinference and the
+The script then waits for the worker, port-forwards Kinference and the
 worker, checks that `/readyz` reports a ready endpoint, sends one long
 completion so that vLLM stores full blocks and publishes events, waits
 until `kinference_index_blocks` rises above zero, and checks that the
@@ -87,7 +87,7 @@ ready
 worker sets: 1, with ready endpoints: 1
 ```
 
-The log shows discovery and each worker that kinference adds. At
+The log shows discovery and each worker that Kinference adds. At
 `debug` it also shows the first scrape, and at `trace` every KV event:
 
 ```sh
@@ -107,11 +107,11 @@ curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
 curl -s localhost:9001/metrics | grep -E '^kinference_(workers|index_blocks|index_events_total)[ {]'
 ```
 
-kinference refreshes `kinference_index_blocks` from a throttled dump of
+Kinference refreshes `kinference_index_blocks` from a throttled dump of
 the radix tree, so allow about ten seconds.
 
-The controller's view is on the custom resources and on the read-only
-policy API:
+The custom resources and the read-only policy API show the controller's
+view:
 
 ```sh
 kubectl get inferenceworkersets,inferencepools
@@ -136,9 +136,9 @@ kind load docker-image kinference:latest --name kinference-smoke
 kubectl rollout restart deployment/kinference
 ```
 
-A config change goes through the chart. The config is the `config` block
+To change the config, upgrade the chart. The config is the `config` block
 of [charts/kinference/values.yaml](../charts/kinference/values.yaml),
-which the chart renders to JSON; a checksum annotation on the pod restarts
+which the chart renders to JSON. A checksum annotation on the pod restarts
 the pod when the rendered config changes:
 
 ```sh
@@ -148,17 +148,19 @@ helm upgrade kinference charts/kinference --reuse-values \
 
 The same command sets the chart's other knobs: `logLevel` sets `RUST_LOG`
 (`kinference=trace,dynamo_kv_router=trace` for KV-event debugging),
-`enableReplay` makes kinference fetch the event history on attach, and
+`enableReplay` makes Kinference fetch the event history on attach, and
 `observationsCsv` names the file that receives the rows of predicted
-versus observed latency. The CSV is off by default; enable it with a path:
+versus observed latency. The chart writes the CSV to
+`/var/log/kinference/latency.csv` by default; to turn it off, set an empty
+path:
 
 ```sh
 helm upgrade kinference charts/kinference --reuse-values \
-  --set observationsCsv=/var/log/kinference/latency.csv
+  --set observationsCsv=""
 ```
 
-The rows live on an emptyDir that goes away with the pod, so copy them out
-before a restart:
+Kinference writes the rows to an emptyDir that goes away with the pod, so
+copy them out before a restart:
 
 ```sh
 kubectl cp "$(kubectl get pod -l app.kubernetes.io/name=kinference -o name | cut -d/ -f2):/var/log/kinference/latency.csv" latency.csv
@@ -184,13 +186,13 @@ just lint
   yet, usually because the CRDs chart is not installed.
 - `kinference_index_blocks` stays 0: the prompt was shorter than a block;
   or `kvBlockSize` disagrees with the block size that the engine
-  publishes, which kinference logs as a block size mismatch and the
+  publishes, which Kinference logs as a block size mismatch and the
   engine logs as `Block not published. Block size must be N tokens`; or
   someone set `KINFERENCE_DISABLE_INGEST`.
 
 ## A full request path
 
-To send real requests, you put kinference behind the gateway as the
+To send real requests, put Kinference behind the gateway as the
 `Picker` extension. The gateway repo's
 `documents/kinference-manual-verification.md` walks through it: that
 repo's `just up` brings up a kind cluster with the gateway; you load this
