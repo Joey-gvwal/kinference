@@ -17,6 +17,7 @@
 //! Sequence-cursor semantics come from
 //! [`dynamo_kv_router::recovery::CursorState`]. The ZMQ socket helpers are
 //! reimplemented here because dynamo's are `pub(super)`.
+use std::error::Error as StdError;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
@@ -114,7 +115,7 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
                     tracing::warn!(
                         worker_id = ctx.cfg.worker_id_str,
                         endpoint = ?ctx.cfg.zmq_endpoint,
-                        error = &err as &dyn std::error::Error,
+                        error = &err as &dyn StdError,
                         "KV-event listener failed; reconnecting"
                     );
                 }
@@ -484,7 +485,7 @@ async fn replay_gap(
                 worker_id = worker_id_str,
                 start_seq,
                 end_seq,
-                error = &err as &dyn std::error::Error,
+                error = &err as &dyn StdError,
                 "replay request failed"
             );
         }
@@ -514,7 +515,7 @@ async fn replay_gap(
                         start_seq,
                         end_seq,
                         replayed = progress.replayed,
-                        error = &err as &dyn std::error::Error,
+                        error = &err as &dyn StdError,
                         "replay receive failed"
                     );
                 }
@@ -646,7 +647,7 @@ async fn apply_frame(
                 tracing::warn!(
                     worker_id = worker_id_str,
                     seq,
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "failed to decode a KV-event batch"
                 );
             }
@@ -1134,7 +1135,7 @@ fn apply_socket_robustness(socket: &zmq::Socket, worker_id: &str, kind: &str) {
         tracing::warn!(
             worker_id,
             socket = kind,
-            error = &err as &dyn std::error::Error,
+            error = &err as &dyn StdError,
             "failed to set the ZMQ reconnect interval"
         );
     }

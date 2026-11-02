@@ -8,6 +8,7 @@
 //! know about still reach vLLM; without one, a body is built from the
 //! [`TokenizeInput`].
 
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -161,7 +162,7 @@ impl HttpRender {
                             attempt = i + 1,
                             attempts,
                             render_ms = format_args!("{render_ms:.1}"),
-                            error = &e as &dyn std::error::Error,
+                            error = &e as &dyn StdError,
                             "render failed; trying the next worker"
                         );
                         last_err = Some(err_string);

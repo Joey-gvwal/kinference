@@ -22,6 +22,7 @@
 //! has been emitted as `Added`).
 
 use std::collections::{HashMap, HashSet};
+use std::error::Error as StdError;
 
 use std::sync::Arc;
 
@@ -68,7 +69,7 @@ pub fn factory(enabled: bool, required: bool) -> Result<Option<DiscoveryFactory>
             Ok(api) => Some(api),
             Err(err) => {
                 tracing::error!(
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "in-cluster credentials unavailable; worker sets cannot start discovery"
                 );
                 None
@@ -188,7 +189,7 @@ impl<A: ApiServer> KubeDiscovery<A> {
                             }
                             Err(err) => {
                                 if !std::mem::replace(&mut failing, true) {
-                                    tracing::warn!(error = &err as &dyn std::error::Error, "EndpointSlice watch failed; retrying");
+                                    tracing::warn!(error = &err as &dyn StdError, "EndpointSlice watch failed; retrying");
                                 }
                             }
                         }

@@ -1,6 +1,7 @@
 //! The compare backend: `/render` is returned; the local result is only
 //! compared against it, for the divergence counters.
 
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -108,11 +109,7 @@ impl Compare {
             Err(e) => {
                 self.prom.record_tokenize_compare("error");
                 if self.failed.first(model) {
-                    tracing::warn!(
-                        model,
-                        error = &e as &dyn std::error::Error,
-                        "local tokenize failed"
-                    );
+                    tracing::warn!(model, error = &e as &dyn StdError, "local tokenize failed");
                 }
             }
         }

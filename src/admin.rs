@@ -6,6 +6,7 @@
 //! `admin_listen` is configured, so set it in production to get the readiness
 //! probe.
 
+use std::error::Error as StdError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -135,10 +136,9 @@ pub struct AdminHandles {
 pub fn spawn(addr: SocketAddr, handles: AdminHandles, cancel: CancellationToken) {
     tokio::spawn(async move {
         if let Err(err) = serve(addr, handles, cancel).await {
-            tracing::error!(error = %err, "admin server exited with error");
+            tracing::error!(error = &err as &dyn StdError, "admin listener failed");
         }
     });
-    tracing::info!(listen = %addr, "Admin listener enabled");
 }
 
 pub async fn serve(
@@ -162,7 +162,7 @@ pub async fn serve(
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "Admin listener ready");
+    tracing::info!(listen = %addr, "admin listener ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;

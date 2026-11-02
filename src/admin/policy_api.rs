@@ -501,7 +501,10 @@ pub(super) async fn context(State(st): State<PolicyApiState>) -> Response {
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
-    tracing::debug!(policies = snap.policies().count(), "policy api: context");
+    tracing::debug!(
+        policies = snap.policies().count(),
+        "served the policy context"
+    );
 
     let policies: Vec<Value> = snap
         .policies()
@@ -1145,12 +1148,12 @@ async fn simulate_inner(st: PolicyApiState, req: SimRequest) -> Result<Value, Ap
     // INFO, as an audit trail. Context reads are DEBUG, since they are polled.
     tracing::info!(
         policy = %policy_key,
-        pool = pool_key.as_deref().unwrap_or("-"),
+        inference_pool = pool_key.as_deref().unwrap_or("-"),
         runs,
         candidates,
         verdict = body["verdict"].as_str().unwrap_or("?"),
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "policy api: simulate"
+        "policy simulated"
     );
     Ok(body)
 }

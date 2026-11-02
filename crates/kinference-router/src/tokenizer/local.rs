@@ -33,6 +33,7 @@
 //! are registered as globals.
 
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -191,7 +192,7 @@ impl LocalTokenizer {
                     if let Err(err) = this.warmup(&claim.model).await {
                         tracing::warn!(
                             model = %claim.model,
-                            error = &err as &dyn std::error::Error,
+                            error = &err as &dyn StdError,
                             "tokenizer warmup failed"
                         );
                     }
@@ -225,7 +226,7 @@ impl LocalTokenizer {
                 if self.failed.first(model) {
                     tracing::warn!(
                         model,
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "local tokenize failed; using /render"
                     );
                 }
@@ -340,7 +341,7 @@ impl LocalTokenizer {
                 let meta = read_chat_template_from_config(&dir).unwrap_or_else(|e| {
                     tracing::debug!(
                         model = model_name,
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "no chat template in the mount"
                     );
                     TokenizerConfigMeta {
@@ -386,7 +387,7 @@ impl LocalTokenizer {
                 .unwrap_or_else(|e| {
                     tracing::debug!(
                         model = model_name,
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "no chat template on the Hub"
                     );
                     TokenizerConfigMeta {

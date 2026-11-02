@@ -26,6 +26,7 @@
 //! This module returns `tonic::Status` directly; unlike `Pick`, these
 //! operations report failures as gRPC status codes (see `crate::grpc`).
 
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -360,7 +361,7 @@ impl BodyStore {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
                     tracing::error!(
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "getrandom failed while minting a body id"
                     );
                     // Wall-clock nanos: guessable, but this path is effectively

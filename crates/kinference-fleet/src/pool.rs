@@ -25,6 +25,7 @@
 //! [`PoolManager`] owns the pool lifecycle: create, update, retire, reap.
 
 use std::collections::{BTreeMap, HashMap};
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -582,7 +583,7 @@ impl PoolManager {
         if let Err(err) = self.hooks.on_create(&pool, &spec) {
             tracing::error!(
                 workerset = %spec.key,
-                error = &err as &dyn std::error::Error,
+                error = &err as &dyn StdError,
                 "failed to start the worker set's discovery"
             );
             if resurrected {

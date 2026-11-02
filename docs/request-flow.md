@@ -38,8 +38,8 @@ each module owns; this page says only when each module runs.
    end.
 10. Call `admin::spawn`, if the config sets an admin address. The admin
     listener serves `/readyz`, `/metrics` and the read-only policy API.
-11. Log READY and serve the `Picker` service until SIGTERM or SIGINT
-    arrives.
+11. Log that kinference is ready and serve the `Picker` service until
+    SIGTERM or SIGINT arrives.
 
 Shutdown runs in reverse. The signal stops the gRPC server from accepting
 requests. The server cancels the token that it gave every task. Then

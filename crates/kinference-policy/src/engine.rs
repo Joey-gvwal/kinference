@@ -21,6 +21,7 @@
 //! exclusions, then the ordered `select` tiers, then `tieBreak`.
 
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 use super::PoolId;
@@ -305,7 +306,10 @@ fn sample_weighted(groups: &[super::compile::CompiledConsiderGroup]) -> Option<u
         Err(e) => {
             // Deterministic fallback beats failing the request; log so a broken
             // CSPRNG doesn't silently pin all traffic to one group.
-            tracing::warn!(error = %e, "policy: getrandom failed; using the first consider group");
+            tracing::warn!(
+                error = &e as &dyn StdError,
+                "getrandom failed; using the first consider group"
+            );
             0
         }
     };

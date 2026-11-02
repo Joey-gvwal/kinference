@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -400,7 +401,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
             Err(err) => {
                 tracing::warn!(
                     worker_id = cfg.worker_id_str,
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "failed to build the warmup HTTP client"
                 );
                 return;
@@ -463,7 +464,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                 tracing::debug!(
                     worker_id = cfg.worker_id_str,
                     http_url,
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "/v1/models fetch failed"
                 );
             }
@@ -506,7 +507,7 @@ pub fn spawn_metrics_poller(
             Err(err) => {
                 tracing::error!(
                     worker_id = cfg.worker_id_str,
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "failed to build the metrics HTTP client"
                 );
                 return;
@@ -614,7 +615,7 @@ pub fn spawn_metrics_poller(
                             tracing::warn!(
                                 worker_id = cfg.worker_id_str,
                                 http_url,
-                                error = &err as &dyn std::error::Error,
+                                error = &err as &dyn StdError,
                                 "/v1/models fetch failed"
                             );
                             warned_about_models = true;
@@ -671,7 +672,7 @@ pub fn spawn_metrics_poller(
                     if !std::mem::replace(&mut warned_about_scrape, true) {
                         tracing::warn!(
                             worker_id = cfg.worker_id_str,
-                            error = &err as &dyn std::error::Error,
+                            error = &err as &dyn StdError,
                             "metrics scrape failed"
                         );
                     }

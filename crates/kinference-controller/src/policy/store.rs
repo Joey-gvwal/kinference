@@ -10,6 +10,7 @@
 //! attached to the published snapshot ([`PolicyIndex::services`](kinference_policy::resolve::PolicyIndex::services)) so pools and
 //! Service ports are read from one consistent instant.
 
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
@@ -251,7 +252,7 @@ fn step<T>(
             if !std::mem::replace(failing, true) {
                 tracing::warn!(
                     kind,
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "watch failed; retrying"
                 );
             }

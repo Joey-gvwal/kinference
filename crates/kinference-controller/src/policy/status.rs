@@ -13,6 +13,7 @@
 //! is async.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 
 use kinference_policy::PoolId;
@@ -1196,7 +1197,7 @@ impl<A: ApiServer> StatusWriter<A> {
                         kind,
                         ns,
                         name,
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "status patch failed"
                     );
                 }

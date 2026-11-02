@@ -1,5 +1,6 @@
 //! `start`: the one call the server makes to run the control plane.
 
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 use kinference_fleet::pool::{PoolManager, PoolRegistry};
@@ -58,10 +59,7 @@ impl Controller {
         };
         match tokio::time::timeout(VACATE_BUDGET, task).await {
             Ok(Ok(())) => tracing::debug!("leader elector stopped; lease released if held"),
-            Ok(Err(e)) => tracing::warn!(
-                error = &e as &dyn std::error::Error,
-                "leader elector task failed"
-            ),
+            Ok(Err(e)) => tracing::warn!(error = &e as &dyn StdError, "leader elector task failed"),
             Err(_) => tracing::warn!(
                 budget = ?VACATE_BUDGET,
                 "leader elector did not stop in time; a peer takes over when the lease expires"

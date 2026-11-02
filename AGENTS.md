@@ -124,8 +124,10 @@ should grow with events, not with traffic.
 - No caps for emphasis and no em dashes.
 - Use the same field names in every crate: `workerset`, `worker_id`,
   `req`, `model`, `error`.
-- Record an error as `error = &err as &dyn std::error::Error`. The
-  subscriber then prints the error's sources too.
+- Record an error as `error = &err as &dyn StdError`, with
+  `use std::error::Error as StdError;`. The subscriber then prints the
+  error's sources too. The alias avoids a clash with each crate's own
+  `Error` type.
 
 ## Commits and pull requests
 
