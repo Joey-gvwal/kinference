@@ -230,7 +230,7 @@ impl Scoring {
                         tracing::warn!(
                             workerset = %pool.name,
                             block_size,
-                            error = &e as &dyn std::error::Error,
+                            error = &e as &dyn StdError,
                             "prefix index query failed; picking on load alone"
                         );
                     }

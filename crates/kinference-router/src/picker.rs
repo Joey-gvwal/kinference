@@ -2,6 +2,7 @@
 //!
 //! Pure arithmetic, no I/O.
 
+use std::error::Error as StdError;
 use std::fmt::Write;
 use std::time::Instant;
 
@@ -483,7 +484,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
             }
             Err(err) => {
                 tracing::warn!(
-                    error = &err as &dyn std::error::Error,
+                    error = &err as &dyn StdError,
                     "getrandom failed; picking the first eligible worker"
                 );
                 eligible[0].0

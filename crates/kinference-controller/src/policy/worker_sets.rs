@@ -11,6 +11,7 @@
 //! violation into a [`Rejection`].
 
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::time::Duration;
 
 use futures::TryStreamExt;
@@ -353,7 +354,7 @@ impl WorkerSetWatcher {
                         }
                         Err(err) => {
                             if !std::mem::replace(&mut failing, true) {
-                                tracing::warn!(error = &err as &dyn std::error::Error, "InferenceWorkerSet watch failed; retrying");
+                                tracing::warn!(error = &err as &dyn StdError, "InferenceWorkerSet watch failed; retrying");
                             }
                             continue;
                         }

@@ -41,6 +41,7 @@
 //! corrected.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -306,7 +307,7 @@ impl<A: ApiServer> BindingWriter<A> {
                         // Never fatal; already-programmed routes keep working.
                         Err(e) => {
                             if !std::mem::replace(&mut failing, true) {
-                                tracing::warn!(error = &e as &dyn std::error::Error, "backend binding reconcile failed");
+                                tracing::warn!(error = &e as &dyn StdError, "backend binding reconcile failed");
                             }
                         }
                     }

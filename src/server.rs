@@ -2,6 +2,7 @@
 //! router, starts the control plane and the admin listener, serves gRPC
 //! until a signal, and shuts down.
 
+use std::error::Error as StdError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -157,7 +158,7 @@ async fn wait_for_shutdown_signal() {
             Err(e) => {
                 // Degrade to SIGINT-only rather than refusing to start.
                 tracing::warn!(
-                    error = &e as &dyn std::error::Error,
+                    error = &e as &dyn StdError,
                     "failed to install the SIGTERM handler; only SIGINT shuts down"
                 );
                 let _ = tokio::signal::ctrl_c().await;

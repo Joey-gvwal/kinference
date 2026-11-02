@@ -8,6 +8,7 @@
 //!
 //! [`ObservationSink`] is the CSV file those rows go to.
 
+use std::error::Error as StdError;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -551,7 +552,7 @@ impl ObservationSink {
                 {
                     tracing::warn!(
                         path = %path.display(),
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "failed to write the observation CSV header"
                     );
                 }
@@ -565,7 +566,7 @@ impl ObservationSink {
             Err(e) => {
                 tracing::warn!(
                     path = %path.display(),
-                    error = &e as &dyn std::error::Error,
+                    error = &e as &dyn StdError,
                     "failed to open the observation sink"
                 );
                 Self::with(None)
@@ -600,10 +601,7 @@ impl ObservationSink {
             }
             Err(e) => {
                 if !self.failing.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        error = &e as &dyn std::error::Error,
-                        "observation sink write failed"
-                    );
+                    tracing::warn!(error = &e as &dyn StdError, "observation sink write failed");
                 }
             }
         }

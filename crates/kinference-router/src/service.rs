@@ -7,6 +7,7 @@
 //! `lifecycle`; tokenizing is [`crate::tokenizer`].
 
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -445,7 +446,7 @@ impl KinferenceService {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
                     tracing::error!(
-                        error = &e as &dyn std::error::Error,
+                        error = &e as &dyn StdError,
                         "getrandom failed while minting a response_id"
                     );
                     std::time::SystemTime::now()

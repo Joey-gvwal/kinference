@@ -11,6 +11,7 @@
 //! replicas racing for the same claim cannot both win: the loser
 //! gets a conflict, re-reads, and backs off.
 
+use std::error::Error as StdError;
 use std::time::Duration;
 
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
@@ -153,7 +154,7 @@ pub async fn run<A: ApiServer>(
                 Err(e) => {
                     if !std::mem::replace(&mut failing, true) {
                         tracing::warn!(
-                            error = &e as &dyn std::error::Error,
+                            error = &e as &dyn StdError,
                             "failed to read or create the lease; retrying"
                         );
                     }
@@ -178,7 +179,7 @@ pub async fn run<A: ApiServer>(
                     Err(e) => {
                         if !is_conflict(&e) && !std::mem::replace(&mut failing, true) {
                             tracing::warn!(
-                                error = &e as &dyn std::error::Error,
+                                error = &e as &dyn StdError,
                                 "lease claim failed; retrying"
                             );
                         }
@@ -216,7 +217,7 @@ pub async fn run<A: ApiServer>(
         && let Err(e) = vacate(&api, namespace, lease, &params.name).await
     {
         tracing::warn!(
-            error = &e as &dyn std::error::Error,
+            error = &e as &dyn StdError,
             "failed to vacate lease on shutdown"
         );
     }
