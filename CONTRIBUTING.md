@@ -42,6 +42,15 @@ your commits land on `main` as you wrote them.
   `git rebase -i --autosquash` before merging. The final branch shouldn't
   contain "address review" or "fix typo" commits.
 
+## Sign your commits
+
+Every commit needs a `Signed-off-by` trailer with your name and email.
+The trailer states that you wrote the change or have the right to submit
+it under the project's license, as the
+[Developer Certificate of Origin](https://developercertificate.org)
+describes. `git commit -s` adds the trailer. A check on each pull request
+rejects commits without one.
+
 ## Pull requests
 
 The PR title and description become the merge commit message, so write them
@@ -53,6 +62,14 @@ for someone reading `git log`, not just for reviewers:
 - Leave out checklists and review chatter.
 
 To see one entry per merged PR, use `git log --first-parent main`.
+
+### End-to-end tests
+
+The end-to-end suite runs in a separate repository and reports as the
+`e2e` check on the pull request. A pull request from a branch in this
+repository starts the suite on every push. A pull request from a fork
+starts the suite when a maintainer comments `/e2e` on it. Each new push
+to a fork needs a new `/e2e` comment.
 
 ## Policy on Generative AI & LLM-Assisted Contributions ##
 
