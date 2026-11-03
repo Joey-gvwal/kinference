@@ -276,10 +276,17 @@ impl<A: ApiServer> BindingWriter<A> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         // Whether the current run of failed reconciles has been logged.
         let mut failing = false;
+        // Cleared once the elector is gone. A closed channel's `changed()`
+        // returns at once on every poll, so polling it after that would spin.
+        let mut leader_open = true;
         loop {
             tokio::select! {
+                // The elector closes the leader channel only after cancel
+                // fires, so checking cancel first keeps a clean shutdown
+                // from reading as a lost elector.
+                biased;
                 _ = cancel.cancelled() => return,
-                r = self.leader.changed() => {
+                r = self.leader.changed(), if leader_open => {
                     match r {
                         Ok(()) => {
                             if *self.leader.borrow_and_update() {
@@ -293,9 +300,12 @@ impl<A: ApiServer> BindingWriter<A> {
                             }
                         }
                         // Elector gone; hold the last known state.
-                        Err(_) => tracing::error!(
-                            "leader channel closed; keeping the last leadership state"
-                        ),
+                        Err(_) => {
+                            leader_open = false;
+                            tracing::error!(
+                                "leader channel closed; keeping the last leadership state"
+                            );
+                        }
                     }
                 }
                 _ = interval.tick() => {

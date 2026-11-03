@@ -680,3 +680,46 @@ async fn a_missing_binding_crd_publishes_nothing() {
     writer_over(&api).reconcile_once().await.unwrap();
     assert!(api.writes().is_empty());
 }
+
+/// Counts ERROR events emitted on this thread.
+struct CountErrors(Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountErrors {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::ERROR {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// A clean shutdown does not log the leader channel as lost.
+#[tokio::test]
+async fn shutdown_logs_no_error() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(CountErrors(errors.clone())),
+    );
+    // The race this guards against is random, so repeat it.
+    for _ in 0..32 {
+        let (tx, rx) = watch::channel(false);
+        let w = BindingWriter::new(
+            Recorded::default(),
+            Some("infra".into()),
+            PolicyStore::new(),
+            ext(),
+            rx,
+        );
+        let cancel = CancellationToken::new();
+        // The elector's order on shutdown: cancel fires, then a last send and drop.
+        cancel.cancel();
+        tx.send(false).expect("the writer holds the receiver");
+        drop(tx);
+        // Awaited on this thread so the thread-local subscriber sees its events.
+        tokio::time::timeout(std::time::Duration::from_secs(5), w.run(cancel))
+            .await
+            .expect("the writer exits on cancel");
+    }
+    assert_eq!(errors.load(std::sync::atomic::Ordering::Relaxed), 0);
+}

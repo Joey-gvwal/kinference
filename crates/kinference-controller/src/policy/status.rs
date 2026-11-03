@@ -913,12 +913,19 @@ impl<A: ApiServer> StatusWriter<A> {
 
     pub async fn run(mut self, cancel: CancellationToken) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        // Cleared once the elector is gone. A closed channel's `changed()`
+        // returns at once on every poll, so polling it after that would spin.
+        let mut leader_open = true;
         loop {
             tokio::select! {
+                // The elector closes the leader channel only after cancel
+                // fires, so checking cancel first keeps a clean shutdown
+                // from reading as a lost elector.
+                biased;
                 _ = cancel.cancelled() => return,
                 // Awaited rather than polled, so the cache is reset on every
                 // promotion.
-                r = self.leader.changed() => {
+                r = self.leader.changed(), if leader_open => {
                     match r {
                         Ok(()) => {
                             let now_leader = *self.leader.borrow_and_update();
@@ -932,6 +939,7 @@ impl<A: ApiServer> StatusWriter<A> {
                         // Elector gone. Hold the current state: promoting could
                         // create a second writer, and demoting could leave none.
                         Err(_) => {
+                            leader_open = false;
                             tracing::error!(
                                 "leader channel closed; keeping the last leadership state"
                             );
