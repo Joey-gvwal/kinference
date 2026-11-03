@@ -1,0 +1,123 @@
+name: e2e
+
+# Hands a pull request's head commit to the e2e suite, which lives in the
+# repository that the `E2E_REPO` variable names, and shows its verdict as
+# the `e2e` check run on that commit. The ruleset requires the check, so a
+# dispatch that fails blocks the merge on its own.
+#
+# A pull request from a branch in this repository is dispatched on every
+# push. A pull request from a fork gets no secrets on `pull_request`, so
+# it is dispatched when a maintainer comments `/e2e` on it. Both paths
+# check nothing out and call the API as the App that owns the check run.
+on:
+  pull_request:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request != null
+        && startsWith(github.event.comment.body, '/e2e'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # The comment path reads the pull request and reacts to the comment.
+    permissions:
+      pull-requests: read
+      issues: write
+    env:
+      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # Only write access may send a fork's code to the suite.
+      # `author_association` is not enough: MEMBER includes read-only
+      # members of the organization.
+      - name: Check the commenter's permission
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOGIN: ${{ github.event.comment.user.login }}
+        run: |
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$LOGIN/permission" --jq .permission)
+          case $perm in
+            admin|maintain|write) ;;
+            *) echo "::error::$LOGIN has $perm access; /e2e needs write"; exit 1 ;;
+          esac
+      - name: Resolve the head commit
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
+            sha=$EVENT_SHA
+            branch=$EVENT_BRANCH
+          else
+            read -r sha branch < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '"\(.head.sha) \(.head.ref)"')
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Acknowledge the comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=rocket > /dev/null
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        id: checks-token
+        with:
+          client-id: ${{ secrets.E2E_APP_CLIENT_ID }}
+          private-key: ${{ secrets.E2E_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+      # Queued until the suite adopts it, so the PR shows the check at once.
+      - name: Create the check run
+        id: check
+        env:
+          GH_TOKEN: ${{ steps.checks-token.outputs.token }}
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/check-runs" \
+            -f name=e2e -f head_sha="$SHA" -f status=queued \
+            -f details_url="$RUN_URL" --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        id: dispatch-token
+        with:
+          client-id: ${{ secrets.E2E_APP_CLIENT_ID }}
+          private-key: ${{ secrets.E2E_APP_PRIVATE_KEY }}
+          repositories: ${{ vars.E2E_REPO }}
+          permission-contents: write
+      - name: Dispatch the suite
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          E2E_REPO: ${{ vars.E2E_REPO }}
+          CHECK_RUN_ID: ${{ steps.check.outputs.id }}
+          SHA: ${{ steps.head.outputs.sha }}
+          BRANCH: ${{ steps.head.outputs.branch }}
+        run: |
+          jq -n --arg sha "$SHA" --arg pr "$PR" --arg id "$CHECK_RUN_ID" --arg branch "$BRANCH" \
+            '{event_type: "e2e", client_payload: {sha: $sha, pr: $pr, check_run_id: $id, branch: $branch}}' \
+            | gh api "repos/$GITHUB_REPOSITORY_OWNER/$E2E_REPO/dispatches" --input -
+      # A check run that stays queued would block the merge with no reason.
+      - name: Fail the check run
+        if: always() && steps.check.outputs.id != '' && steps.dispatch.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ steps.checks-token.outputs.token }}
+          CHECK_RUN_ID: ${{ steps.check.outputs.id }}
+          CONCLUSION: ${{ job.status == 'cancelled' && 'cancelled' || 'failure' }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
+            -f status=completed -f conclusion="$CONCLUSION" \
+            -f 'output[title]=the dispatch failed' \
+            -f "output[summary]=[Run]($RUN_URL) did not dispatch the suite."
