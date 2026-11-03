@@ -151,8 +151,8 @@ body that it sent.
 The caller reports the observed time to first token.
 `grpc::report_first_token` calls `Observations::finalize`, which takes the
 pending observation back, releases the in-flight count that the
-observation held, and writes a row of predicted versus observed latency to
-the CSV sink. A provider pick has no pending observation, so for a
+observation held, and logs an event of predicted versus observed latency
+under the `kinference::observation` target. A provider pick has no pending observation, so for a
 provider the report feeds provider health instead. An upstream status of
 zero in the report means that no response reached the caller. The service
 then treats the request as never dispatched, and releases it through
@@ -168,7 +168,8 @@ provider, as feedback on that provider.
 ### Abort
 
 If the request will never dispatch, `abort_request` releases the body, the
-pending observation and its in-flight state, and writes no CSV row. The
+pending observation and its in-flight state, and logs no observation
+event. The
 service counts the reason and, for a provider, folds it into provider
 health.
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::picker::WorkerScore;
 use crate::picker::predicted_wait_ms;
+use std::sync::{Arc, Mutex};
 
 fn synthetic_record() -> PendingObservation {
     let worker = WorkerScore {
@@ -47,147 +48,102 @@ fn synthetic_record() -> PendingObservation {
     }
 }
 
-#[test]
-fn csv_header_matches_format_csv_row_arity() {
-    // The header and row column counts must match.
-    let header_cols: Vec<&str> = CSV_HEADER.split(',').collect();
-    let row = format_csv_row(&synthetic_record(), 0, 0.0, 200);
-    let row_cols: Vec<&str> = row.split(',').collect();
-    assert_eq!(
-        header_cols.len(),
-        row_cols.len(),
-        "header has {} columns, row has {} — keep CSV_HEADER and \
-         format_csv_row in lockstep",
-        header_cols.len(),
-        row_cols.len(),
+/// Collects the JSON log lines that a subscriber writes.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Finalize `record` under a JSON subscriber that enables only the
+/// observation target, and return the parsed events.
+fn finalize_capturing(record: PendingObservation) -> Vec<serde_json::Value> {
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let (_registry, prom) = crate::tokenizer::test_support::router_metrics();
+    let obs = Observations::new(
+        Duration::from_secs(30),
+        Arc::new(kinference_policy::provider_health::ProviderHealthStore::new()),
+        prom,
     );
-    // No trailing newline; the sink appends one.
-    assert!(
-        !CSV_HEADER.contains('\n'),
-        "CSV_HEADER should not contain newlines"
-    );
+    let id = record.request_id;
+    obs.pending.insert(record);
+    tracing::subscriber::with_default(subscriber, || {
+        assert!(obs.finalize(id, 523, 200));
+    });
+    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    out.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("one JSON object per line"))
+        .filter(|e| e["target"] == OBSERVATION_TARGET)
+        .collect()
 }
 
 #[test]
-fn csv_row_has_52_columns() {
-    let r = synthetic_record();
-    let line = format_csv_row(&r, 523, 111.0, 200);
-    let cols: Vec<&str> = line.split(',').collect();
+fn finalize_emits_one_observation_event_with_named_fields() {
+    let events = finalize_capturing(synthetic_record());
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["level"], "DEBUG");
+    assert_eq!(e["response_id"], 42);
+    assert_eq!(e["req"], "trace-abc-123");
+    assert_eq!(e["workerset"], "set-a");
+    assert_eq!(e["profile"], "h100-tp2");
+    assert_eq!(e["endpoint"], "10.0.0.1:8000");
+    assert_eq!(e["upstream_status"], 200);
+    assert_eq!(e["observed_ms"], 523);
+    let predicted = e["predicted_ms"].as_f64().unwrap();
+    let residual = e["residual_ms"].as_f64().unwrap();
+    assert!((523.0 - predicted - residual).abs() < 1e-3, "{e}");
+    assert_eq!(e["q_inflight"], 3);
+    assert_eq!(e["q_ms_constant"], 1000.0);
+    assert_eq!(e["inflight_dispatches"], 2);
+    let overlap: Vec<u32> =
+        serde_json::from_str(e["inflight_overlap_blocks"].as_str().unwrap()).unwrap();
+    assert_eq!(overlap, [5, 3]);
+    assert_eq!(e["replication_fired"], false);
     assert_eq!(
-        cols.len(),
-        52,
-        "expected 52 columns; got {}: {line}",
-        cols.len()
+        e["queue_ms_per_entry"].as_f64().unwrap() as f32,
+        PredictorConfig::default().queue_ms_per_entry
     );
-    assert_eq!(
-        cols[24], "1000.0",
-        "q_ms_constant should be in column 24: {line}"
-    );
-    assert_eq!(
-        cols[25], "250.0",
-        "q_ms_workload should be in column 25: {line}"
-    );
-    assert_eq!(
-        cols[26], "5;3",
-        "inflight_overlap_blocks should be in column 26: {line}"
-    );
-    assert_eq!(
-        cols[27], "1.000",
-        "expected_overlap_alpha should be in column 27: {line}"
-    );
-    // Cols 28-33: PredictorConfig snapshot (queue + cache + attention).
-    let pred_default = PredictorConfig::default();
-    assert_eq!(
-        cols[28].parse::<f32>().unwrap(),
-        pred_default.queue_ms_per_entry,
-    );
-    // Cols 34-37: PickerConfig snapshot (top-K + tie + inflight).
-    let pkr_default = PickerConfig::default();
-    assert_eq!(cols[34].parse::<u32>().unwrap(), pkr_default.top_k_min);
-    assert_eq!(cols[36], "true", "inflight_tracking renders as true/false");
-    // Col 38: x_request_id.
-    assert_eq!(cols[38], "trace-abc-123");
-    // Col 39: q_running_ms.
-    let q_running_ms: f32 = cols[39].parse().expect("q_running_ms parses as f32");
-    assert!(q_running_ms >= 0.0);
-    // Col 40: decode_contention_ms.
-    let decode_contention_ms: f32 = cols[40]
-        .parse()
-        .expect("decode_contention_ms parses as f32");
-    assert!(decode_contention_ms >= 0.0);
-    // Cols 41-45: q_running U-shape + capacity + decode coef snapshot.
-    assert_eq!(
-        cols[41].parse::<f32>().unwrap(),
-        pred_default.q_running_penalty_peak_ms,
-    );
-    assert_eq!(
-        cols[42].parse::<u32>().unwrap(),
-        pred_default.q_running_penalty_peak_qr,
-    );
-    assert_eq!(
-        cols[44].parse::<u32>().unwrap(),
-        pred_default.inflight_concurrent_capacity,
-    );
-    assert_eq!(
-        cols[45].parse::<f32>().unwrap(),
-        pred_default.forward_pass_ms,
-    );
-    // Cols 46-48: replication snapshot.
-    assert_eq!(
-        cols[46].parse::<f32>().unwrap(),
-        pkr_default.replication_threshold_pct,
-    );
-    assert_eq!(
-        cols[47].parse::<u32>().unwrap(),
-        pkr_default.replication_warm_target,
-    );
-    // Col 49: replication_fired (true/false on the synthetic record).
-    assert_eq!(cols[49], "false", "replication_fired renders as true/false");
-    assert!(!line.contains('\n'));
+    assert_eq!(e["top_k_min"], PickerConfig::default().top_k_min);
 }
 
 #[test]
-fn csv_row_renders_replication_fired_as_true_when_set() {
-    let mut r = synthetic_record();
-    r.replication_fired = true;
-    let line = format_csv_row(&r, 100, 0.0, 200);
-    let cols: Vec<&str> = line.split(',').collect();
-    assert_eq!(cols.len(), 52);
-    assert_eq!(cols[49], "true");
-}
-
-#[test]
-fn csv_row_emits_empty_x_request_id_when_header_unset() {
-    let mut r = synthetic_record();
-    r.external_request_id = None;
-    let line = format_csv_row(&r, 100, 0.0, 200);
-    let cols: Vec<&str> = line.split(',').collect();
-    assert_eq!(cols.len(), 52);
-    assert_eq!(cols[38], "");
-}
-
-#[test]
-fn csv_row_sanitizes_commas_in_strings() {
-    let mut r = synthetic_record();
-    r.chosen_worker.name = "weird,name".to_string();
-    r.chosen_worker.endpoint = "host,port".to_string();
-    r.external_request_id = Some("x,y,z".to_string());
-    let line = format_csv_row(&r, 500, 0.0, 200);
-    let cols: Vec<&str> = line.split(',').collect();
-    assert_eq!(cols.len(), 52);
-    assert!(line.contains("weird;name"));
-    assert!(line.contains("host;port"));
-    assert_eq!(cols[38], "x;y;z");
-}
-
-#[test]
-fn csv_row_emits_empty_inflight_overlap_list_when_no_dispatches() {
+fn finalize_logs_an_empty_overlap_list_when_nothing_is_in_flight() {
     let mut r = synthetic_record();
     r.inflight_overlap_blocks = vec![];
-    let line = format_csv_row(&r, 100, 0.0, 200);
-    let cols: Vec<&str> = line.split(',').collect();
-    assert_eq!(cols.len(), 52);
-    assert_eq!(cols[26], "");
+    let events = finalize_capturing(r);
+    assert_eq!(events[0]["inflight_dispatches"], 0);
+    assert_eq!(events[0]["inflight_overlap_blocks"], "[]");
+}
+
+#[test]
+fn finalize_omits_req_when_the_caller_sent_none() {
+    let mut r = synthetic_record();
+    r.external_request_id = None;
+    let events = finalize_capturing(r);
+    assert_eq!(events.len(), 1);
+    assert!(events[0].get("req").is_none(), "{}", events[0]);
+}
+
+#[test]
+fn finalize_emits_no_observation_event_for_a_non_streaming_request() {
+    let mut r = synthetic_record();
+    r.streaming = false;
+    assert!(finalize_capturing(r).is_empty());
 }
 
 #[test]
@@ -287,43 +243,4 @@ fn request_labels_round_trip_the_metric_labels() {
     assert_eq!(got.qos, Qos::Deferrable, "off-cluster picks keep their qos");
     assert_eq!(got.tenant, "globex");
     assert!(!got.streaming);
-}
-
-#[test]
-fn observation_sink_disabled_without_a_path() {
-    let sink = ObservationSink::open(None);
-    sink.append_line("anything");
-}
-
-#[test]
-fn observation_sink_writes_header_on_fresh_file() {
-    // Distinct path per test so parallel runs don't trample.
-    let tmp = std::env::temp_dir().join(format!("kinference-csv-fresh-{}.log", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    let sink = ObservationSink::open(Some(tmp.clone()));
-    sink.append_line("row-one");
-    sink.append_line("row-two");
-    let contents = std::fs::read_to_string(&tmp).expect("sink file written");
-    let expected = format!("{CSV_HEADER}\nrow-one\nrow-two\n");
-    assert_eq!(contents, expected, "got: {contents:?}");
-    let _ = std::fs::remove_file(&tmp);
-}
-
-#[test]
-fn observation_sink_appends_silently_to_existing_file() {
-    // Distinct path per test so parallel runs don't trample.
-    let tmp = std::env::temp_dir().join(format!(
-        "kinference-csv-existing-{}.log",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&tmp);
-    // Pre-seed the file. The sink must not prepend a header.
-    std::fs::write(&tmp, "pre-existing-row\n").expect("seed");
-
-    let sink = ObservationSink::open(Some(tmp.clone()));
-    sink.append_line("new-row");
-
-    let contents = std::fs::read_to_string(&tmp).expect("sink file readable");
-    assert_eq!(contents, "pre-existing-row\nnew-row\n", "got: {contents:?}");
-    let _ = std::fs::remove_file(&tmp);
 }

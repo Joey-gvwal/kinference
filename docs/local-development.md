@@ -148,29 +148,55 @@ helm upgrade kinference charts/kinference --reuse-values \
 
 The same command sets the chart's other knobs: `logLevel` sets `RUST_LOG`
 (`kinference=trace,dynamo_kv_router=trace` for KV-event debugging),
-`enableReplay` makes Kinference fetch the event history on attach, and
-`observationsCsv` names the file that receives the rows of predicted
-versus observed latency. The chart writes the CSV to
-`/var/log/kinference/latency.csv` by default; to turn it off, set an empty
-path:
-
-```sh
-helm upgrade kinference charts/kinference --reuse-values \
-  --set observationsCsv=""
-```
-
-Kinference writes the rows to an emptyDir that goes away with the pod, so
-copy them out before a restart:
-
-```sh
-kubectl cp "$(kubectl get pod -l app.kubernetes.io/name=kinference -o name | cut -d/ -f2):/var/log/kinference/latency.csv" latency.csv
-```
+`logFormat` sets `KINFERENCE_LOG_FORMAT` to `text` or `json`, and
+`enableReplay` makes Kinference fetch the event history on attach.
 
 The unit tests and the lints run on the host, outside the cluster:
 
 ```sh
 just test-unit
 just lint
+```
+
+## Read the observations
+
+For each streaming request, Kinference logs one event with the predicted
+and observed time to first token. The event goes to the
+`kinference::observation` target at debug level, so it is off by default.
+Each event names its worker set and profile, and it includes the profile's
+predictor and picker settings. These events are the input for refitting a
+profile's predictor coefficients. Turn them on with JSON logs, because the
+text format does not quote its fields reliably. Helm splits `--set` values
+on commas, so the commas inside `logLevel` need a backslash:
+
+```sh
+helm upgrade kinference charts/kinference --reuse-values \
+  --set logFormat=json \
+  --set logLevel='kinference=info\,kinference::observation=debug\,dynamo_kv_router::indexer::radix_tree=error\,dynamo_kv_router=warn'
+```
+
+The events go wherever the cluster's log pipeline sends the pod's output.
+A pipeline may sample, rate-limit or drop lines, so the events are a
+sample of the traffic rather than a complete record. To read the events
+from the current pod and write them to a file:
+
+```sh
+kubectl logs deploy/kinference \
+  | jq -cR 'fromjson? | select(.target == "kinference::observation")' \
+  > observations.jsonl
+```
+
+`observations::log_observation` in the router lists every field. Every
+field is a number, a boolean or a string. `inflight_overlap_blocks` is a
+list with one entry for each request in flight on the chosen worker. Each
+entry counts the blocks that the new request shares with that in-flight
+request. A log field can't hold a list. The event therefore records
+the list as a JSON array inside a string, such as `"[5,3]"`, and
+`inflight_dispatches` records the length of the list as a number. To
+read the list as an array:
+
+```sh
+jq -c '.inflight_overlap_blocks | fromjson' observations.jsonl
 ```
 
 ## When it does not

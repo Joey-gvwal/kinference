@@ -42,8 +42,8 @@ any move. To follow one request step by step, read
   and dispatched prefixes that are not yet in the index. Both credit a
   worker before the engine reports.
 - Observation: what a pick leaves behind until the caller reports.
-  Finishing an observation releases the in-flight state and writes a CSV
-  row of predicted versus observed latency.
+  Finishing an observation releases the in-flight state and logs an event
+  of predicted versus observed latency.
 - `InferencePool`: the resource that names the destinations that a route
   may reach, and the policy that chooses among them. Not a pool.
 - Provider: a destination outside the cluster, which an
@@ -196,9 +196,11 @@ writers; routing never waits on it.
 ### Observability
 
 Kinference writes structured logs through `tracing`, and `RUST_LOG`
-filters them. Metrics work as described above. The observations CSV holds
-one row per pick, with the predicted and the observed times; operators use
-it to refit the predictor.
+filters them. `KINFERENCE_LOG_FORMAT=json` switches the logs from text to
+JSON. Metrics work as described above. For each streaming pick, the
+router logs a debug event under the `kinference::observation` target, with
+the predicted and the observed times. Operators use these events to refit
+the predictor.
 
 ### Testing
 

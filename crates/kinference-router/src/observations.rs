@@ -2,18 +2,12 @@
 //!
 //! `Pick()` stashes a `PendingObservation` keyed by the server-minted
 //! `request_id`. When the caller reports the observed TTFT via
-//! `ReportFirstToken()`, `Observations::finalize` takes it back, writes the
-//! CSV row and releases the pick's inflight state; `abort` releases without
-//! a row, and `sweep_expired` is the backstop for callers that never report.
-//!
-//! [`ObservationSink`] is the CSV file those rows go to.
+//! `ReportFirstToken()`, `Observations::finalize` takes it back, logs the
+//! predicted-versus-observed event and releases the pick's inflight state;
+//! `abort` releases without an event, and `sweep_expired` is the backstop
+//! for callers that never report.
 
-use std::error::Error as StdError;
-use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -96,7 +90,7 @@ impl std::fmt::Debug for InflightHandles {
     }
 }
 
-/// Everything needed to build a per-request observation row when the
+/// Everything needed to log a per-request observation event when the
 /// corresponding `ReportFirstToken()` arrives.
 ///
 /// Built by `KinferenceService::pick_and_record` at the end of the pick
@@ -106,8 +100,8 @@ pub struct PendingObservation {
     /// Server-minted identifier for this pick (the `response_id` on the
     /// wire), also the `InflightPrefixes` key.
     pub request_id: u64,
-    /// The worker set this pick was routed to. A label for the CSV row and
-    /// logs only; the release path uses `inflight`.
+    /// The worker set this pick was routed to. A label for the logs only;
+    /// the release path uses `inflight`.
     pub workerset: String,
     /// The profile whose coefficients produced this row's prediction.
     pub profile: String,
@@ -117,11 +111,9 @@ pub struct PendingObservation {
     pub picked_at: Instant,
     /// The worker selected by the picker. Carries the layered
     /// expected-overlap value (`matched_blocks` after layering), block
-    /// size, and live load metrics that landed on the CSV row.
+    /// size, and live load metrics that the observation event logs.
     pub chosen_worker: WorkerScore,
-    /// Per-term breakdown of the predicted wait at pick time. Pinned
-    /// here so the CSV column contract stays stable even if
-    /// `predicted_wait_ms` changes later.
+    /// Per-term breakdown of the predicted wait at pick time.
     pub prediction: WaitPrediction,
     /// Shadow `inflight_picks` count for the chosen worker at pick
     /// time, BEFORE the post-pick `inc()`. Zero when inflight
@@ -144,8 +136,8 @@ pub struct PendingObservation {
     pub inflight_overlap_blocks: Vec<u32>,
     /// Snapshot of `expected_overlap_alpha` at pick time.
     pub expected_overlap_alpha: f32,
-    /// Snapshot of the latency-model coefficients at pick time, so each CSV
-    /// row carries the predictor state that produced it.
+    /// Snapshot of the latency-model coefficients at pick time, so each
+    /// observation event logs the predictor state that produced it.
     pub predictor_cfg: PredictorConfig,
     /// Snapshot of the picker knobs at pick time, likewise.
     pub picker_cfg: PickerConfig,
@@ -162,7 +154,8 @@ pub struct PendingObservation {
     pub model: String,
     /// Whether the request asked for a streaming response (`stream: true`).
     /// For non-streaming requests the reported "TTFT" is total latency, so
-    /// `Observations::finalize` skips the CSV row (but still releases state).
+    /// `Observations::finalize` logs no observation event, but still
+    /// releases state.
     pub streaming: bool,
     /// QoS class from the Pick request. The `qos` label on the TTFT
     /// histogram, recorded from this record at `ReportFirstToken`.
@@ -315,314 +308,20 @@ impl RequestLabels {
     }
 }
 
-/// Header row for `format_csv_row`'s columns, with no trailing newline (the
-/// sink appends it). `ObservationSink` writes it once, to a new or empty file.
-///
-/// Must stay in lockstep with `format_csv_row`; the
-/// `csv_header_matches_format_csv_row_arity` test pins that.
-pub const CSV_HEADER: &str = "unix_ms,name,endpoint,status,upstream_error,\
-predicted_ms,base_ms,q_ms,q_rate_ms_per_entry,prefill_ms,cache_ms,\
-observed_ms,residual_ms,\
-overlap_blocks,total_blocks,\
-q_waiting,q_inflight,q_running,q_swapped,\
-kv_cache_usage,compl_per_s,\
-kv_blocks,q_workload,request_id,\
-q_ms_constant,q_ms_workload,inflight_overlap_blocks,expected_overlap_alpha,\
-queue_ms_per_entry,cache_pressure_penalty_ms,saturated_cold_ms_per_entry,cache_pressure_saturated_threshold,\
-attention_uncached_block_ms,attention_uncached_per_every_block_ms,\
-top_k_min,top_k_fraction,inflight_tracking,tie_tolerance_ms,\
-x_request_id,q_running_ms,decode_contention_ms,\
-q_running_penalty_peak_ms,q_running_penalty_peak_qr,q_running_penalty_falloff_qr,\
-inflight_concurrent_capacity,forward_pass_ms,\
-replication_threshold_pct,replication_warm_target,replication_warm_threshold_fraction,\
-replication_fired,\
-workerset,profile";
-
-/// Format one CSV row, 52 columns, without the header (see [`CSV_HEADER`]).
-///
-/// The format is append-only: every column keeps its position, and new ones
-/// go on the end, so a CSV accumulated across kinference versions stays
-/// parseable by column index.
-///
-/// Column order:
-///   0:  unix_ms
-///   1:  name
-///   2:  endpoint
-///   3:  status
-///   4:  upstream_error              always empty
-///   5:  predicted_ms
-///   6:  base_ms
-///   7:  q_ms                        queue cost
-///   8:  q_rate_ms_per_entry         effective rate after cold-saturation check
-///   9:  prefill_ms
-///   10: cache_ms
-///   11: observed_ms
-///   12: residual_ms
-///   13: overlap_blocks              layered expected-overlap (picker scored on)
-///   14: total_blocks
-///   15: q_waiting                   engine's scraped queue depth
-///   16: q_inflight                  shadow count at pick time
-///   17: q_running                   engine's scraped running batch size
-///   18: q_swapped                   engine's scraped swapped-out count
-///   19: kv_cache_usage
-///   20: compl_per_s                 completion_rate_per_sec
-///   21: kv_blocks                   raw radix-tree match (diagnostic)
-///   22: q_workload                  sum of uncached blocks across inflight dispatches
-///   23: request_id                  server-minted id; joins rows to log lines
-///   24: q_ms_constant
-///   25: q_ms_workload
-///   26: inflight_overlap_blocks     semicolon-delimited list, oldest first
-///   27: expected_overlap_alpha
-/// ── PredictorConfig snapshot (cols 28-33) ──
-///   28: queue_ms_per_entry
-///   29: cache_pressure_penalty_ms
-///   30: saturated_cold_ms_per_entry
-///   31: cache_pressure_saturated_threshold
-///   32: attention_uncached_block_ms
-///   33: attention_uncached_per_every_block_ms
-/// ── PickerConfig snapshot (cols 34-37) ──
-///   34: top_k_min
-///   35: top_k_fraction
-///   36: inflight_tracking           (true/false)
-///   37: tie_tolerance_ms
-/// ── Per-request annotations (cols 38-40) ──
-///   38: x_request_id                caller-supplied; empty when unset
-///   39: q_running_ms                U-shape penalty applied at this pick
-///   40: decode_contention_ms        flat per-active-decode cost applied
-///                                   at this pick
-/// ── PredictorConfig snapshot, q_running U-shape + capacity + decode (cols 41-45) ──
-///   41: q_running_penalty_peak_ms
-///   42: q_running_penalty_peak_qr
-///   43: q_running_penalty_falloff_qr
-///   44: inflight_concurrent_capacity
-///   45: forward_pass_ms             coefficient for decode_contention_ms
-/// ── PickerConfig snapshot, replication (cols 46-48) ──
-///   46: replication_threshold_pct
-///   47: replication_warm_target
-///   48: replication_warm_threshold_fraction
-/// ── Per-request annotation (col 49) ──
-///   49: replication_fired           (true/false) whether the picker
-///                                   swapped to a cold-idle worker
-///                                   for cache replication
-/// ── Provenance (cols 50-51) ──
-///   50: workerset                   which worker set served this pick
-///   51: profile                     which profile's coefficients
-///                                   produced the prediction in cols 5-12
-pub fn format_csv_row(
-    record: &PendingObservation,
-    observed_ms: u32,
-    residual_ms: f32,
-    status: i32,
-) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let w = &record.chosen_worker;
-    let p = &record.prediction;
-    let name = w.name.replace(',', ";");
-    let endpoint = w.endpoint.replace(',', ";");
-    let upstream_error = "";
-    let inflight_overlap_str = record
-        .inflight_overlap_blocks
-        .iter()
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join(";");
-
-    let pred = &record.predictor_cfg;
-    let pkr = &record.picker_cfg;
-    let x_request_id = record
-        .external_request_id
-        .as_deref()
-        .map(|s| s.replace(',', ";"))
-        .unwrap_or_default();
-    format!(
-        "{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.1},{},{},{},{},{},{},{:.3},{:.3},{},{},{},\
-         {:.1},{:.1},{},{:.3},\
-         {:.1},{:.1},{:.1},{:.3},{:.3},{:.6},\
-         {},{:.3},{},{:.1},\
-         {},{:.1},{:.1},\
-         {:.1},{},{},{},{:.3},\
-         {:.3},{},{:.3},\
-         {},\
-         {},{}",
-        unix_ms,
-        name,
-        endpoint,
-        status,
-        upstream_error,
-        p.total_ms(),
-        p.base_ms,
-        p.q_ms,
-        p.q_rate_ms_per_entry,
-        p.prefill_ms,
-        p.cache_ms,
-        observed_ms,
-        residual_ms,
-        w.matched_blocks,
-        w.total_blocks,
-        w.queue_waiting,
-        record.q_inflight,
-        w.queue_running,
-        w.queue_swapped,
-        w.kv_cache_usage,
-        w.completion_rate_per_sec,
-        record.kv_blocks,
-        record.inflight_workload_blocks,
-        record.request_id,
-        record.q_ms_constant,
-        record.q_ms_workload,
-        inflight_overlap_str,
-        record.expected_overlap_alpha,
-        // PredictorConfig snapshot (cols 28-33).
-        pred.queue_ms_per_entry,
-        pred.cache_pressure_penalty_ms,
-        pred.saturated_cold_ms_per_entry,
-        pred.cache_pressure_saturated_threshold,
-        pred.attention_uncached_block_ms,
-        pred.attention_uncached_per_every_block_ms,
-        // PickerConfig snapshot (cols 34-37).
-        pkr.top_k_min,
-        pkr.top_k_fraction,
-        pkr.inflight_tracking,
-        pkr.tie_tolerance_ms,
-        // Per-request annotations (cols 38-40).
-        x_request_id,
-        p.q_running_ms,
-        p.decode_contention_ms,
-        // PredictorConfig: q_running U-shape + capacity + decode-contention (cols 41-45).
-        pred.q_running_penalty_peak_ms,
-        pred.q_running_penalty_peak_qr,
-        pred.q_running_penalty_falloff_qr,
-        pred.inflight_concurrent_capacity,
-        pred.forward_pass_ms,
-        // PickerConfig: replication (cols 46-48).
-        pkr.replication_threshold_pct,
-        pkr.replication_warm_target,
-        pkr.replication_warm_threshold_fraction,
-        // Per-request annotation (col 49).
-        record.replication_fired,
-        // Provenance (cols 50-51).
-        record.workerset.replace(',', ";"),
-        record.profile.replace(',', ";"),
-    )
-}
-
-/// Predicted-vs-observed CSV sink for picks.
-///
-/// Fed by [`Observations::finalize`], behind the `ReportFirstToken` RPC.
-/// Rows are formatted by [`format_csv_row`].
-///
-/// Behavior:
-/// - No path → sink is disabled, `append_line` is a no-op.
-/// - Path given, file opens → append-mode `BufWriter` under a
-///   `Mutex` for concurrent streams.
-/// - Fresh file (didn't exist OR was empty) → header row is written
-///   exactly once before the first observation row.
-/// - Path given, open fails → warn log, sink stays disabled.
-/// - Every row is flushed.
-pub struct ObservationSink {
-    inner: Option<Mutex<BufWriter<std::fs::File>>>,
-    /// Whether the last write failed, so a failing sink logs once.
-    failing: AtomicBool,
-}
-
-impl ObservationSink {
-    /// Open the sink at `path` (`KINFERENCE_OBSERVATIONS_CSV`, read once at
-    /// startup by `Config::load`); see the type docs for the cases.
-    pub(crate) fn open(path: Option<PathBuf>) -> Self {
-        let Some(path) = path else {
-            return Self::with(None);
-        };
-        match OpenOptions::new().create(true).append(true).open(&path) {
-            Ok(f) => {
-                // Checked after the open, not before, to avoid a TOCTOU
-                // race.
-                let is_empty = f.metadata().map(|m| m.len() == 0).unwrap_or(false);
-                let mut writer = BufWriter::new(f);
-                // Best-effort: on failure, keep recording data rows.
-                if is_empty
-                    && let Err(e) = writer
-                        .write_all(CSV_HEADER.as_bytes())
-                        .and_then(|_| writer.write_all(b"\n"))
-                        .and_then(|_| writer.flush())
-                {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = &e as &dyn StdError,
-                        "failed to write the observation CSV header"
-                    );
-                }
-                tracing::info!(
-                    path = %path.display(),
-                    appending = !is_empty,
-                    "observation sink enabled"
-                );
-                Self::with(Some(Mutex::new(writer)))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = &e as &dyn StdError,
-                    "failed to open the observation sink"
-                );
-                Self::with(None)
-            }
-        }
-    }
-
-    fn with(inner: Option<Mutex<BufWriter<std::fs::File>>>) -> Self {
-        Self {
-            inner,
-            failing: AtomicBool::new(false),
-        }
-    }
-
-    /// Append one CSV row followed by `\n`. No-op when disabled; errors are
-    /// logged and otherwise ignored.
-    pub fn append_line(&self, line: &str) {
-        let Some(mu) = self.inner.as_ref() else {
-            return;
-        };
-        // A panic mid-write leaves at most one partial row.
-        let mut w = mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let res = w
-            .write_all(line.as_bytes())
-            .and_then(|_| w.write_all(b"\n"))
-            .and_then(|_| w.flush());
-        match res {
-            Ok(()) => {
-                if self.failing.load(Ordering::Relaxed) {
-                    self.failing.store(false, Ordering::Relaxed);
-                }
-            }
-            Err(e) => {
-                if !self.failing.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(error = &e as &dyn StdError, "observation sink write failed");
-                }
-            }
-        }
-    }
-}
-
 /// The service's part for what a pick leaves behind: the pending stash, the
-/// request labels, the CSV sink, and what callers report about providers.
+/// request labels, and what callers report about providers.
 ///
 /// kinference never talks to a provider; the caller does, and reports back
 /// over the feedback RPCs. `record_provider_pick` writes the labels the
 /// report handlers read back.
 pub(crate) struct Observations {
-    /// Inserted by `pick_and_record`, consumed by [`Self::finalize`] (CSV
-    /// row) or [`Self::abort`], and TTL-swept.
+    /// Inserted by `pick_and_record`, consumed by [`Self::finalize`] or
+    /// [`Self::abort`], and TTL-swept.
     pub(crate) pending: PendingObservations,
     /// Per-request metric labels (model + qos), keyed by `response_id`.
     /// Inserted at pick; taken at `ReportFinalToken` to label the token and
     /// ITL metrics, when the `PendingObservation` is already gone. TTL-swept.
     pub(crate) labels: RequestLabels,
-    sink: ObservationSink,
     /// What the caller has reported back about off-cluster destinations.
     /// Shared with the status writer, which publishes it. Always present,
     /// even with policy disabled, so the feedback handlers needn't check.
@@ -634,14 +333,12 @@ impl Observations {
     /// Both maps sweep at `ttl`.
     pub(crate) fn new(
         ttl: Duration,
-        sink: ObservationSink,
         provider_health: Arc<kinference_policy::provider_health::ProviderHealthStore>,
         prom: Arc<RouterMetrics>,
     ) -> Self {
         Self {
             pending: PendingObservations::new(ttl),
             labels: RequestLabels::new(ttl),
-            sink,
             provider_health,
             prom,
         }
@@ -819,7 +516,7 @@ impl Observations {
     }
 
     /// Close an observation: release the pick's inflight state and, for a
-    /// streaming request, write the CSV row. Called from `ReportFirstToken()`
+    /// streaming request, log the observation event. Called from `ReportFirstToken()`
     /// with the caller's observed TTFT.
     ///
     /// Returns `false`, changing nothing, when `request_id` is unknown (swept,
@@ -837,7 +534,7 @@ impl Observations {
         release_inflight_state(&record);
 
         // For non-streaming responses `observed_ttft_ms` is the full response
-        // time, not TTFT, so skip the CSV row and residual log.
+        // time, not TTFT, so skip the observation event.
         if !record.streaming {
             return true;
         }
@@ -852,30 +549,14 @@ impl Observations {
 
         let predicted_ms = record.prediction.total_ms();
         let residual_ms = observed_ttft_ms as f32 - predicted_ms;
-        tracing::debug!(
-            req = record.external_request_id.as_deref().unwrap_or("-"),
-            response_id = record.request_id,
-            endpoint = %record.chosen_worker.endpoint,
-            predicted_ms,
-            observed_ms = observed_ttft_ms,
-            residual_ms,
-            status = upstream_status,
-            "first token observed"
-        );
-
-        self.sink.append_line(&format_csv_row(
-            &record,
-            observed_ttft_ms,
-            residual_ms,
-            upstream_status,
-        ));
+        log_observation(&record, observed_ttft_ms, residual_ms, upstream_status);
         true
     }
 
-    /// Drop a `PendingObservation` without writing a CSV row.
+    /// Drop a `PendingObservation` without logging an observation event.
     ///
     /// For a request that died before its first token: release the inflight
-    /// state, but write no row. Returns `true` if a record was found.
+    /// state, but log no event. Returns `true` if a record was found.
     pub(crate) fn abort(&self, request_id: u64) -> bool {
         let Some(record) = self.pending.take(request_id) else {
             return false;
@@ -909,6 +590,98 @@ pub(crate) struct FinalTokenReport {
     pub cached_tokens: Option<u32>,
     pub itl_bucket_layout: u32,
     pub itl_bucket_counts: Vec<u32>,
+}
+
+/// The tracing target of the predicted-versus-observed event, one per
+/// streaming observation. Enable it with `kinference::observation=debug`.
+const OBSERVATION_TARGET: &str = "kinference::observation";
+
+/// Emit the predicted-versus-observed event for `record`, the input for
+/// refitting the predictor. The event includes the profile's coefficients, so
+/// each event is self-contained.
+fn log_observation(
+    record: &PendingObservation,
+    observed_ms: u32,
+    residual_ms: f32,
+    upstream_status: i32,
+) {
+    let w = &record.chosen_worker;
+    let p = &record.prediction;
+    let pred = &record.predictor_cfg;
+    let pkr = &record.picker_cfg;
+    tracing::debug!(
+        target: OBSERVATION_TARGET,
+        response_id = record.request_id,
+        req = record.external_request_id.as_deref(),
+        model = record.model.as_str(),
+        workerset = record.workerset.as_str(),
+        profile = record.profile.as_str(),
+        worker = w.name.as_str(),
+        endpoint = w.endpoint.as_str(),
+        upstream_status,
+        predicted_ms = p.total_ms(),
+        observed_ms,
+        residual_ms,
+        base_ms = p.base_ms,
+        q_ms = p.q_ms,
+        q_rate_ms_per_entry = p.q_rate_ms_per_entry,
+        prefill_ms = p.prefill_ms,
+        cache_ms = p.cache_ms,
+        q_running_ms = p.q_running_ms,
+        decode_contention_ms = p.decode_contention_ms,
+        overlap_blocks = w.matched_blocks,
+        total_blocks = w.total_blocks,
+        kv_blocks = record.kv_blocks,
+        q_waiting = w.queue_waiting,
+        q_inflight = record.q_inflight,
+        q_running = w.queue_running,
+        q_swapped = w.queue_swapped,
+        kv_cache_usage = w.kv_cache_usage,
+        compl_per_s = w.completion_rate_per_sec,
+        q_workload = record.inflight_workload_blocks,
+        q_ms_constant = record.q_ms_constant,
+        q_ms_workload = record.q_ms_workload,
+        inflight_dispatches = record.inflight_overlap_blocks.len(),
+        inflight_overlap_blocks = %JsonList(&record.inflight_overlap_blocks),
+        expected_overlap_alpha = record.expected_overlap_alpha,
+        replication_fired = record.replication_fired,
+        queue_ms_per_entry = pred.queue_ms_per_entry,
+        cache_pressure_penalty_ms = pred.cache_pressure_penalty_ms,
+        saturated_cold_ms_per_entry = pred.saturated_cold_ms_per_entry,
+        cache_pressure_saturated_threshold = pred.cache_pressure_saturated_threshold,
+        attention_uncached_block_ms = pred.attention_uncached_block_ms,
+        attention_uncached_per_every_block_ms = pred.attention_uncached_per_every_block_ms,
+        q_running_penalty_peak_ms = pred.q_running_penalty_peak_ms,
+        q_running_penalty_peak_qr = pred.q_running_penalty_peak_qr,
+        q_running_penalty_falloff_qr = pred.q_running_penalty_falloff_qr,
+        inflight_concurrent_capacity = pred.inflight_concurrent_capacity,
+        forward_pass_ms = pred.forward_pass_ms,
+        top_k_min = pkr.top_k_min,
+        top_k_fraction = pkr.top_k_fraction,
+        inflight_tracking = pkr.inflight_tracking,
+        tie_tolerance_ms = pkr.tie_tolerance_ms,
+        replication_threshold_pct = pkr.replication_threshold_pct,
+        replication_warm_target = pkr.replication_warm_target,
+        replication_warm_threshold_fraction = pkr.replication_warm_threshold_fraction,
+        "first token observed"
+    );
+}
+
+/// Formats a list as a compact JSON array, such as `[5,3]`. A `tracing` field
+/// can't hold an array, so a JSON log line holds the array as a string.
+struct JsonList<'a>(&'a [u32]);
+
+impl std::fmt::Display for JsonList<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[")?;
+        for (i, n) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{n}")?;
+        }
+        f.write_str("]")
+    }
 }
 
 /// Release the inflight counter and inflight-prefix entry a pick reserved

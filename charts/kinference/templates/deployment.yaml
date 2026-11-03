@@ -49,6 +49,8 @@ spec:
             # another module and stays visible: set kvBlockSize to the engine's.
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
+            - name: KINFERENCE_LOG_FORMAT
+              value: {{ .Values.logFormat | quote }}
             {{- if .Values.enableReplay }}
             # Checked for presence, not value, so it is omitted when disabled.
             - name: KINFERENCE_ENABLE_REPLAY
@@ -66,10 +68,6 @@ spec:
                   name: {{ .Values.hfTokenSecret }}
                   key: HUGGING_FACE_HUB_TOKEN
             {{- end }}
-            {{- if .Values.observationsCsv }}
-            - name: KINFERENCE_OBSERVATIONS_CSV
-              value: {{ .Values.observationsCsv | quote }}
-            {{- end }}
           ports:
             - name: admin
               containerPort: {{ .Values.service.adminPort }}
@@ -81,10 +79,6 @@ spec:
             - name: config
               mountPath: /etc/kinference
               readOnly: true
-            {{- if .Values.observationsCsv }}
-            - name: latency-csv
-              mountPath: {{ dir .Values.observationsCsv }}
-            {{- end }}
             {{- if or .Values.tokenizers.existingClaim .Values.tokenizers.configMap }}
             - name: tokenizers
               mountPath: /etc/tokenizers
@@ -112,11 +106,6 @@ spec:
         - name: config
           configMap:
             name: {{ include "kinference.fullname" . }}-config
-        {{- if .Values.observationsCsv }}
-        # Lost on restart; swap to a PVC for durable rows.
-        - name: latency-csv
-          emptyDir: {}
-        {{- end }}
         {{- if .Values.tokenizers.existingClaim }}
         - name: tokenizers
           persistentVolumeClaim:
