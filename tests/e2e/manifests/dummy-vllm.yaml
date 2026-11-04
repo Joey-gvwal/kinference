@@ -80,9 +80,9 @@ spec:
             - --enforce-eager
             - --max-model-len=4096
             - --max-num-seqs=8
-            # On CPU this is the fraction of available memory to reserve;
-            # the 0.92 default fails where other containers hold memory.
-            - --gpu-memory-utilization=0.3
+            # On CPU this is the fraction of the memory limit for weights plus
+            # KV cache; the 0.92 default fails where other containers hold memory.
+            - --gpu-memory-utilization=0.5
             # Kubelet substitutes $(POD_IP) and $(POD_PORT).
             - >-
               --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","topic":"kv@$(POD_IP):$(POD_PORT)@HuggingFaceTB/SmolLM2-135M-Instruct"}
