@@ -23,7 +23,7 @@ Kinference is designed to be paired with a proxy. For example, it pairs with the
 ## Quick start
 
 See [the Kinference getting started
-guide](https://kinference.ai/getting-started/).
+guide](https://kinference.ai/docs/getting-started/).
 
 ## Community
 
@@ -44,13 +44,13 @@ discussions](https://github.com/Kinference-AI/kinference/discussions)!
 Kinference primarily uses Kubernetes Custom Resource Definitions (CRDs) for
 configuration. The CRD schemas are in
 [charts/kinference-crds](charts/kinference-crds/templates). See [the Kinference
-CRD reference docs](https://kinference.ai/reference/crds/) for documentation.
+CRD reference docs](https://kinference.ai/docs/reference/crds/) for documentation.
 
 ## kinfctl
 
 This repo includes a `kinfctl` CLI tool. This CLI is designed to make it easy
 for you (or your agents) to validate policies before sending them to the server.
-See [the Kinference kinfctl reference](https://kinference.ai/reference/kinfctl/)
+See [the Kinference kinfctl reference](https://kinference.ai/docs/reference/kinfctl/)
 for more.
 
 To build the CLI from source, run `just install-cli`.
