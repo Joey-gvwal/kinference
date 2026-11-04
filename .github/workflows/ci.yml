@@ -62,7 +62,7 @@ jobs:
           kubectl describe pods -l mm/server-name=dummy-vllm || true
           kubectl get inferenceworkersets,inferencepools -A -o yaml || true
           kubectl logs deployment/kinference --tail=200 || true
-          kubectl logs deployment/dummy-vllm --tail=50 || true
+          kubectl logs deployment/dummy-vllm --tail=200 || true
           kind export logs /tmp/kind-logs --name kinference-smoke || true
       - name: Upload kind logs
         if: failure()
