@@ -48,8 +48,11 @@ Every commit needs a `Signed-off-by` trailer with your name and email.
 The trailer states that you wrote the change or have the right to submit
 it under the project's license, as the
 [Developer Certificate of Origin](https://developercertificate.org)
-describes. `git commit -s` adds the trailer. A check on each pull request
-rejects commits without one.
+describes. A check on each pull request rejects commits without one.
+
+Run `just setup` once per clone. It points git at the repository's
+`.githooks` directory, whose `prepare-commit-msg` hook adds the trailer
+to every commit. Without the hook, `git commit -s` adds it.
 
 ## Pull requests
 

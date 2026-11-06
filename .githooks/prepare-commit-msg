@@ -1,0 +1,8 @@
+#!/bin/sh
+# Adds the Signed-off-by trailer that the DCO check requires, unless the
+# message already carries one for this committer.
+name=$(git config user.name)
+email=$(git config user.email)
+[ -n "$name" ] && [ -n "$email" ] || exit 0
+git interpret-trailers --in-place --if-exists addIfDifferent \
+  --trailer "Signed-off-by: $name <$email>" "$1"

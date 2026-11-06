@@ -173,8 +173,9 @@ PRs are merged with a merge commit, not squashed, so each commit lands on
 - One request covers every commit that it needs. Don't stop before each
   commit to ask again, and don't make a commit that the request does
   not need.
-- Make every commit with `git commit -s`, so that it carries the
-  `Signed-off-by` trailer that the DCO check requires.
+- Run `just setup` once per clone. It installs the hook that adds the
+  `Signed-off-by` trailer that the DCO check requires. Without the hook,
+  make every commit with `git commit -s`.
 - Never amend or rebase a commit that is already pushed, and never
   force-push, unless the request asks for it. A fix after a push goes in a new
   commit, or in a fixup commit that the user folds in before merging.

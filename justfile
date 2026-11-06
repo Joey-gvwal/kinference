@@ -11,6 +11,11 @@ default: list
 list:
     @just --list
 
+# point git at .githooks, whose prepare-commit-msg hook signs off every commit
+[group('setup')]
+setup:
+    git config core.hooksPath .githooks
+
 [group('check')]
 check-fmt:
     cargo fmt --all -- --check
