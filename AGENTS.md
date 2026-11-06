@@ -150,6 +150,13 @@ should grow with events, not with traffic.
   error's sources too. The alias avoids a clash with each crate's own
   `Error` type.
 
+## Issues
+
+- `gh issue create` skips the issue forms. Before filing, read the form
+  under `.github/ISSUE_TEMPLATE` that matches, and write the body with one
+  section per field, in the form's order, headed by the field's label.
+  Apply the form's labels with `--label`.
+
 ## Commits and pull requests
 
 CONTRIBUTING.md holds every rule for commits, the sign-off, a branch's

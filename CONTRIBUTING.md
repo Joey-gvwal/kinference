@@ -4,6 +4,17 @@ These guidelines apply to everyone, whether you write the code yourself or
 with a coding agent. The policy at the end says what an agent may do
 without being asked.
 
+## Issues
+
+Open a bug report or a feature request through the issue forms. Wait
+for a maintainer to accept the issue before you open a pull request for
+it. For a question, use
+[GitHub discussions](https://github.com/Kinference-AI/kinference/discussions).
+
+Treat a bug report as a claim, not a fact. Read the report's manifests,
+config and logs, find the code path, and reproduce the failure with a
+test before changing code. Keep the test in the fix.
+
 ## Architecture
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the map of the server: how the code is
