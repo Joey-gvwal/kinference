@@ -1,8 +1,8 @@
 # Contributing
 
 These guidelines apply to everyone, whether you write the code yourself or
-with a coding agent. Agents get the same rules, in more detail, from
-[AGENTS.md](AGENTS.md).
+with a coding agent. The policy at the end says what an agent may do
+without being asked.
 
 ## Architecture
 
@@ -30,7 +30,10 @@ same change.
 ## Commits
 
 Maintainers merge PRs with a merge commit rather than squashing them, so
-your commits land on `main` as you wrote them.
+your commits land on `main` as you wrote them. The PR title and
+description become the merge commit message. A commit message and a PR
+description therefore have different readers, and the section "Pull
+requests" below says what goes in each.
 
 - Make each commit one logical change: the feature or fix, its tests, docs
   and unrelated small fixes go in separate commits when they make sense on
@@ -38,9 +41,20 @@ your commits land on `main` as you wrote them.
 - Every commit must build and pass tests, so `git bisect` keeps working.
 - Each message explains what that commit changes and why. Use an imperative
   subject line under ~72 characters and wrap the body at 72.
-- Address review feedback with `git commit --fixup <sha>`, then run
-  `git rebase -i --autosquash` before merging. The final branch shouldn't
-  contain "address review" or "fix typo" commits.
+- Write the message for someone who reaches the commit from `git blame`
+  or `git bisect` and has never seen the PR. Explain the change at the
+  level of the code: what was wrong or missing, what the commit does about
+  it, and why that way.
+- A branch's history goes through three phases:
+  1. Until the first review, shape the branch as the change needs:
+     amend, rebase and force-push it.
+  2. Once a reviewer has commented, don't rewrite history until the
+     review is done. Address review feedback with
+     `git commit --fixup <sha>` or with new commits. Each fixup shows
+     the reviewer one change on its own.
+  3. Before the merge, fold the fixups with `git rebase -i --autosquash`
+     and force-push once. The final branch holds no "address review" or
+     "fix typo" commits.
 
 ## Sign your commits
 
@@ -56,15 +70,72 @@ to every commit. Without the hook, `git commit -s` adds it.
 
 ## Pull requests
 
-The PR title and description become the merge commit message, so write them
-for someone reading `git log`, not just for reviewers:
+The PR title and description become the merge commit message. Write them
+for someone reading `git log --first-parent main`, who sees one entry per
+PR and does not open the commits. `git revert -m 1` reverts a PR as a
+unit, so the merge commit is the record of what the PR delivered.
 
-- Title: a short summary of the whole change.
-- Description: the overall why and what, and anything that spans commits.
-  Don't repeat each commit's message.
-- Leave out checklists and review chatter.
+- Title: the whole change, in the imperative, under ~72 characters.
+- Description: five labeled parts, in this order. Each label stands on
+  its own line as plain text, followed by one or more paragraphs.
+  1. `Problem`: what is wrong or missing today, and why it matters. Start
+     from the symptom, not from the code.
+  2. `Solution`: what is different once the PR is merged, as a reader of
+     `main` sees it. For several commits, the overall shape. For one
+     commit, a sentence or two that does not repeat the commit body.
+  3. `Operator-visible changes`: config fields, environment variables,
+     chart values, CRD fields, proto messages, metric names, and what an
+     operator has to do about them.
+  4. `Validation`: what you ran beyond CI, against what, and what you saw.
+  5. `Issues`: `Closes #N` for each issue the PR closes, and work that the
+     PR leaves out.
+- A part that does not apply keeps its label and says in one sentence
+  why: "None. The change touches only Rust internals." The sentence
+  tells the reader that you checked.
+- Don't repeat the commits' messages. The commits hold the code-level
+  reasoning. A PR with one commit still gets a merge commit, and its
+  description is a shorter summary of that commit, not a copy.
+- Leave out markdown headings, bold, checklists and review chatter. The
+  description is a commit message, and markdown means nothing in
+  `git log`.
 
-To see one entry per merged PR, use `git log --first-parent main`.
+An example:
+
+```
+Replace the observations CSV sink with structured tracing events
+
+Problem
+
+The router wrote each predicted-versus-observed row to a CSV file on an
+emptyDir. A pod restart lost the file, and getting the rows out needed
+kubectl cp. When the sink was on, every row took a mutex and flushed the
+file from the gRPC handler.
+
+Solution
+
+The router now logs each streaming observation as a debug event under
+the kinference::observation target, with the CSV's values as named
+fields. The rows go through the cluster's log pipeline, and the event
+costs almost nothing while its target is off.
+
+Operator-visible changes
+
+The CSV sink, its config field observations_csv, its environment
+variable and the chart's observationsCsv value, volume and mount are
+gone. A new KINFERENCE_LOG_FORMAT=json option, set by the chart's
+logFormat value, lets a pipeline parse the fields. An operator who
+collected the CSV switches to the jq recipe in docs/local-development.md.
+
+Validation
+
+Ran the smoke test on kind with logFormat=json and
+logLevel=kinference::observation=debug, sent twenty streaming requests
+and read twenty events back with jq.
+
+Issues
+
+Closes #104.
+```
 
 ### End-to-end tests
 
@@ -89,6 +160,9 @@ submission thoroughly and be able to explain it.
 whether or not the contributor used generative AI or LLMs to create it.
 - A tool-assisted submission must still follow all the contribution
 guidelines above.
+- The contributor decides each git action. An agent commits, pushes or
+opens a pull request only as far as the contributor's request asks, and
+runs no destructive git command unprompted.
 
 ### Attribution and Co-Author Guidelines ###
 

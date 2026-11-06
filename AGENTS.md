@@ -152,57 +152,7 @@ should grow with events, not with traffic.
 
 ## Commits and pull requests
 
-PRs are merged with a merge commit, not squashed, so each commit lands on
-`main` as written and the PR description becomes the merge commit message.
-
-### Git safety
-
-- Commit, push and open a pull request only when the request asks for
-  it, and only as far as it asks. The request is the user's message, or
-  the brief that started an unattended run.
-  - A request for an answer, a review, a plan or a discussion asks for
-    no git action. Leave the working tree and the branch as they are.
-    A question such as "can we codify this?" is a request for an
-    answer, not for a commit.
-  - A request for a change asks for commits on the current branch, and
-    for nothing beyond them.
-  - A request for a pull request asks for the commits, one push of the
-    branch and the opening of the pull request.
-  - A request to fix an open pull request asks for new commits and a
-    push to that pull request's branch.
-- One request covers every commit that it needs. Don't stop before each
-  commit to ask again, and don't make a commit that the request does
-  not need.
-- Run `just setup` once per clone. It installs the hook that adds the
-  `Signed-off-by` trailer that the DCO check requires. Without the hook,
-  make every commit with `git commit -s`.
-- Never amend or rebase a commit that is already pushed, and never
-  force-push, unless the request asks for it. A fix after a push goes in a new
-  commit, or in a fixup commit that the user folds in before merging.
-- Never run a destructive git command, such as `git reset --hard`,
-  `git clean` or a branch deletion, unless the request asks for it.
-- Add no attribution for the agent: no `Co-Authored-By` trailer naming a
-  model and no "Generated with" line. The human who submits the change is
-  accountable for it.
-
-### Commits
-
-- One logical change per commit: the feature or fix, its tests, docs and
-  unrelated small fixes go in separate commits when they make sense on their
-  own.
-- Every commit builds and passes tests, so `git bisect` works.
-- The message says what the commit changes and why, for that commit only.
-  Subject line in the imperative, under ~72 characters; wrap the body at 72.
-- Address review feedback with `git commit --fixup <sha>` and fold it in with
-  `git rebase -i --autosquash` before merging. No "address review" or "fix
-  typo" commits on the final branch.
-
-### PR descriptions
-
-The description is the merge commit message, so write it for `git log`
-readers, not just reviewers:
-
-- Title: a short summary of the whole change.
-- Body: the overall why and what, and anything that spans commits. Don't
-  repeat each commit's message.
-- No checklists nor review chatter
+CONTRIBUTING.md holds every rule for commits, the sign-off, a branch's
+history and pull request descriptions, and says what an agent may do
+without being asked. Read it before you commit, push or open a pull
+request.
