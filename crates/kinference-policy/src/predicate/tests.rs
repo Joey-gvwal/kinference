@@ -89,6 +89,30 @@ fn contains_all_requires_every_element() {
 }
 
 #[test]
+fn empty_operand_arrays_are_rejected() {
+    for kind in [
+        AttrKind::Str,
+        AttrKind::Int,
+        AttrKind::Float,
+        AttrKind::Bool,
+        AttrKind::Duration,
+        AttrKind::StrList,
+    ] {
+        for raw in [json!([]), json!({"not": []}), json!({"not": {"not": []}})] {
+            let error = Matcher::compile(&raw, kind).unwrap_err();
+            assert!(error.contains("non-empty"), "{raw} ({kind:?}): {error}");
+        }
+    }
+    for raw in [
+        json!({"containsAll": []}),
+        json!({"not": {"containsAll": []}}),
+    ] {
+        let error = Matcher::compile(&raw, AttrKind::StrList).unwrap_err();
+        assert!(error.contains("non-empty"), "{raw}: {error}");
+    }
+}
+
+#[test]
 fn exists_is_the_only_form_that_matches_absence() {
     let present = compile_ok(json!({"exists": true}), AttrKind::Str);
     let absent = compile_ok(json!({"exists": false}), AttrKind::Str);

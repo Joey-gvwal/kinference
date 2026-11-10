@@ -280,7 +280,11 @@ impl Matcher {
                                 "`containsAll` applies only to list-valued attributes".to_string()
                             );
                         }
-                        strings(arg).map(Matcher::ContainsAll)
+                        let values = strings(arg)?;
+                        if values.is_empty() {
+                            return Err("`containsAll` takes a non-empty array".to_string());
+                        }
+                        Ok(Matcher::ContainsAll(values))
                     }
                     "greaterThan" | "lessThan" | "greaterThanOrEqual" | "lessThanOrEqual" => {
                         if !kind.is_numeric() {
@@ -304,6 +308,9 @@ impl Matcher {
             }
             // --- array: membership / intersection ----------------------------
             V::Array(items) => {
+                if items.is_empty() {
+                    return Err("expected a non-empty operand array".to_string());
+                }
                 let mut vals = Vec::with_capacity(items.len());
                 for i in items {
                     vals.push(scalar(i, kind, notes)?);

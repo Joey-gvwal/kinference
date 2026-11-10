@@ -569,3 +569,36 @@ fn check_help_carries_examples_and_exit_statuses() {
         "{help}"
     );
 }
+
+#[test]
+fn empty_operand_arrays_produce_located_errors_and_a_failure_exit() {
+    let manifest = r#"apiVersion: kinference.buoyant.io/v1alpha1
+kind: InferencePolicy
+metadata: {name: empty-operands, namespace: default}
+spec:
+  rules:
+  - name: empty-operands
+    matches: [{tenant: []}]
+    route:
+      exclude:
+      - name: empty-exclusion
+        if: {model: {not: []}}
+        drop: {model: {name: {containsAll: []}}}
+      select: [{type: Local, minimize: PredictedTTFT}]
+"#;
+    let output = kinfctl_with_stdin(&["check", "-o", "json", "-"], manifest);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    let errors = report["policies"][0]["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 3, "{report}");
+    for path in [
+        "spec.rules[0].matches[0].tenant",
+        "spec.rules[0].route.exclude[0].if.model",
+        "spec.rules[0].route.exclude[0].drop.model.name",
+    ] {
+        let error = errors.iter().find(|error| error["path"] == path).unwrap();
+        assert_eq!(error["code"], "InvalidTerm");
+        assert!(error["message"].as_str().unwrap().contains("non-empty"));
+    }
+}

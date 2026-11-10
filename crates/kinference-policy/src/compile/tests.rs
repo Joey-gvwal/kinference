@@ -363,6 +363,47 @@ fn bad_predicate_inside_a_rule_fails_closed_and_is_located() {
     );
 }
 
+#[test]
+fn empty_operand_arrays_are_located_and_fail_closed_in_every_scope() {
+    let compiled = policy(json!({
+        "rules": [{"name": "empty-operands", "matches": [{"tenant": []}],
+            "route": {
+                "exclude": [{"name": "empty-exclusion",
+                    "if": {"model": {"not": []}},
+                    "drop": {"model": {"name": {"containsAll": []}}}}],
+                "select": [{"type": "Local", "minimize": "PredictedTTFT"}]
+            }}]
+    }));
+    let expected_paths = [
+        "spec.rules[0].matches[0].tenant",
+        "spec.rules[0].route.exclude[0].if.model",
+        "spec.rules[0].route.exclude[0].drop.model.name",
+    ];
+    assert_eq!(compiled.warnings.len(), expected_paths.len());
+    for path in expected_paths {
+        let warning = compiled
+            .warnings
+            .iter()
+            .find(|warning| warning.path == path)
+            .unwrap();
+        assert_eq!(warning.code, WarningCode::InvalidTerm);
+        assert!(warning.message.contains("non-empty"), "{warning}");
+    }
+    let request = RequestAttrs {
+        tenant: "acme".into(),
+        model: vec!["model-a".into()],
+        ..Default::default()
+    };
+    let rule = &compiled.rules[0];
+    assert!(!rule.matches(&request));
+    let exclusion = &rule.route.exclude[0];
+    assert!(!exclusion.if_.as_ref().unwrap().matches(&request));
+    assert!(!exclusion.drop.matches(&crate::predicate::CandidateAttrs {
+        model_names: vec!["model-a".into()],
+        ..Default::default()
+    }));
+}
+
 /// A quoted number in a `drop` fails closed, so the drop removes nothing
 /// rather than every local candidate.
 #[test]
