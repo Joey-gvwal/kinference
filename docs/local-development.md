@@ -124,6 +124,15 @@ which are the inputs that an `InferencePolicy` is written against.
 `kinfctl check` reads the same resources from the cluster to check a
 policy draft; `kinfctl check --help` shows the invocation.
 
+To compare offline validation with Kubernetes admission, install the CRD
+chart in a test cluster and run the shared policy fixtures. The comparison
+uses server-side dry-run and creates no policy objects. It requires `jq`.
+
+```sh
+cargo build -p kinfctl
+KUBECONFIG=/path/to/test-kubeconfig bash tests/e2e/policy-admission.sh
+```
+
 ## Iterate
 
 A code change means a new image, which you load into the cluster, and a

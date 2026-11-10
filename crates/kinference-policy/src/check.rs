@@ -26,6 +26,8 @@ use kube::ResourceExt;
 use serde::Serialize;
 use serde_json::Value;
 
+mod admission;
+
 use super::crd::{
     BackendType, InferencePolicy, InferencePolicySpec, InferencePool, InferenceProvider,
     InferenceWorkerSet, ReferenceGrant,
@@ -575,11 +577,16 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
             continue;
         }
         seen.insert(key, doc.source.clone());
-        let spec_value = doc.value.get("spec").cloned().unwrap_or(Value::Null);
+        let mut spec_value = doc.value.get("spec").cloned().unwrap_or(Value::Null);
+        admission::normalize(&mut spec_value, "spec");
         let mut unknown = Vec::new();
         unknown_fields(&spec_value, "spec", "spec", &mut unknown);
         match serde_path_to_error::deserialize::<_, InferencePolicySpec>(&spec_value) {
-            Ok(spec) => parsed.push(Some(spec)),
+            Ok(spec) => {
+                let errors = admission::validate(&spec_value);
+                parsed.push(errors.is_empty().then_some(spec));
+                report.errors.extend(errors);
+            }
             Err(e) => {
                 let at = e.path().to_string();
                 report.errors.push(Finding {

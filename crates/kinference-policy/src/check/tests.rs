@@ -15,6 +15,36 @@ fn opts() -> Options {
     }
 }
 
+#[test]
+fn admission_fixtures_match_kubernetes_constraints() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("admission-fixtures.json")).unwrap();
+    let mut failures = Vec::new();
+    for fixture in fixtures {
+        let manifest = serde_json::json!({
+            "apiVersion": "kinference.buoyant.io/v1alpha1",
+            "kind": "InferencePolicy",
+            "metadata": {"name": fixture["name"]},
+            "spec": fixture["spec"],
+        });
+        let report = check(&[input("fixture.json", &manifest.to_string())], &opts()).unwrap();
+        let accepted = fixture["accepted"].as_bool().unwrap();
+        if report.ok != accepted
+            || !accepted
+                && !report.policies[0]
+                    .errors
+                    .iter()
+                    .any(|error| error.code == SCHEMA_ERROR)
+        {
+            failures.push(format!(
+                "{}: expected {accepted}, got {report:?}",
+                fixture["name"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 // The demo fleet: one pool over three local worker sets and one provider, and
 // the policies written against it. These are the manifests several tests
 // share; one only a single test needs is written inline in that test.
@@ -615,7 +645,7 @@ fn models_and_labels_need_the_destinations_manifests() {
              metadata: {name: draft}\nspec:\n  rules:\n  - name: r\n    \
              matches: [{model: gemma-4-12b}]\n    route:\n      \
              consider: [{backends: {selector: {matchLabels: {gpu: h100}}}}]\n      \
-             select: [{minimize: PredictedTTFT}]\n",
+             select: [{type: Local, minimize: PredictedTTFT}]\n",
         )
     };
     let codes = |r: &Report| -> Vec<&'static str> {
@@ -804,7 +834,7 @@ fn a_long_comment_block_does_not_stop_the_parse() {
     let text = format!(
         "apiVersion: kinference.buoyant.io/v1alpha1\nkind: InferencePolicy\n\
          metadata: {{name: p}}\nspec:\n  rules:\n{comments}  - name: r\n    route:\n      \
-         select: [{{minimize: PredictedTTFT}}]\n"
+         select: [{{type: Local, minimize: PredictedTTFT}}]\n"
     );
     let r = check(&[input("p.yaml", &text)], &opts()).expect("parses despite the comments");
     assert_eq!(r.policies.len(), 1);

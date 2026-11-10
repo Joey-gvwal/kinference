@@ -569,3 +569,28 @@ fn check_help_carries_examples_and_exit_statuses() {
         "{help}"
     );
 }
+
+#[test]
+fn admission_fixtures_have_the_expected_cli_exit_status() {
+    let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../kinference-policy/src/check/admission-fixtures.json"
+    ))
+    .unwrap();
+    for fixture in fixtures {
+        let manifest = serde_json::json!({
+            "apiVersion": "kinference.buoyant.io/v1alpha1",
+            "kind": "InferencePolicy",
+            "metadata": {"name": fixture["name"]},
+            "spec": fixture["spec"],
+        });
+        let output = kinfctl_with_stdin(&["check", "-o", "json", "-"], &manifest.to_string());
+        let accepted = fixture["accepted"].as_bool().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(if accepted { 0 } else { 1 }),
+            "{}: {}",
+            fixture["name"],
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
