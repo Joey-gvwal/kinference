@@ -387,6 +387,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
         models: index,
         pool_id,
         pool_name,
+        cancel,
         ..
     } = ctx;
     let Some(http_url) = cfg.http_url.clone() else {
@@ -407,8 +408,16 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                 return;
             }
         };
-        match fetch_models(&client, &http_url).await {
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            response = fetch_models(&client, &http_url) => response,
+        };
+        match response {
             Ok((models, detected_engine)) => {
+                if cancel.is_cancelled() {
+                    return;
+                }
                 let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
                 let engine_str = detected_engine
                     .map(|e| e.to_string())
@@ -428,7 +437,6 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                             ?added,
                             "worker serves models new to its worker set"
                         );
-                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::workers::ServedModelsVerdict::Narrowed { missing } => {
                         tracing::info!(
@@ -436,12 +444,10 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                             ?missing,
                             "worker lacks models that its worker set serves"
                         );
-                        index.associate(pool_id, &pool_name, &names);
                     }
                     crate::workers::ServedModelsVerdict::Accepted
-                    | crate::workers::ServedModelsVerdict::Empty => {
-                        index.associate(pool_id, &pool_name, &names);
-                    }
+                    | crate::workers::ServedModelsVerdict::Empty => {}
+                    crate::workers::ServedModelsVerdict::Unregistered => return,
                     crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
                         let _ = eviction_tx.send(crate::eviction::EvictionRequest {
                             worker_id_num: cfg.worker_id_num,
@@ -453,12 +459,18 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                         return;
                     }
                 }
-                if let Some(eng) = detected_engine {
-                    workers.set_engine(cfg.worker_id_num, eng);
-                }
-                samples
-                    .models_by_worker
-                    .insert(cfg.worker_id_num, ModelsInfo { models });
+                let _ = workers.while_registered(cfg.worker_id_num, |entry| {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    index.associate(pool_id, &pool_name, &names);
+                    if let Some(engine) = detected_engine {
+                        entry.engine = Some(engine);
+                    }
+                    samples
+                        .models_by_worker
+                        .insert(cfg.worker_id_num, ModelsInfo { models });
+                });
             }
             Err(err) => {
                 tracing::debug!(
@@ -481,6 +493,7 @@ pub fn spawn_metrics_poller(
     models_refresh_secs: u64,
 ) {
     let WorkerContext {
+        mut spec_updates,
         cfg,
         registry: workers,
         eviction_tx,
@@ -527,9 +540,6 @@ pub fn spawn_metrics_poller(
         // which aggregates across models).
         let mut current_model_name: String = cfg.model_name.clone();
 
-        // /v1/models refresh cadence in poll ticks: on the first tick and
-        // every N after.
-        let refresh_every: u64 = ((models_refresh_secs * 1000) / poll_ms).max(1);
         let mut n: u64 = 0;
         // Whether the current run of failures has been logged; reset on
         // success, so a failure after a recovery warns again.
@@ -552,11 +562,30 @@ pub fn spawn_metrics_poller(
 
             // /v1/models refresh, if http_url is set, every N ticks. Bounded by
             // the client timeout.
+            let config_changed = spec_updates.has_changed().unwrap_or(false);
+            let (periodic_models, refresh_secs) = {
+                let spec = spec_updates.borrow_and_update();
+                (
+                    spec.static_models.is_none(),
+                    spec.models_refresh_secs.unwrap_or(models_refresh_secs),
+                )
+            };
+            let refresh_every = ((u128::from(refresh_secs) * 1000) / u128::from(poll_ms.max(1)))
+                .clamp(1, u128::from(u64::MAX)) as u64;
             if let Some(http_url) = cfg.http_url.as_deref()
-                && n.is_multiple_of(refresh_every)
+                && (n == 0
+                    || periodic_models && (config_changed || n.is_multiple_of(refresh_every)))
             {
-                match fetch_models(&client, http_url).await {
+                let response = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    response = fetch_models(&client, http_url) => response,
+                };
+                match response {
                     Ok((models, detected_engine)) => {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
                         // Index the served models so requests route here.
                         let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
                         match workers.set_served_models(cfg.worker_id_num, &names) {
@@ -567,7 +596,6 @@ pub fn spawn_metrics_poller(
                                     ?added,
                                     "worker serves models new to its worker set"
                                 );
-                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::workers::ServedModelsVerdict::Narrowed { missing } => {
                                 tracing::info!(
@@ -575,12 +603,10 @@ pub fn spawn_metrics_poller(
                                     ?missing,
                                     "worker lacks models that its worker set serves"
                                 );
-                                index.associate(pool_id, &pool_name, &names);
                             }
                             crate::workers::ServedModelsVerdict::Accepted
-                            | crate::workers::ServedModelsVerdict::Empty => {
-                                index.associate(pool_id, &pool_name, &names);
-                            }
+                            | crate::workers::ServedModelsVerdict::Empty => {}
+                            crate::workers::ServedModelsVerdict::Unregistered => return,
                             crate::workers::ServedModelsVerdict::Mismatch {
                                 expected,
                                 observed,
@@ -595,9 +621,6 @@ pub fn spawn_metrics_poller(
                                 return;
                             }
                         }
-                        if let Some(eng) = detected_engine {
-                            workers.set_engine(cfg.worker_id_num, eng);
-                        }
                         // Single model: filter by its name. Otherwise no
                         // filter.
                         current_model_name = if names.len() == 1 {
@@ -605,9 +628,18 @@ pub fn spawn_metrics_poller(
                         } else {
                             String::new()
                         };
-                        samples
-                            .models_by_worker
-                            .insert(cfg.worker_id_num, ModelsInfo { models });
+                        let _ = workers.while_registered(cfg.worker_id_num, |entry| {
+                            if cancel.is_cancelled() {
+                                return;
+                            }
+                            index.associate(pool_id, &pool_name, &names);
+                            if let Some(engine) = detected_engine {
+                                entry.engine = Some(engine);
+                            }
+                            samples
+                                .models_by_worker
+                                .insert(cfg.worker_id_num, ModelsInfo { models });
+                        });
                         warned_about_models = false;
                     }
                     Err(err) => {
@@ -625,7 +657,10 @@ pub fn spawn_metrics_poller(
             }
             n = n.wrapping_add(1);
 
-            match scrape_once(
+            let response = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                response = scrape_once(
                 &client,
                 &metrics_url,
                 &ALL_NAMES,
@@ -634,38 +669,44 @@ pub fn spawn_metrics_poller(
                 first_scrape,
                 &mut warned_about_label,
             )
-            .await
-            {
+                => response,
+            };
+            match response {
                 Ok(mut sample) => {
-                    first_scrape = false;
-                    // Record this scrape and read back the windowed values.
-                    if let Some(now) = sample.scraped_at {
-                        let (qm, km) = samples.record_and_compute_means(
-                            cfg.worker_id_num,
-                            now,
-                            sample.waiting,
-                            sample.kv_cache_usage,
-                        );
-                        sample.waiting_mean = qm;
-                        sample.kv_cache_usage_mean = km;
-                        sample.completion_rate_per_sec = samples.record_and_compute_rate(
-                            cfg.worker_id_num,
-                            now,
-                            sample.completions_total,
-                        );
-                        // The vLLM counter pair, when present, takes
-                        // precedence over a gauge value, since it uses our
-                        // window.
-                        if sample.prefix_cache_queries_total > 0 {
-                            sample.prefix_cache_hit_rate = samples.record_and_compute_hit_rate(
+                    let _ = workers.while_registered(cfg.worker_id_num, |_entry| {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        first_scrape = false;
+                        // Record this scrape and read back the windowed values.
+                        if let Some(now) = sample.scraped_at {
+                            let (qm, km) = samples.record_and_compute_means(
                                 cfg.worker_id_num,
                                 now,
-                                sample.prefix_cache_hits_total,
-                                sample.prefix_cache_queries_total,
+                                sample.waiting,
+                                sample.kv_cache_usage,
                             );
+                            sample.waiting_mean = qm;
+                            sample.kv_cache_usage_mean = km;
+                            sample.completion_rate_per_sec = samples.record_and_compute_rate(
+                                cfg.worker_id_num,
+                                now,
+                                sample.completions_total,
+                            );
+                            // The vLLM counter pair, when present, takes
+                            // precedence over a gauge value, since it uses our
+                            // window.
+                            if sample.prefix_cache_queries_total > 0 {
+                                sample.prefix_cache_hit_rate = samples.record_and_compute_hit_rate(
+                                    cfg.worker_id_num,
+                                    now,
+                                    sample.prefix_cache_hits_total,
+                                    sample.prefix_cache_queries_total,
+                                );
+                            }
                         }
-                    }
-                    samples.by_worker.insert(cfg.worker_id_num, sample);
+                        samples.by_worker.insert(cfg.worker_id_num, sample);
+                    });
                     warned_about_scrape = false;
                 }
                 Err(err) => {

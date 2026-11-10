@@ -41,6 +41,77 @@ fn harness() -> Harness {
     }
 }
 
+#[derive(Default)]
+struct ScrapeCounts {
+    models: std::sync::atomic::AtomicUsize,
+    metrics: std::sync::atomic::AtomicUsize,
+}
+
+async fn wait_for_count(counter: &std::sync::atomic::AtomicUsize, target: usize) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while counter.load(std::sync::atomic::Ordering::SeqCst) < target {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("expected HTTP request count");
+}
+
+#[tokio::test]
+async fn existing_pollers_follow_static_and_dynamic_model_config_changes() {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let counts = Arc::new(ScrapeCounts::default());
+    let server_counts = counts.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let length = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = if request.contains("/v1/models") {
+                server_counts.models.fetch_add(1, Ordering::SeqCst);
+                r#"{"data":[{"id":"m","owned_by":"vllm"}]}"#
+            } else {
+                server_counts.metrics.fetch_add(1, Ordering::SeqCst);
+                "vllm:num_requests_waiting 3\n"
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    let mut harness = harness();
+    let settings = &mut Arc::get_mut(&mut harness.coordinator).unwrap().settings;
+    settings.poll_ms = 10;
+    settings.models_refresh_secs = 0;
+    let pool = pool_with_declared_models("refresh", &["m"]);
+    let mut spec = test_spec("refresh", 16);
+    spec.static_models = Some(vec!["m".into()]);
+    let mut config = worker(42, "m");
+    config.http_url = Some(url.clone());
+    config.metrics_url = Some(format!("{url}/metrics"));
+    harness.coordinator.add_worker(&pool, config);
+    wait_for_count(&counts.models, 2).await;
+    wait_for_count(&counts.metrics, 2).await;
+    assert_eq!(counts.models.load(Ordering::SeqCst), 2);
+    spec.static_models = None;
+    let _ = pool.with_spec(&spec);
+    wait_for_count(&counts.models, 3).await;
+    spec.static_models = Some(vec!["m".into()]);
+    let _ = pool.with_spec(&spec);
+    wait_for_count(&counts.metrics, counts.metrics.load(Ordering::SeqCst) + 2).await;
+    let model_count = counts.models.load(Ordering::SeqCst);
+    wait_for_count(&counts.metrics, counts.metrics.load(Ordering::SeqCst) + 3).await;
+    assert_eq!(counts.models.load(Ordering::SeqCst), model_count);
+    pool.cancel.cancel();
+    server.abort();
+}
+
 /// No endpoints, so the per-worker tasks return before any I/O.
 fn worker(num: u64, hint: &str) -> WorkerConfig {
     WorkerConfig {

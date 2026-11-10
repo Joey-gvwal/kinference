@@ -18,14 +18,19 @@ pub enum ServedModelsVerdict {
     /// This worker reports a superset of canonical: it gained models. Canonical
     /// has been widened to match and `by_model` updated. A LoRA adapter being
     /// loaded, or an engine finishing a lazy load.
-    Widened { added: Vec<String> },
+    Widened {
+        added: Vec<String>,
+    },
     /// This worker reports a subset of canonical: it is missing some. Canonical
     /// is left alone and `by_model` reflects only what this worker actually
     /// serves, so nothing routes to it for the missing models. An adapter not
     /// loaded here yet, mid-rollout, or unloaded.
-    Narrowed { missing: Vec<String> },
+    Narrowed {
+        missing: Vec<String>,
+    },
     /// `new_models` was empty: the engine isn't ready yet. Nothing was updated.
     Empty,
+    Unregistered,
     /// `new_models` conflicts with canonical: each has something the other
     /// lacks, so this is a different fleet. `by_model` was not updated; the
     /// caller should evict.
@@ -216,7 +221,7 @@ impl WorkerRegistry {
     ) -> ServedModelsVerdict {
         let Some(mut entry_ref) = self.by_num.get_mut(&worker_id_num) else {
             // Unregistered between scrape and update.
-            return ServedModelsVerdict::Empty;
+            return ServedModelsVerdict::Unregistered;
         };
 
         // The engine hasn't loaded its models yet.
@@ -388,6 +393,15 @@ impl WorkerRegistry {
     /// caller doesn't hold a DashMap guard across awaits.
     pub fn lookup(&self, worker_id_num: u64) -> Option<WorkerEntry> {
         self.by_num.get(&worker_id_num).map(|e| e.value().clone())
+    }
+
+    pub(crate) fn while_registered<Result>(
+        &self,
+        worker_id_num: u64,
+        publish: impl FnOnce(&mut WorkerEntry) -> Result,
+    ) -> Option<Result> {
+        let mut entry = self.by_num.get_mut(&worker_id_num)?;
+        Some(publish(entry.value_mut()))
     }
 
     /// Does any worker serve `model_name`?

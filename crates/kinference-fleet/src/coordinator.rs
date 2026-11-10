@@ -229,6 +229,7 @@ impl Coordinator {
                     ServedModelsVerdict::Accepted | ServedModelsVerdict::Empty => {
                         self.models.associate(pool.id, &pool.name, declared);
                     }
+                    ServedModelsVerdict::Unregistered => return,
                     ServedModelsVerdict::Mismatch { expected, observed } => {
                         // As above, but not routable: skip the worker rather
                         // than half-register it.
@@ -248,6 +249,7 @@ impl Coordinator {
         }
 
         let ctx = WorkerContext {
+            spec_updates: pool.spec_updates.subscribe(),
             cfg: w,
             endpoint_key,
             pool_id: pool.id,
@@ -265,19 +267,11 @@ impl Coordinator {
         // The metrics poller and warmup update model routing after a
         // /v1/models scrape.
         ingest::spawn_worker_listener(ctx.clone(), self.settings.ingest);
-        // With a declared model list, push the models refresh out of the
-        // way; the poller still scrapes load metrics.
-        let refresh_secs = if pool.static_models.is_some() {
-            u64::MAX / 2000
-        } else {
-            pool.models_refresh_secs
-                .unwrap_or(self.settings.models_refresh_secs)
-        };
         spawn_metrics_poller(
             ctx.clone(),
             self.metrics.clone(),
             self.settings.poll_ms,
-            refresh_secs,
+            self.settings.models_refresh_secs,
         );
 
         // An immediate /v1/models scrape, so the worker is routable without

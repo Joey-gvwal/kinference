@@ -181,6 +181,7 @@ pub struct Pool {
     pub picker: PickerConfig,
     /// This pool's worker set + `by_model` index + homogeneity guard.
     pub registry: Arc<WorkerRegistry>,
+    pub(crate) spec_updates: tokio::sync::watch::Sender<PoolSpec>,
     /// This pool's KV radix-tree index, built with `block_size`.
     pub indexer: Arc<KvIndexer>,
     /// Dispatched-but-not-yet-stored prefix tracker for this pool.
@@ -245,6 +246,7 @@ impl Pool {
             tokenize_render_url: spec.render_url.clone(),
             models_refresh_secs: spec.models_refresh_secs,
             static_models: spec.static_models.clone(),
+            spec_updates: tokio::sync::watch::channel(spec.clone()).0,
         }
     }
 
@@ -252,7 +254,8 @@ impl Pool {
     ///
     /// Keeps the same `PoolId`, `KvIndexer` (and so its warm prefix cache),
     /// worker registry, inflight trackers and token; only the tuning values
-    /// change. Readers holding the old snapshot finish against the old values.
+    /// change. Routing readers finish against the old values; running
+    /// scrapers follow the updated spec.
     ///
     /// `block_size` is baked into the `KvIndexer`, so changing it requires
     /// retire-and-create instead (debug-asserted).
@@ -261,6 +264,13 @@ impl Pool {
             self.block_size, spec.kv_block_size,
             "block_size is baked into the KvIndexer; a change needs retire + create"
         );
+        self.spec_updates.send_if_modified(|previous| {
+            if previous == spec {
+                return false;
+            }
+            *previous = spec.clone();
+            true
+        });
         Self {
             id: self.id,
             key: spec.key.clone(),
@@ -273,6 +283,7 @@ impl Pool {
             tokenize_render_url: spec.render_url.clone(),
             models_refresh_secs: spec.models_refresh_secs,
             static_models: spec.static_models.clone(),
+            spec_updates: self.spec_updates.clone(),
             // Shared, so the update keeps all live state.
             registry: self.registry.clone(),
             indexer: self.indexer.clone(),
@@ -293,6 +304,7 @@ impl Pool {
 /// may outlive retirement by a few seconds.
 #[derive(Clone)]
 pub struct WorkerContext {
+    pub spec_updates: tokio::sync::watch::Receiver<PoolSpec>,
     pub cfg: WorkerConfig,
     /// The worker's `score_addr`, the key the pick path and the ingest
     /// listener share for inflight prefixes.

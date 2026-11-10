@@ -1,5 +1,14 @@
 use super::*;
 
+#[test]
+fn an_unregistered_model_update_is_not_an_accepted_empty_model_set() {
+    let registry = WorkerRegistry::new();
+    assert_ne!(
+        registry.set_served_models(42, &["late-model".into()]),
+        ServedModelsVerdict::Empty
+    );
+}
+
 fn entry(num: u64, block_size: u32, model: &str) -> WorkerEntry {
     WorkerEntry {
         worker_id_str: format!("w-{num}"),
