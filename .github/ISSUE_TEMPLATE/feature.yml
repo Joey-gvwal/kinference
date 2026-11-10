@@ -1,0 +1,32 @@
+name: Feature request
+description: Something that Kinference should do and does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What someone is trying to do, and what stops them.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: Today
+      description: How Kinference behaves now, and the workaround if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What Kinference would do differently, as an operator or a gateway would see it. Alternatives and open questions go here, each in its own paragraph.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done
+      description: What an operator or a gateway can observe once the change ships.
+    validations:
+      required: true

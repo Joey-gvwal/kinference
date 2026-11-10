@@ -1,0 +1,40 @@
+name: Bug report
+description: Kinference does something other than what the docs say it does.
+labels: [bug]
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened
+      description: The request, the pick, the status or the log line that was wrong, as the operator or the gateway saw it.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The manifests, the requests and the steps, or the failing test. Paste the chart values and the debug-level logs when a cluster was involved.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The image tag, or the main commit that you read.
+    validations:
+      required: true
+  - type: textarea
+    id: cause
+    attributes:
+      label: Where in the code
+      description: The code path that produces the symptom, when you found it. Keep a guess marked as a guess.
+  - type: textarea
+    id: fix
+    attributes:
+      label: Possible fix

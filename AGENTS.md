@@ -150,29 +150,16 @@ should grow with events, not with traffic.
   error's sources too. The alias avoids a clash with each crate's own
   `Error` type.
 
+## Issues
+
+- `gh issue create` skips the issue forms. Before filing, read the form
+  under `.github/ISSUE_TEMPLATE` that matches, and write the body with one
+  section per field, in the form's order, headed by the field's label.
+  Apply the form's labels with `--label`.
+
 ## Commits and pull requests
 
-PRs are merged with a merge commit, not squashed, so each commit lands on
-`main` as written and the PR description becomes the merge commit message.
-
-### Commits
-
-- One logical change per commit: the feature or fix, its tests, docs and
-  unrelated small fixes go in separate commits when they make sense on their
-  own.
-- Every commit builds and passes tests, so `git bisect` works.
-- The message says what the commit changes and why, for that commit only.
-  Subject line in the imperative, under ~72 characters; wrap the body at 72.
-- Address review feedback with `git commit --fixup <sha>` and fold it in with
-  `git rebase -i --autosquash` before merging. No "address review" or "fix
-  typo" commits on the final branch.
-
-### PR descriptions
-
-The description is the merge commit message, so write it for `git log`
-readers, not just reviewers:
-
-- Title: a short summary of the whole change.
-- Body: the overall why and what, and anything that spans commits. Don't
-  repeat each commit's message.
-- No checklists nor review chatter
+CONTRIBUTING.md holds every rule for commits, the sign-off, a branch's
+history and pull request descriptions, and says what an agent may do
+without being asked. Read it before you commit, push or open a pull
+request.
